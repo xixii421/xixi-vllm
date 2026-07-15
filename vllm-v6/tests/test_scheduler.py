@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from src.engine.scheduler import Scheduler
-from src.memory.sequence import Sequence, SequenceStatus
+from src.runtime.scheduler import Scheduler
+from src.scheduling.sequence import Sequence, SequenceStatus
 from src.sampling_params import SamplingParams
 
 
@@ -92,7 +92,7 @@ class TestScheduler:
         assert s2 in sch.waiting
 
     def test_preempt_clears_mrope_state(self):
-        from src.memory.sequence import MultiModalFeature
+        from src.scheduling.sequence import MultiModalFeature
         import torch
 
         sch = _sched(num_blocks=16, block_size=16)

@@ -9,8 +9,8 @@ from dataclasses import dataclass
 import torch
 
 from src import Engine, EngineConfig, SamplingParams
-from src.memory import Sequence
-from src.utils import reset_context
+from src.scheduling import Sequence
+from src.context import reset_context
 
 from .config import BenchConfig
 from .timing import CudaTimer, sync

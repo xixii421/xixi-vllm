@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src.memory.kv_ops import store_kvcache
+from src.scheduling.kv_ops import store_kvcache
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

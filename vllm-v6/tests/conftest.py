@@ -1,11 +1,9 @@
-"""Pytest fixtures for vllm-v4."""
-
 from __future__ import annotations
 
 import pytest
 import torch
 
-from src.memory import Sequence
+from src.scheduling import Sequence
 from src.sampling_params import SamplingParams
 
 
@@ -27,3 +25,23 @@ def make_seq(
 ) -> Sequence:
     Sequence.block_size = block_size
     return Sequence(list(tokens), sp or SamplingParams(max_tokens=8))
+
+
+needs_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA required"
+)
+needs_2gpu = pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.device_count() < 2,
+    reason="needs >=2 GPUs",
+)
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    for item in items:
+        path = str(item.fspath).replace("\\", "/")
+        if "/tests/unit/" in path:
+            item.add_marker(pytest.mark.unit)
+        elif "/tests/gpu/" in path:
+            item.add_marker(pytest.mark.gpu)
+        elif "/tests/distributed/" in path:
+            item.add_marker(pytest.mark.distributed)

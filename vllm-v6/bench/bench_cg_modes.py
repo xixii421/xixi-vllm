@@ -120,7 +120,7 @@ def _avg(rows: list[dict], keys: list[str]) -> dict:
 
 def _make_engine(model: str, flags: dict, gpu_util: float):
     from src.config import EngineConfig
-    from src.engine.engine import Engine
+    from src.runtime.engine import Engine
 
     return Engine(
         EngineConfig(

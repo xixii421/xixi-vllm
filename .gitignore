@@ -1,4 +1,4 @@
-# Teaching mini-vLLM series repo (vllm-v0 … vllm-v6)
+# Teaching mini-vLLM series repo (vllm-v0 … vllm-v7)
 #
 # Strategy: ignore everything at the monorepo root, then explicitly
 # allow only the teaching version trees. Nested repos such as
@@ -24,6 +24,7 @@
 !/vllm-v4/
 !/vllm-v5/
 !/vllm-v6/
+!/vllm-v7/
 
 # --- never commit envs / caches / artifacts (any depth) ---
 # cover both real dirs and symlinks (e.g. vllm-v6/.venv -> v5)

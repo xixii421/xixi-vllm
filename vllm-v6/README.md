@@ -37,19 +37,39 @@ src/engine/executor.py    spawn tp×pp；Pipe RPC；driver = last PP & tp_rank0
 
 - `world_size == 1`：进程内 `ModelRunner`（仍 `initialize_model_parallel(1,1)`）
 - `world_size > 1`：`Executor` 拉起多进程；调度仍在主进程
-- 多模态（Qwen3-VL）：支持 TP/PP；ViT 只在 first-PP 的各 TP 上复制；语言模型分片
+- 多模态（Qwen3-VL）：支持 TP/PP；ViT 按 `mm_encoder_tp_mode` 切分：
+  - `data`（默认）：各 TP 保留完整 ViT，按 patch 负载切 batch，再 all-gather 图像嵌入
+  - `weights`：ViT 内部 Column/Row/QKV 权重并行
 - Decode CUDA Graph：按 PP stage 本地捕获（`--compile`）；PP 通信在图外
 
 ## 测试
 
 ```bash
-./.venv/bin/python -m pytest tests/test_parallel_math.py -q
-# 需要 ≥2 GPU：
-./.venv/bin/python -m pytest tests/test_tp_pp_e2e.py -q --tb=short
+export CUDA_DEVICE_ORDER=PCI_BUS_ID PYTHONPATH=.
+./.venv/bin/python -m pytest -m unit -q
+./.venv/bin/python -m pytest -m "unit or gpu" -q
+./.venv/bin/python -m pytest -m distributed -q --tb=short
 ```
+
+## 性能矩阵（TP/PP × CG，文本 / 多模态分开跑）
+
+```bash
+# 文本：single / TP=2 / PP=2 × eager / CG
+python bench/bench_parallel_matrix.py --domain text \
+  --model ~/huggingface/Qwen3-0.6B \
+  --modes single,tp2,pp2 --cg-modes eager,cg --device-ids 0,1
+
+# 多模态：同样矩阵；VL+PP 建议 first stage 放 4090（device-ids 1,0）
+python bench/bench_parallel_matrix.py --domain vl \
+  --model ~/huggingface/Qwen3-VL-2B-Instruct \
+  --modes single,tp2,pp2 --cg-modes eager,cg --device-ids 1,0
+```
+
+输出：`bench/results/parallel_{text|vl}.{json,md}`（TTFT / prefill / decode / e2e / VRAM）。
+
+详见 `tests/README.md` 与 `DESIGN.md`。
 
 ## 相对 v5 的不做项
 
 - 多机 / IB
-- ViT 张量并行（当前 ViT 在 first-PP 各 TP 上复制）
 - torchrun 启动（本版刻意用 spawn 教学）

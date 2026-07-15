@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.memory.block_manager import BlockManager
-from src.memory.sequence import Sequence
+from src.scheduling.block_manager import BlockManager
+from src.scheduling.sequence import Sequence
 from src.sampling_params import SamplingParams
 
 

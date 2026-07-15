@@ -44,7 +44,7 @@ def test_multi_image_single_request_matches_hf(model_path, cuda):
     from transformers import AutoProcessor, AutoModelForImageTextToText
 
     from src.config import EngineConfig
-    from src.engine.engine import Engine
+    from src.runtime.engine import Engine
 
     imgs = [_img((30, 80, 220)), _img((220, 40, 40))]
     prompt = "List the main color of each image in order. Answer briefly."
@@ -96,7 +96,7 @@ def test_multi_image_single_request_matches_hf(model_path, cuda):
     )
 
     from src.sampling_params import SamplingParams
-    from src.engine.model_inputs import build_model_inputs
+    from src.runtime.model_inputs import build_model_inputs
 
     peek = eng.add_request(prompt, SamplingParams(max_tokens=1, temperature=0.0), images=imgs)
     assert len(peek.mm_features) == 2
@@ -126,7 +126,7 @@ def test_concurrent_two_requests_match_hf(model_path, cuda):
     from transformers import AutoProcessor, AutoModelForImageTextToText
 
     from src.config import EngineConfig
-    from src.engine.engine import Engine
+    from src.runtime.engine import Engine
     from src.sampling_params import SamplingParams
 
     prompts = [
@@ -187,8 +187,8 @@ def test_concurrent_two_requests_match_hf(model_path, cuda):
 
 
 def test_truncate_left_remaps_mm_spans():
-    from src.engine.engine import Engine
-    from src.memory.sequence import MultiModalFeature
+    from src.runtime.engine import Engine
+    from src.scheduling.sequence import MultiModalFeature
     import torch
 
     mf0 = MultiModalFeature(

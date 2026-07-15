@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from src.engine.sampler import Sampler
+from src.runtime.sampler import Sampler
 
 
 class TestSampler:

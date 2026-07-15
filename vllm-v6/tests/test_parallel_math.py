@@ -5,8 +5,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from src.distributed.utils import get_pp_indices
-from src.layers.utils_parallel import divide, ensure_divisibility
+from src.distributed.pp import get_pp_indices
+from src.distributed.math import divide, ensure_divisibility
 
 
 def test_ensure_divisibility_ok():

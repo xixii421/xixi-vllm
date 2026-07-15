@@ -62,7 +62,7 @@ def bench_vit_encode(model_path: str, image: Image.Image, warmup: int, iters: in
     from src.config import EngineConfig
     from src.models.qwen3_vl import Qwen3VLForCausalLM
     from src.multimodal import MultiModalProcessor
-    from src.core.vit_cuda_graph import ViTCUDAGraphRunner
+    from src.cuda_graph.vit import ViTCUDAGraphRunner
 
     device = torch.device("cuda:0")
     cfg = EngineConfig(model=model_path, enforce_eager=True, gpu_memory_utilization=0.35)
@@ -142,7 +142,7 @@ def bench_vit_encode(model_path: str, image: Image.Image, warmup: int, iters: in
 def bench_ttft(model_path: str, image: Image.Image, warmup: int, iters: int) -> dict:
     """Time multimodal prefill+first sample token (EncoderCache disabled each iter)."""
     from src.config import EngineConfig
-    from src.engine.engine import Engine
+    from src.runtime.engine import Engine
     from src.sampling_params import SamplingParams
 
     prompt = "What colors are in this image? Answer briefly."

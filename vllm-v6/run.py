@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from src import Engine, EngineConfig, SamplingParams
-from src.models.hub import (
+from src.tools.hub import (
     DEFAULT_CACHE_DIR,
     QWEN3_REGISTRY,
     download_models,

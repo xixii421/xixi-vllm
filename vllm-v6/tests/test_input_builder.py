@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src.engine.input_builder import prepare_decode, prepare_prefill
-from src.memory.sequence import Sequence
+from src.runtime.input_builder import prepare_decode, prepare_prefill
+from src.scheduling.sequence import Sequence
 from src.sampling_params import SamplingParams
 
 

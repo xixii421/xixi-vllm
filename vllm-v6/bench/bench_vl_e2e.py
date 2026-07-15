@@ -95,7 +95,7 @@ def main() -> None:
     args = ap.parse_args()
 
     from src.config import EngineConfig
-    from src.engine.engine import Engine
+    from src.runtime.engine import Engine
 
     prompt = "What colors are in this image? Answer briefly."
     cases = {

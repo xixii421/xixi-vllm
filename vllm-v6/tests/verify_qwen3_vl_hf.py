@@ -50,12 +50,12 @@ def verify_one(model_path: str, image_size: int = 256, max_new: int = 16) -> dic
     from transformers import AutoProcessor, AutoModelForImageTextToText
 
     from src.config import EngineConfig
-    from src.engine.engine import Engine
-    from src.engine.model_inputs import build_model_inputs
+    from src.runtime.engine import Engine
+    from src.runtime.model_inputs import build_model_inputs
     from src.layers.attention import attention_context
     from src.layers.attention_backend import compute_paged_kv_metadata
     from src.sampling_params import SamplingParams
-    from src.utils.context import forward_context
+    from src.context import forward_context
 
     device = torch.device("cuda:0")
     prompt = "What colors are in this image? Answer briefly."

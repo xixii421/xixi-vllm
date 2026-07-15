@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.memory.sequence import Sequence, SequenceStatus, slot_of, slots_for_range
+from src.scheduling.sequence import Sequence, SequenceStatus, slot_of, slots_for_range
 from src.sampling_params import SamplingParams
 
 

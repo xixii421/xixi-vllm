@@ -44,7 +44,7 @@ def _run_mode(
     gpu_util: float = 0.85,
 ) -> dict:
     from src.config import EngineConfig
-    from src.engine.engine import Engine
+    from src.runtime.engine import Engine
     from src.sampling_params import SamplingParams
 
     ids = list(device_ids[: tp_size * pp_size])
