@@ -62,12 +62,14 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
 
-        self.num_embeddings_padded = pad_vocab_size(
-            self.num_embeddings, self.padding_size
-        )
+        padded = pad_vocab_size(self.num_embeddings, self.padding_size)
+        # Also divisible by tp_size so each shard has equal width.
+        if padded % self.tp_size != 0:
+            padded = pad_vocab_size(padded, self.tp_size)
+        self.num_embeddings_padded = padded
         self.embedding_dim = embedding_dim
 
-        # Divide the weight matrix along the vocaburaly dimension.
+        # Divide the weight matrix along the vocabulary dimension.
         self.num_embeddings_per_partition = divide(
             self.num_embeddings_padded, self.tp_size
         )
@@ -87,18 +89,22 @@ class VocabParallelEmbedding(torch.nn.Module):
         setattr(self.weight, "weight_loader", self.weight_loader)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
-        # Shard indexes for loading the weight
         start_idx = self.vocab_start_index
-        shard_size = self.vocab_end_index - start_idx
+        shard_size = self.num_embeddings_per_partition
 
         assert loaded_weight.shape[0] == self.num_embeddings, (
             f"{self.num_embeddings=} {loaded_weight.shape[0]=}"
         )
 
-        # Copy the data.
-        loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
-        param[: loaded_weight.shape[0]].data.copy_(loaded_weight)
-        param[loaded_weight.shape[0] :].data.fill_(0)
+        # Last partition(s) may include padding beyond real vocab.
+        if start_idx >= self.num_embeddings:
+            param.data.fill_(0)
+            return
+        copy_len = min(shard_size, self.num_embeddings - start_idx)
+        loaded = loaded_weight.narrow(0, start_idx, copy_len)
+        param[:copy_len].data.copy_(loaded)
+        if copy_len < shard_size:
+            param[copy_len:].data.fill_(0)
 
     def forward(self, x: torch.Tensor):
         if self.tp_size > 1:

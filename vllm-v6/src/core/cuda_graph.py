@@ -1,15 +1,29 @@
 from __future__ import annotations
 
 import gc
+from typing import Literal
 
 import torch
 from flashinfer import BatchDecodeWithPagedKVCacheWrapper
 
 from ..layers.attention import AttentionMetadata, attention_context
+from ..layers.utils_parallel import IntermediateTensors
 from ..utils.context import forward_context
+
+PPRole = Literal["full", "first", "middle", "last"]
 
 
 class CUDAGraphRunner:
+    """Decode CUDA Graph for a single PP stage (PP send/recv stay outside).
+
+    Roles
+    -----
+    full   : tp×pp with pp_size==1 (embed → hidden)
+    first  : first PP stage only (embed → IntermediateTensors)
+    middle : mid PP (IntermediateTensors → IntermediateTensors)
+    last   : last PP only (IntermediateTensors → hidden)
+    """
+
     def __init__(
         self,
         model,
@@ -26,6 +40,7 @@ class CUDAGraphRunner:
         kv_cache_pool: torch.Tensor,
         dummy_page_id: int,
         workspace_bytes: int = 256 * 1024 * 1024,
+        pp_role: PPRole = "full",
     ) -> None:
         self.model = model
         self.device = device
@@ -35,6 +50,8 @@ class CUDAGraphRunner:
         self.backend = backend
         self.kv_cache_pool = kv_cache_pool
         self.dummy_page_id = int(dummy_page_id)
+        self.pp_role: PPRole = pp_role
+        self.hidden_size = hidden_size
         self.bs_list = _make_bs_list(max_batch_size)
 
         max_blocks = (max_model_len + block_size - 1) // block_size
@@ -50,6 +67,15 @@ class CUDAGraphRunner:
             (max_batch_size,), -1, dtype=torch.int32, device=device
         )
         self.outputs = torch.zeros(max_batch_size, hidden_size, dtype=dtype, device=device)
+        self.residual_out = torch.zeros(
+            max_batch_size, hidden_size, dtype=dtype, device=device
+        )
+        self.hidden_in = torch.zeros(
+            max_batch_size, hidden_size, dtype=dtype, device=device
+        )
+        self.residual_in = torch.zeros(
+            max_batch_size, hidden_size, dtype=dtype, device=device
+        )
 
         self._cg_bufs: dict[int, dict[str, torch.Tensor]] = {
             bs: {
@@ -72,6 +98,45 @@ class CUDAGraphRunner:
         self._metas: dict[int, AttentionMetadata] = {}
         self._captured = False
         self._sm_scale = head_dim**-0.5
+
+    def _forward_once(self, bs: int):
+        role = self.pp_role
+        if role == "full":
+            return self.model(
+                input_ids=self.input_ids[:bs],
+                positions=self.positions[:bs],
+            )
+        if role == "first":
+            out = self.model(
+                input_ids=self.input_ids[:bs],
+                positions=self.positions[:bs],
+            )
+            assert isinstance(out, IntermediateTensors)
+            return out["hidden_states"], out["residual"]
+        inter = IntermediateTensors(
+            hidden_states=self.hidden_in[:bs],
+            residual=self.residual_in[:bs],
+        )
+        if role == "middle":
+            out = self.model(
+                positions=self.positions[:bs],
+                intermediate_tensors=inter,
+            )
+            assert isinstance(out, IntermediateTensors)
+            return out["hidden_states"], out["residual"]
+        # last
+        return self.model(
+            positions=self.positions[:bs],
+            intermediate_tensors=inter,
+        )
+
+    def _assign_outputs(self, bs: int, result) -> None:
+        if self.pp_role in ("full", "last"):
+            self.outputs[:bs] = result
+        else:
+            h, r = result
+            self.outputs[:bs] = h
+            self.residual_out[:bs] = r
 
     def capture(self) -> None:
         if self._captured:
@@ -98,15 +163,10 @@ class CUDAGraphRunner:
                 slot_mapping=self.slot_mapping[:bs],
             ):
                 with attention_context(meta):
-                    self.outputs[:bs] = self.model(
-                        input_ids=self.input_ids[:bs],
-                        positions=self.positions[:bs],
-                    )
+                    # Warmup outside the graph (NCCL / FlashInfer plan).
+                    self._assign_outputs(bs, self._forward_once(bs))
                     with torch.cuda.graph(graph, pool=graph_pool):
-                        self.outputs[:bs] = self.model(
-                            input_ids=self.input_ids[:bs],
-                            positions=self.positions[:bs],
-                        )
+                        self._assign_outputs(bs, self._forward_once(bs))
             if graph_pool is None:
                 graph_pool = graph.pool()
             self.graphs[bs] = graph
@@ -159,18 +219,27 @@ class CUDAGraphRunner:
 
     def replay(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         slot_mapping: torch.Tensor,
         *,
         seq_lens: list[int],
         block_tables: list[list[int]],
-    ) -> torch.Tensor:
-        bs = input_ids.shape[0]
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        bs = positions.shape[0] if positions.ndim == 1 else positions.shape[-1]
         assert bs == len(seq_lens) == len(block_tables)
         pbs = self._pad_bs(bs)
 
-        self.input_ids[:bs] = input_ids
+        if self.pp_role in ("full", "first"):
+            assert input_ids is not None
+            self.input_ids[:bs] = input_ids
+        if intermediate_tensors is not None and self.pp_role in ("middle", "last"):
+            self.hidden_in[:bs] = intermediate_tensors["hidden_states"]
+            self.residual_in[:bs] = intermediate_tensors["residual"]
+
+        # Decode CG uses 1D positions (VL applies rope_delta in input_builder).
+        assert positions.ndim == 1, "decode CUDA Graph expects 1D positions"
         self.positions[:bs] = positions
         self.slot_mapping.fill_(-1)
         self.slot_mapping[:bs] = slot_mapping
@@ -186,7 +255,12 @@ class CUDAGraphRunner:
             with attention_context(meta):
                 self.graphs[pbs].replay()
 
-        return self.outputs[:bs]
+        if self.pp_role in ("full", "last"):
+            return self.outputs[:bs]
+        return IntermediateTensors(
+            hidden_states=self.outputs[:bs].clone(),
+            residual=self.residual_out[:bs].clone(),
+        )
 
     def _replan_cg(
         self,

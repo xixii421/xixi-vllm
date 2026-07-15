@@ -43,13 +43,14 @@ calls `initialize_model_parallel(1,1)` so parallel layers behave as replicated
 
 ## Multimodal
 
-Qwen3-VL remains **world_size==1 only**. `EngineConfig` / Engine raise a clear error
-if `tp*pp > 1` and the model is multimodal.
+Qwen3-VL supports **TP and PP**. Vision tower is replicated on every first-PP TP
+rank; language weights are sharded. Mid/last PP ranks skip the ViT to save VRAM.
 
 ## CUDA Graph
 
-`pp_size > 1` forces `enforce_eager=True` (PP send/recv cannot sit inside a decode CG).
-
+Decode CUDA Graph captures **local stage compute** (`pp_role`: full / first /
+middle / last). PP send/recv stay outside the graph (Worker path). Prefer
+`--compile` (or `enforce_eager=False`) for both text and VL.
 ## Heterogeneous GPUs
 
 Rank `r` uses `device_ids[r]`. TP stays closer to bit-exact because every layer

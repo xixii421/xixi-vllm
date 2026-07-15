@@ -37,8 +37,8 @@ src/engine/executor.py    spawn tp×pp；Pipe RPC；driver = last PP & tp_rank0
 
 - `world_size == 1`：进程内 `ModelRunner`（仍 `initialize_model_parallel(1,1)`）
 - `world_size > 1`：`Executor` 拉起多进程；调度仍在主进程
-- 多模态（Qwen3-VL）：**仅 world_size==1**；否则抛错
-- `pp_size > 1`：自动 `enforce_eager=True`（关闭 decode CUDA Graph）
+- 多模态（Qwen3-VL）：支持 TP/PP；ViT 只在 first-PP 的各 TP 上复制；语言模型分片
+- Decode CUDA Graph：按 PP stage 本地捕获（`--compile`）；PP 通信在图外
 
 ## 测试
 
@@ -51,5 +51,5 @@ src/engine/executor.py    spawn tp×pp；Pipe RPC；driver = last PP & tp_rank0
 ## 相对 v5 的不做项
 
 - 多机 / IB
-- 多模态路径上的 TP/PP
+- ViT 张量并行（当前 ViT 在 first-PP 各 TP 上复制）
 - torchrun 启动（本版刻意用 spawn 教学）

@@ -219,7 +219,9 @@ class Qwen3Model(nn.Module):
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(positions, hidden_states, residual)
-            # DeepStack (VL): only first-PP stage owns early layers; inject if present.
+            # DeepStack (VL): HF injects features into LLM layers 0 .. n_ds-1
+            # (ViT `deepstack_visual_indexes` only picks which *vision* layers extract).
+            # Those early layers always live on the first PP stage when pp_size is small.
             local_i = i - self.start_layer if get_pp_group().is_first_rank else -1
             if get_pp_group().is_first_rank and local_i >= 0 and local_i < n_ds:
                 hidden_states = hidden_states + deepstack_input_embeds[local_i]

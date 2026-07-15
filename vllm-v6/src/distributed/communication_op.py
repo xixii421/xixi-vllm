@@ -67,9 +67,8 @@ def reduce_scatter(
         # Convert negative dim to positive.
         dim += input.dim()
 
-    # Note: This will produce an incorrect answer if we don't make
-    # the input_tensor contiguous. Possible bug in reduce_scatter_tensor?
-    input_tensor = input.movedim(0, dim).contiguous()
+    # Scatter along ``dim``: move it to front, reduce_scatter, move back.
+    input_tensor = input.movedim(dim, 0).contiguous()
 
     assert input_tensor.shape[0] % world_size == 0
     chunk_size = input_tensor.shape[0] // world_size
@@ -79,12 +78,10 @@ def reduce_scatter(
         output_shape, dtype=input_tensor.dtype, device=input_tensor.device
     )
 
-    # Perform reduce-scatter operation
     dist.reduce_scatter_tensor(
         output_tensor, input_tensor, group=group.device_group, op=op
     )
 
-    # Reshape before returning
     return output_tensor.movedim(0, dim).contiguous()
 
 

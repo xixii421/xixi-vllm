@@ -36,7 +36,7 @@ def run_inference(
     image: str | None = None,
     tp_size: int = 1,
     pp_size: int = 1,
-    nccl_port: int = 29500,
+    nccl_port: int = 0,
     device_ids: list[int] | None = None,
 ) -> None:
     model_path = _resolve_model_path(model)
@@ -86,7 +86,7 @@ def run_batch(
     enforce_eager: bool = False,
     tp_size: int = 1,
     pp_size: int = 1,
-    nccl_port: int = 29500,
+    nccl_port: int = 0,
     device_ids: list[int] | None = None,
 ) -> None:
     model_path = _resolve_model_path(model)
@@ -143,7 +143,7 @@ def main() -> None:
     parser.add_argument(
         "--eager",
         action="store_true",
-        help="force enforce_eager (required when pp_size>1)",
+        help="force enforce_eager (disable Decode CUDA Graph)",
     )
     parser.add_argument(
         "--batch",
@@ -152,7 +152,12 @@ def main() -> None:
     )
     parser.add_argument("--tp-size", type=int, default=1, help="tensor parallel size")
     parser.add_argument("--pp-size", type=int, default=1, help="pipeline parallel size")
-    parser.add_argument("--nccl-port", type=int, default=29500)
+    parser.add_argument(
+        "--nccl-port",
+        type=int,
+        default=0,
+        help="NCCL rendezvous TCP port; 0 = auto-pick a free port",
+    )
     parser.add_argument(
         "--device-ids",
         default=None,

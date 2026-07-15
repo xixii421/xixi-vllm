@@ -72,18 +72,36 @@ class EngineConfig:
         self.hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
         self.is_multimodal = _is_vl_config(self.hf_config)
 
-        if self.world_size > 1 and self.is_multimodal:
+        # Validate sharding divisibility on the *text* config (VL or dense).
+        text_cfg = getattr(self.hf_config, "text_config", self.hf_config)
+        n_heads = int(text_cfg.num_attention_heads)
+        n_kv = int(text_cfg.num_key_value_heads)
+        inter = int(text_cfg.intermediate_size)
+        if n_heads % self.tp_size != 0:
             raise ValueError(
-                "Multimodal (Qwen3-VL) is only supported for world_size==1 "
-                f"(got tp_size={self.tp_size}, pp_size={self.pp_size})."
+                f"num_attention_heads ({n_heads}) must be divisible by tp_size ({self.tp_size})"
+            )
+        if n_kv >= self.tp_size:
+            if n_kv % self.tp_size != 0:
+                raise ValueError(
+                    f"num_key_value_heads ({n_kv}) must be divisible by tp_size ({self.tp_size})"
+                )
+        elif self.tp_size % n_kv != 0:
+            raise ValueError(
+                f"tp_size ({self.tp_size}) must be divisible by num_key_value_heads ({n_kv})"
+            )
+        if inter % self.tp_size != 0:
+            raise ValueError(
+                f"intermediate_size ({inter}) must be divisible by tp_size ({self.tp_size})"
+            )
+        if self.pp_size > int(text_cfg.num_hidden_layers):
+            raise ValueError(
+                f"pp_size ({self.pp_size}) > num_hidden_layers ({text_cfg.num_hidden_layers})"
             )
 
-        # PP mid-stage send/recv is incompatible with decode CUDA Graph.
-        if self.pp_size > 1:
-            self.enforce_eager = True
+        # Decode CG captures *local* stage compute; PP send/recv stay outside the graph
+        # (see CUDAGraphRunner pp_role). Do not force eager when pp_size > 1.
 
-        # For VL, lengths / heads live on text_config.
-        text_cfg = getattr(self.hf_config, "text_config", self.hf_config)
         max_pos = getattr(text_cfg, "max_position_embeddings", self.context_len)
         self.context_len = min(self.context_len, max_pos)
 

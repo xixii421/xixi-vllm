@@ -37,15 +37,13 @@ class Engine:
 
         self.mm_processor = None
         if config.is_multimodal:
-            if config.world_size > 1:
-                raise ValueError(
-                    "Multimodal is only supported for world_size==1 "
-                    f"(tp={config.tp_size}, pp={config.pp_size})"
-                )
             from ..multimodal import MultiModalProcessor
 
             self.mm_processor = MultiModalProcessor(config.model)
-            print(f"Multimodal mode: Qwen3-VL processor loaded ({config.model})")
+            print(
+                f"Multimodal mode: Qwen3-VL processor loaded ({config.model}) "
+                f"tp={config.tp_size} pp={config.pp_size}"
+            )
 
         self.executor: Executor | None = None
         self.model_runner: ModelRunner | None = None

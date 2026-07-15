@@ -242,6 +242,16 @@ class ModelRunner:
     def _capture_cg(self) -> CUDAGraphRunner:
         max_bs = min(self.config.max_num_seqs, 256)
         dummy_page_id = self.kv_cache.shape[2] - 1
+        first = get_pp_group().is_first_rank
+        last = get_pp_group().is_last_rank
+        if first and last:
+            pp_role = "full"
+        elif first:
+            pp_role = "first"
+        elif last:
+            pp_role = "last"
+        else:
+            pp_role = "middle"
         runner = CUDAGraphRunner(
             model=self.model,
             max_batch_size=max_bs,
@@ -255,11 +265,13 @@ class ModelRunner:
             backend=self.backend,
             kv_cache_pool=self.kv_cache,
             dummy_page_id=dummy_page_id,
+            pp_role=pp_role,  # type: ignore[arg-type]
         )
         runner.capture()
         print(
             f"CUDA Graph captured for decode "
-            f"(max_bs={max_bs}, dummy_page={dummy_page_id})"
+            f"(max_bs={max_bs}, dummy_page={dummy_page_id}, pp_role={pp_role}, "
+            f"tp={self.tp_size})"
         )
         return runner
 
@@ -267,6 +279,11 @@ class ModelRunner:
         from ..core.vit_cuda_graph import ViTCUDAGraphRunner
 
         assert self.is_multimodal
+        if (
+            not get_pp_group().is_first_rank
+            or getattr(self.model, "vision_tower", None) is None
+        ):
+            return None
         cfg = self.model.get_vit_cg_config()
         cfg.min_budget = self.config.vit_cg_min_budget
         cfg.max_budget = self.config.vit_cg_max_budget
@@ -299,6 +316,7 @@ class ModelRunner:
             is_prefill
             and self.is_multimodal
             and any(s.has_multimodal for s in seqs)
+            and get_pp_group().is_first_rank
         ):
             inputs_embeds, deepstack, positions = self.model.encode_and_merge(
                 inputs.input_ids, seqs, self.device
@@ -333,21 +351,23 @@ class ModelRunner:
                 logits, temperatures, top_ps=top_ps, top_ks=top_ks, min_ps=min_ps
             ).tolist()
 
+        # Decode CG: 1D positions only (VL prefill may use 3D MRoPE positions).
         if (
             not is_prefill
             and self.cuda_graph_runner is not None
             and self.cuda_graph_runner.can_use(len(seqs))
             and positions.ndim == 1
-            and get_pp_group().is_last_rank
-            and get_pp_group().is_first_rank  # CG only for non-PP
         ):
             h = self.cuda_graph_runner.replay(
-                inputs.input_ids,
+                inputs.input_ids if get_pp_group().is_first_rank else None,
                 positions,
                 inputs.slot_mapping,
                 seq_lens=[len(s) for s in seqs],
                 block_tables=[list(s.block_table) for s in seqs],
+                intermediate_tensors=intermediate_tensors,
             )
+            if isinstance(h, IntermediateTensors):
+                return h
             logits = self._logits_for_sample(h, inputs)
             return _sample(logits)
 

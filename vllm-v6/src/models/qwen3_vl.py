@@ -1,24 +1,28 @@
-"""Qwen3-VL: Vision tower + MRoPE language model (single-GPU teaching path)."""
+"""Qwen3-VL: Vision tower + MRoPE LM with Megatron-style TP/PP."""
 
 from __future__ import annotations
 
 import glob
 import hashlib
 import os
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 from torch import nn
 from transformers import AutoConfig, Qwen3VLConfig
 
+from ..distributed import get_pp_group
 from ..layers import get_mrope
+from ..layers.utils_parallel import IntermediateTensors, PPMissingLayer, get_layer_id
+from ..layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from ..multimodal import EncoderCache, Qwen3VisionTower, mrope_positions
 from .loader import default_weight_loader, safetensors_weights_iterator
 from .qwen3 import (
     Qwen3Attention,
     Qwen3DecoderLayer,
-    Qwen3ForCausalLM,
+    Qwen3MLP,
     Qwen3Model,
+    make_layers,
 )
 
 
@@ -36,7 +40,7 @@ class Qwen3VLAttention(Qwen3Attention):
         rope_scaling: dict | None = None,
         layer_id: int = 0,
     ):
-        # Avoid allocating a full 262k text RoPE cache per layer (then throwing it away).
+        # Avoid allocating a huge text RoPE cache per layer before MRoPE replaces it.
         super().__init__(
             hidden_size=hidden_size,
             num_heads=num_heads,
@@ -63,7 +67,6 @@ class Qwen3VLDecoderLayer(Qwen3DecoderLayer):
     def __init__(self, config, layer_id: int = 0):
         nn.Module.__init__(self)
         from ..layers import RMSNorm
-        from .qwen3 import Qwen3MLP
 
         rope_scaling = getattr(config, "rope_scaling", None) or getattr(
             config, "rope_parameters", None
@@ -86,38 +89,71 @@ class Qwen3VLDecoderLayer(Qwen3DecoderLayer):
 
 
 class Qwen3VLModel(Qwen3Model):
+    """Language tower with TP linears + PP layer slicing (same contract as Qwen3Model)."""
+
     def __init__(self, config):
         nn.Module.__init__(self)
         from ..layers import RMSNorm
 
         self.config = config
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.start_layer = 0
-        self.end_layer = config.num_hidden_layers
-        self.layers = nn.ModuleList(
-            [Qwen3VLDecoderLayer(config, layer_id=i) for i in range(config.num_hidden_layers)]
+        self.vocab_size = config.vocab_size
+
+        if get_pp_group().is_first_rank:
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda _gid, local_id: Qwen3VLDecoderLayer(config, layer_id=local_id),
         )
-        # One MRoPE table shared across layers (HF also uses a single rotary module).
-        shared_rope = self.layers[0].self_attn.rotary_emb
-        for layer in self.layers[1:]:
-            layer.self_attn.rotary_emb = shared_rope
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        # One MRoPE table shared across this rank's real layers.
+        real = [self.layers[i] for i in range(self.start_layer, self.end_layer)]
+        if real:
+            shared_rope = real[0].self_attn.rotary_emb
+            for layer in real[1:]:
+                layer.self_attn.rotary_emb = shared_rope
+
+        if get_pp_group().is_last_rank:
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
 
 
 class Qwen3VLForCausalLM(nn.Module):
-    """Multimodal causal LM used by v5 Engine."""
+    """Multimodal causal LM with TP/PP on the language model.
+
+    Vision tower is **replicated** on every first-PP TP rank (teaching simplicity:
+    each TP rank encodes images identically; language weights stay sharded).
+    Mid/last PP ranks omit the ViT to save VRAM.
+    """
 
     def __init__(self, config: Qwen3VLConfig):
         super().__init__()
         self.config = config
         self._tcfg = config.text_config
-        self.vision_tower = Qwen3VisionTower(config.vision_config)
-        self.vl_model = Qwen3VLModel(self._tcfg)
-        self.lm_head = nn.Linear(self._tcfg.hidden_size, self._tcfg.vocab_size, bias=False)
-        self._tie = bool(getattr(self._tcfg, "tie_word_embeddings", False))
         self._ndps = len(getattr(config.vision_config, "deepstack_visual_indexes", []) or [])
         self._encoder_cache = EncoderCache(256)
-        self._vit_cg = None  # set by ModelRunner when enable_vit_cuda_graph
+        self._vit_cg = None
+        self._tie = bool(getattr(self._tcfg, "tie_word_embeddings", False))
+
+        if get_pp_group().is_first_rank:
+            self.vision_tower = Qwen3VisionTower(config.vision_config)
+        else:
+            self.vision_tower = None
+
+        self.vl_model = Qwen3VLModel(self._tcfg)
+
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(self._tcfg.vocab_size, self._tcfg.hidden_size)
+            if get_pp_group().is_first_rank and self._tie:
+                self.lm_head.weight = self.vl_model.embed_tokens.weight
+        else:
+            self.lm_head = PPMissingLayer()
 
     def forward(
         self,
@@ -126,7 +162,7 @@ class Qwen3VLForCausalLM(nn.Module):
         inputs_embeds=None,
         deepstack_input_embeds=None,
         intermediate_tensors=None,
-    ):
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         return self.vl_model(
             input_ids=input_ids,
             positions=positions,
@@ -139,19 +175,22 @@ class Qwen3VLForCausalLM(nn.Module):
         return self.lm_head(hidden_states)
 
     def load_weights(self, model_path: str, device: torch.device, dtype: torch.dtype) -> None:
-        # Vision weights
-        hf_sd: dict[str, torch.Tensor] = {}
-        for f in sorted(glob.glob(os.path.join(model_path, "model*.safetensors"))):
-            from safetensors import safe_open
+        if self.vision_tower is not None:
+            hf_sd: dict[str, torch.Tensor] = {}
+            for f in sorted(glob.glob(os.path.join(model_path, "model*.safetensors"))):
+                from safetensors import safe_open
 
-            with safe_open(f, framework="pt", device="cpu") as s:
-                hf_sd.update(
-                    {k: s.get_tensor(k) for k in s.keys() if k.startswith("model.visual.")}
-                )
-        vc = AutoConfig.from_pretrained(model_path, trust_remote_code=True).vision_config
-        self.vision_tower.load_weights(hf_sd, vc)
+                with safe_open(f, framework="pt", device="cpu") as s:
+                    hf_sd.update(
+                        {
+                            k: s.get_tensor(k)
+                            for k in s.keys()
+                            if k.startswith("model.visual.")
+                        }
+                    )
+            vc = AutoConfig.from_pretrained(model_path, trust_remote_code=True).vision_config
+            self.vision_tower.load_weights(hf_sd, vc)
 
-        # Language weights → vl_model.*
         params = dict(self.named_parameters())
         loaded: set[str] = set()
         stacked = [
@@ -161,16 +200,22 @@ class Qwen3VLForCausalLM(nn.Module):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
+        start_layer = self.vl_model.start_layer
+        end_layer = self.vl_model.end_layer
+
         for name, w in safetensors_weights_iterator(model_path):
             if name.startswith("model.visual."):
                 continue
-            # HF: model.language_model.layers... → vl_model.layers...
             our = name
             if our.startswith("model.language_model."):
                 our = "vl_model." + our[len("model.language_model.") :]
             elif our.startswith("lm_head."):
                 our = our
             else:
+                continue
+
+            layer_id = get_layer_id(our)
+            if layer_id is not None and (layer_id < start_layer or layer_id >= end_layer):
                 continue
 
             for param_name, weight_name, shard_id in stacked:
@@ -188,25 +233,50 @@ class Qwen3VLForCausalLM(nn.Module):
                 loaded.add(our2)
                 break
             else:
+                # Tied embeds on last-only PP: load embed weights into lm_head.
+                if (
+                    our == "vl_model.embed_tokens.weight"
+                    and "lm_head.weight" in params
+                    and "vl_model.embed_tokens.weight" not in params
+                ):
+                    param = params["lm_head.weight"]
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader(param, w)
+                    loaded.add("lm_head.weight")
+                    continue
+
                 if our in params:
                     param = params[our]
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, w)
                     loaded.add(our)
 
-        if self._tie and "vl_model.embed_tokens.weight" in params:
-            self.lm_head.weight.data = self.vl_model.embed_tokens.weight.data
+        if (
+            "lm_head.weight" in params
+            and "lm_head.weight" not in loaded
+            and "vl_model.embed_tokens.weight" in params
+        ):
+            default_weight_loader(
+                params["lm_head.weight"],
+                params["vl_model.embed_tokens.weight"],
+            )
 
-        # Move param-by-param to avoid 2× peak of ``Module.to`` (needed for 8B on 24GB).
         for p in self.parameters():
             p.data = p.data.to(device=device, dtype=dtype)
         for name, buf in self.named_buffers():
             if buf is not None:
                 parent, _, leaf = name.rpartition(".")
                 mod = self.get_submodule(parent) if parent else self
-                setattr(mod, leaf, buf.to(device=device, dtype=dtype if buf.is_floating_point() else buf.dtype))
-        if self._tie:
-            self.lm_head.weight.data = self.vl_model.embed_tokens.weight.data
+                setattr(
+                    mod,
+                    leaf,
+                    buf.to(
+                        device=device,
+                        dtype=dtype if buf.is_floating_point() else buf.dtype,
+                    ),
+                )
+        if self._tie and get_pp_group().is_first_rank and get_pp_group().is_last_rank:
+            self.lm_head.weight = self.vl_model.embed_tokens.weight
 
     def encode_and_merge(
         self,
@@ -214,7 +284,9 @@ class Qwen3VLForCausalLM(nn.Module):
         seqs: list,
         device: torch.device,
     ) -> tuple[torch.Tensor, Optional[list[torch.Tensor]], torch.Tensor]:
-        """Return (inputs_embeds, deepstack_or_None, positions[3,N])."""
+        """Return (inputs_embeds, deepstack_or_None, positions[3,N]). First-PP only."""
+        assert get_pp_group().is_first_rank, "encode_and_merge only on first PP rank"
+        assert self.vision_tower is not None
         text_emb = self.vl_model.embed_tokens(input_ids)
         all_vis = self._encode_visual(seqs, device)
         n, h = text_emb.shape
@@ -246,6 +318,7 @@ class Qwen3VLForCausalLM(nn.Module):
         return embeds, dps, positions
 
     def _encode_visual(self, seqs: list, device: torch.device) -> list[torch.Tensor]:
+        assert self.vision_tower is not None
         mfs = [mf for seq in seqs for mf in seq.mm_features]
         out: list[torch.Tensor | None] = [None] * len(mfs)
         miss_idx: list[int] = []
@@ -298,7 +371,6 @@ class Qwen3VLForCausalLM(nn.Module):
                 )
                 dps_batch = self.vision_tower.deepstack_features
 
-            # Split flat / deepstack per image and publish to features + cache.
             cursor = 0
             for idx, mf, sz in zip(miss_idx, miss_mfs, sizes):
                 emb = flat[cursor : cursor + sz]
@@ -313,7 +385,7 @@ class Qwen3VLForCausalLM(nn.Module):
         return out  # type: ignore[return-value]
 
     def vit_forward_cg(self, pv, grid, metadata, out_merged, out_deepstack) -> None:
-        """CUDA-graph target: write merger (+DeepStack) into fixed buffers."""
+        assert self.vision_tower is not None
         self.vision_tower(
             pv,
             grid_thw=grid,
@@ -342,7 +414,6 @@ class Qwen3VLForCausalLM(nn.Module):
     def _build_deepstack(self, seqs, n, h, device, dtype):
         if not self._ndps:
             return None
-        # `_encode_visual` always attaches `mf.deepstack` (cache hit or miss).
         if not any(
             getattr(mf, "deepstack", None) is not None
             for seq in seqs
