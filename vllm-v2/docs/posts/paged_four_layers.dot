@@ -1,0 +1,60 @@
+digraph paged {
+  rankdir=TB;
+  bgcolor="white";
+  labelloc="t";
+  fontname="Droid Sans Fallback";
+  fontsize=20;
+  label="PagedAttention 数据流";
+  node [shape=box, style="filled,rounded", fontname="Droid Sans Fallback", fontsize=12, penwidth=1.6, margin="0.18,0.10"];
+  edge [color="#64748b", penwidth=1.6, arrowsize=0.8];
+
+  // ---------------- Prefill ----------------
+  subgraph cluster_pre {
+    label="Prefill  一次写入整段 prompt";
+    fontsize=15;
+    color="#1e293b";
+    style="rounded";
+    bgcolor="#f8fafc";
+
+    P1 [label="1  allocate(prompt_len)\n按长度领物理页 → block_table = [7, 2]", fillcolor="#dbeafe", color="#2563eb"];
+    P2 [label="2  slots_for_range(0, prompt_len)\nslot_mapping = [28,29,30,31,8,9]", fillcolor="#ede9fe", color="#7c3aed"];
+    P3 [label="3  write(slot_mapping, K, V)\n把整段 K/V 散射进物理池对应槽位", fillcolor="#fef3c7", color="#d97706"];
+    P4 [label="4  SDPA（因果）\n整段 Q 对同段 K/V 做带掩码注意力", fillcolor="#dcfce7", color="#16a34a"];
+    P5 [label="采样第一个新 token → 进入 Decode", fillcolor="#f1f5f9", color="#475569"];
+
+    P1 -> P2 -> P3 -> P4 -> P5;
+  }
+
+  // ---------------- Decode ----------------
+  subgraph cluster_dec {
+    label="Decode  每步一个新 token，循环";
+    fontsize=15;
+    color="#1e293b";
+    style="rounded";
+    bgcolor="#f8fafc";
+
+    D1 [label="1  may_append(block_table, len)\n页满才再领一页，否则不变", fillcolor="#dbeafe", color="#2563eb"];
+    D2 [label="2  slot_of(pos)\n只算当前一个位置 → slot_mapping = [slot]", fillcolor="#ede9fe", color="#7c3aed"];
+    D3 [label="3  write(slot, K, V)\n写入当前 token 的 K/V（一格）", fillcolor="#fef3c7", color="#d97706"];
+    D4 [label="4  gather(block_table, seq_len)\n按页表把前缀抠成一行连续 K/V", fillcolor="#fef3c7", color="#d97706"];
+    D5 [label="5  SDPA（非因果）\n长度 1 的 Q 对整段前缀做注意力 → 采样", fillcolor="#dcfce7", color="#16a34a"];
+
+    D1 -> D2 -> D3 -> D4 -> D5;
+    D5 -> D1 [label="循环至序列结束", color="#16a34a", style=dashed, fontcolor="#16a34a", fontsize=11, constraint=false];
+  }
+
+  // ---------------- Legend ----------------
+  subgraph cluster_leg {
+    label="";
+    color="white";
+    L1 [label="Engine", fillcolor="#dbeafe", color="#2563eb", fontsize=11];
+    L2 [label="memory 页表/槽位", fillcolor="#ede9fe", color="#7c3aed", fontsize=11];
+    L3 [label="PagedKVCache 读写", fillcolor="#fef3c7", color="#d97706", fontsize=11];
+    L4 [label="Attention", fillcolor="#dcfce7", color="#16a34a", fontsize=11];
+    L1 -> L2 -> L3 -> L4 [style=invis];
+    { rank=same; L1; L2; L3; L4; }
+  }
+
+  P5 -> L1 [style=invis];
+  D5 -> L1 [style=invis];
+}

@@ -1,0 +1,46 @@
+%% v1 KV Cache 模块调用时序图
+%% 渲染: npx -p @mermaid-js/mermaid-cli mmdc -i kv_cache_seq.mmd -o kv_cache_seq.svg
+sequenceDiagram
+    autonumber
+    actor User
+    participant Engine as Engine.generate
+    participant Ctx as ForwardContext
+    participant Model as model.forward
+    participant Attn as Attention.forward
+    participant Cache as KVCache
+    participant SDPA as scaled_dot_product_attention
+
+    User->>Engine: generate(prompt)
+
+    Note over Engine,SDPA: Prefill（整段 prompt，只跑一次）
+    Engine->>Ctx: set(is_prefill=True, cache_len=0)
+    Engine->>Model: forward(prompt_ids, positions)
+    Model->>Attn: forward(q, k, v)
+    Attn->>Ctx: get()
+    Ctx-->>Attn: ctx
+    Attn->>Cache: write(layer_id, start=0, k, v)
+    Attn->>SDPA: SDPA(q, k, v, is_causal=True)
+    SDPA-->>Attn: attn_out
+    Attn-->>Model: attn_out
+    Model-->>Engine: hidden
+    Engine->>Engine: sample → next_id / cache_len = L
+
+    Note over Engine,SDPA: Decode（每步只喂 1 个 token）
+    loop until EOS or context full
+        Engine->>Ctx: set(is_prefill=False, cache_len)
+        Engine->>Model: forward([next_id], position=cache_len)
+        Model->>Attn: forward(q, k, v)
+        Attn->>Ctx: get()
+        Ctx-->>Attn: ctx
+        Attn->>Cache: write(layer_id, pos=cache_len)
+        Attn->>Cache: read(layer_id, length=cache_len+1)
+        Cache-->>Attn: k_cached, v_cached
+        Attn->>SDPA: SDPA(q, cached, is_causal=False)
+        SDPA-->>Attn: attn_out
+        Attn-->>Model: attn_out
+        Model-->>Engine: hidden
+        Engine->>Engine: sample / cache_len += 1
+        Engine-->>User: yield token
+    end
+
+    Engine->>Ctx: set(None)

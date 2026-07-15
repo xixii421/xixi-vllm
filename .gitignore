@@ -1,0 +1,71 @@
+# Teaching mini-vLLM series repo (vllm-v0 … vllm-v6)
+#
+# Strategy: ignore everything at the monorepo root, then explicitly
+# allow only the teaching version trees. Nested repos such as
+# dzyy_vllm/, ullm/, vllm/, nano-vllm/ stay untracked.
+
+# --- default: ignore all root entries ---
+/*
+
+# --- keep git meta / series docs ---
+!.gitignore
+!README.md
+# only the helper under scripts/git/ (not other local scripts/)
+!/scripts/
+/scripts/*
+!/scripts/git/
+!/scripts/git/**
+
+# --- teaching versions only ---
+!/vllm-v0/
+!/vllm-v1/
+!/vllm-v2/
+!/vllm-v3/
+!/vllm-v4/
+!/vllm-v5/
+!/vllm-v6/
+
+# --- never commit envs / caches / artifacts (any depth) ---
+# cover both real dirs and symlinks (e.g. vllm-v6/.venv -> v5)
+**/.venv
+**/.venv/
+**/venv
+**/venv/
+**/.python-version
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+**/htmlcov/
+**/*.egg-info/
+**/dist/
+**/build/
+**/.DS_Store
+**/Thumbs.db
+**/*.swp
+**/*.swo
+**/.idea/
+**/.vscode/
+!**/.vscode/extensions.json
+
+# Bench outputs / logs / local dumps
+**/bench/results/
+**/bench/**/results/
+**/*.log
+**/tmp/
+**/.cache/
+**/wandb/
+**/outputs/
+**/checkpoints/
+
+# Local model / HF caches if ever placed under a version tree
+**/huggingface/
+**/*.safetensors
+**/*.bin
+**/*.pt
+**/*.pth
+**/*.onnx
+**/*.gguf
