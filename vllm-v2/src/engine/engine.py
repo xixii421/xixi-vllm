@@ -1,80 +1,128 @@
+"""Engine: wires control plane (Scheduler) + data plane (ModelRunner)."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+
 import torch
 from transformers import AutoTokenizer
 
 from ..config import EngineConfig
-from ..memory import BlockManager, PagedKVCache, slots_for_range
-from ..models.loader import load_model
-from ..models.qwen3 import Qwen3ForCausalLM
-from ..utils import ForwardContext, set_forward_context
-from .sampler import Sampler
+from ..kv import KVManager, Sequence
+from ..model import Qwen3ForCausalLM
+from ..model_loader import load_model
+from ..sampling_params import SamplingParams
+from ..sampler import Sampler
+from .model_runner import ModelRunner
+from .scheduler import Scheduler
 
 
 class Engine:
-    def __init__(self, config: EngineConfig):
+    def __init__(self, config: EngineConfig) -> None:
         self.config = config
-        self.tokenizer = AutoTokenizer.from_pretrained(config.model, trust_remote_code=True)
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.dtype = self._resolve_dtype()
+
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            config.model, trust_remote_code=True
+        )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.eos_token_id = self.tokenizer.eos_token_id
+        self.eos_token_id = int(self.tokenizer.eos_token_id)
         self.context_len = config.context_len
         self.block_size = config.block_size
 
-        self.device = torch.device("cuda:0")
-        self.dtype = self._resolve_dtype()
-
         self.model = Qwen3ForCausalLM(config.hf_config)
         load_model(self.model, config.model)
-        self.model = self.model.to(dtype=self.dtype, device=self.device)
-        self.model.eval()
-
-        if not config.enforce_eager:
+        self.model = self.model.to(dtype=self.dtype, device=self.device).eval()
+        if not config.enforce_eager and self.device.type == "cuda":
             self.model = torch.compile(self.model, mode="reduce-overhead")
 
-        self.sampler = Sampler().to(device=self.device)
-        assert config.num_gpu_blocks is not None
-        self.kv_cache = PagedKVCache.allocate(
+        self.sampler = Sampler()
+        self.kv = KVManager(
             self.model,
-            num_blocks=config.num_gpu_blocks,
+            num_blocks=config.num_kv_blocks,
             block_size=config.block_size,
+            prefix_backend=config.prefix_backend,
             device=self.device,
             dtype=self.dtype,
         )
-        self.block_manager = BlockManager(
-            num_blocks=config.num_gpu_blocks,
-            block_size=config.block_size,
+        # Control plane
+        self.scheduler = Scheduler(
+            self.kv,
+            max_num_seqs=config.max_num_seqs,
+            max_num_batched_tokens=config.max_num_batched_tokens,
+            eos_token_id=self.eos_token_id,
         )
-        self._block_table: list[int] | None = None
+        # Data plane
+        self.model_runner = ModelRunner(
+            self.model, self.kv, self.sampler, device=self.device
+        )
+        self.last_num_cached_tokens = 0
 
-    def _resolve_dtype(self):
+    def _resolve_dtype(self) -> torch.dtype:
         if self.config.dtype != "auto":
             return getattr(torch, self.config.dtype)
-        dt = self.config.hf_config.torch_dtype
+        cfg = self.config.hf_config
+        dt = getattr(cfg, "dtype", None) or getattr(cfg, "torch_dtype", None)
         return dt if isinstance(dt, torch.dtype) else torch.float16
 
-    def _sample(
+    def add_request(
         self,
-        logits: torch.Tensor,
-        temp_t,
-        min_p_t,
-        top_p_t,
-        top_k_t,
-    ) -> int:
-        return self.sampler(logits, temp_t, min_p_t, top_p_t, top_k_t).item()
+        prompt: str | list[int],
+        sampling_params: SamplingParams | None = None,
+    ) -> Sequence:
+        token_ids = (
+            list(prompt) if isinstance(prompt, list) else self.tokenizer.encode(prompt)
+        )
+        if len(token_ids) > self.context_len:
+            token_ids = token_ids[-self.context_len :]
+        seq = Sequence.from_prompt(
+            token_ids, block_size=self.block_size, sampling=sampling_params
+        )
+        self.scheduler.add(seq)
+        return seq
 
-    def _slot_tensor(self, slots: list[int]) -> torch.Tensor:
-        return torch.tensor(slots, device=self.device, dtype=torch.long)
+    def step(self) -> tuple[list[tuple[int, list[int]]], int]:
+        seqs, is_prefill = self.scheduler.schedule()
+        if not seqs:
+            return [], 0
+        metric = (
+            sum(s.num_scheduled_tokens for s in seqs) if is_prefill else -len(seqs)
+        )
+        token_ids = self.model_runner.run(seqs, is_prefill)
+        finished = self.scheduler.postprocess(seqs, token_ids, is_prefill)
+        if is_prefill and seqs:
+            self.last_num_cached_tokens = max(
+                (s.num_cached_tokens for s in seqs), default=0
+            )
+        outputs = [
+            (seq.seq_id, seq.token_ids[seq.num_prompt_tokens :]) for seq in finished
+        ]
+        return outputs, metric
 
-    def free_active_blocks(self) -> None:
-        if self._block_table is not None:
-            self.block_manager.free(self._block_table)
-            self._block_table = None
+    def generate_batch(
+        self,
+        prompts: list[str | list[int]],
+        sampling_params: SamplingParams | list[SamplingParams] | None = None,
+    ) -> list[str]:
+        if sampling_params is None:
+            sps = [SamplingParams() for _ in prompts]
+        elif isinstance(sampling_params, SamplingParams):
+            sps = [sampling_params for _ in prompts]
+        else:
+            sps = list(sampling_params)
+            if len(sps) != len(prompts):
+                raise ValueError("sampling_params length must match prompts")
 
-    def allocate_prompt_blocks(self, prompt_len: int) -> list[int]:
-        self.free_active_blocks()
-        self._block_table = self.block_manager.allocate(prompt_len)
-        return self._block_table
+        seqs = [self.add_request(p, sp) for p, sp in zip(prompts, sps)]
+        finished_text: dict[int, str] = {}
+        while not self.scheduler.is_finished():
+            outputs, _ = self.step()
+            for seq_id, completion_ids in outputs:
+                finished_text[seq_id] = self.tokenizer.decode(completion_ids)
+        return [finished_text[seq.seq_id] for seq in seqs]
 
-    @torch.inference_mode()
     def generate(
         self,
         prompt: str | list[int],
@@ -83,73 +131,19 @@ class Engine:
         top_p: float | None = None,
         top_k: int | None = None,
         min_p: float | None = None,
-    ):
-        input_ids = (
-            list(prompt) if isinstance(prompt, list) else self.tokenizer.encode(prompt)
+    ) -> Iterator[str]:
+        sp = SamplingParams(
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            max_tokens=max_new_tokens,
         )
-        if len(input_ids) > self.context_len:
-            input_ids = input_ids[-self.context_len :]
-
-        def _t(v, dtype):
-            return None if v is None else torch.tensor([v], device=self.device, dtype=dtype)
-
-        temp_t = None if temperature <= 0 else _t(temperature, torch.float)
-        top_p_t = _t(top_p, torch.float)
-        top_k_t = _t(top_k, torch.int)
-        min_p_t = _t(min_p, torch.float)
-
-        prompt_len = len(input_ids)
-        block_table = self.allocate_prompt_blocks(prompt_len)
-        try:
-            # --- Prefill ---
-            slots = slots_for_range(block_table, 0, prompt_len, self.block_size)
-            set_forward_context(
-                ForwardContext(
-                    is_prefill=True,
-                    seq_len=prompt_len,
-                    kv_cache=self.kv_cache,
-                    block_table=block_table,
-                    slot_mapping=self._slot_tensor(slots),
-                )
-            )
-            ids = torch.tensor([input_ids], device=self.device, dtype=torch.long)
-            positions = torch.arange(prompt_len, device=self.device).unsqueeze(0)
-            h = self.model(ids, positions)
-            logits = self.model.compute_logits(h[:, -1:]).squeeze(1)
-            next_id = self._sample(logits, temp_t, min_p_t, top_p_t, top_k_t)
-
-            yield self.tokenizer.decode([next_id])
-            if next_id == self.eos_token_id or prompt_len >= self.context_len:
-                return
-
-            num_tokens = prompt_len
-
-            # --- Decode ---
-            for _ in range(max_new_tokens - 1):
-                if num_tokens >= self.context_len:
-                    break
-                num_tokens += 1
-                self.block_manager.may_append(block_table, num_tokens)
-                pos = num_tokens - 1
-                slots = slots_for_range(block_table, pos, pos + 1, self.block_size)
-                set_forward_context(
-                    ForwardContext(
-                        is_prefill=False,
-                        seq_len=num_tokens,
-                        kv_cache=self.kv_cache,
-                        block_table=block_table,
-                        slot_mapping=self._slot_tensor(slots),
-                    )
-                )
-                ids = torch.tensor([[next_id]], device=self.device, dtype=torch.long)
-                positions = torch.tensor([[pos]], device=self.device, dtype=torch.long)
-                h = self.model(ids, positions)
-                logits = self.model.compute_logits(h[:, -1:]).squeeze(1)
-                next_id = self._sample(logits, temp_t, min_p_t, top_p_t, top_k_t)
-
-                yield self.tokenizer.decode([next_id])
-                if next_id == self.eos_token_id:
-                    break
-        finally:
-            set_forward_context(None)
-            self.free_active_blocks()
+        seq = self.add_request(prompt, sp)
+        emitted = 0
+        while not seq.is_finished:
+            self.step()
+            while emitted < seq.num_completion_tokens:
+                tid = seq.token_ids[seq.num_prompt_tokens + emitted]
+                emitted += 1
+                yield self.tokenizer.decode([tid])
