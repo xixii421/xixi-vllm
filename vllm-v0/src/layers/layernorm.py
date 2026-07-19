@@ -2,7 +2,6 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-
 class RMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
         super().__init__()
@@ -15,7 +14,7 @@ class RMSNorm(nn.Module):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         orig_dtype = x.dtype
-        # 统计量在 fp32 上算，避免半精度下方差下溢
+
         x32 = x.float()
         if residual is not None:
             x32 = x32 + residual.float()

@@ -1,9 +1,7 @@
 from __future__ import annotations
-
 import torch
 import torch.nn.functional as F
 from torch import nn
-
 
 def _sdpa_supports_gqa() -> bool:
     """探测当前 PyTorch 的 SDPA 是否接受 enable_gqa=True。"""

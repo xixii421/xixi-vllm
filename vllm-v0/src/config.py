@@ -6,15 +6,6 @@ from transformers import AutoConfig, PretrainedConfig
 
 @dataclass
 class EngineConfig:
-    """从本地模型目录构造推理所需配置。
-
-    Attributes:
-        model: 含 config.json 与 *.safetensors 的目录。
-        context_len: 生成时允许的最大序列长度（含 prompt）。
-        enforce_eager: True 时不用 torch.compile，便于调试。
-        dtype: "auto" 跟 checkpoint；否则如 "float16" / "bfloat16"。
-    """
-
     model: str
     context_len: int = 2048
     enforce_eager: bool = True

@@ -1,7 +1,4 @@
-"""Qwen3 CausalLM 骨架：Decoder 堆叠 + HF 权重装载（含 QKV 合并）。"""
-
 from __future__ import annotations
-
 from collections.abc import Iterable
 
 import torch
@@ -14,7 +11,6 @@ from .layers.layernorm import RMSNorm
 from .layers.rotary import RotaryEmbedding
 from .model_loader import default_weight_loader
 
-# (HF 名字片段, 目标参数名片段, 行偏移, 行数)
 _QKV_SHARDS = (
     ("q_proj", "qkv_proj", lambda q, kv: 0, lambda q, kv: q),
     ("k_proj", "qkv_proj", lambda q, kv: q, lambda q, kv: kv),
@@ -23,8 +19,6 @@ _QKV_SHARDS = (
 
 
 class Qwen3MLP(nn.Module):
-    """SwiGLU FFN：gate∥up → SiLU(gate)*up → down。"""
-
     def __init__(self, hidden_size: int, intermediate_size: int) -> None:
         super().__init__()
         self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
@@ -33,13 +27,10 @@ class Qwen3MLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # 最后一维拼接后交给 SiluAndMul；gate/up 权重在磁盘上仍是分开存的
         return self.down_proj(self.act_fn(torch.cat([self.gate_proj(x), self.up_proj(x)], dim=-1)))
 
 
 class Qwen3Attention(nn.Module):
-    """一层自注意力：fused QKV → QK-Norm → RoPE → GQA SDPA → o_proj。"""
-
     def __init__(
         self,
         hidden_size: int,
@@ -93,8 +84,6 @@ class Qwen3Attention(nn.Module):
 
 
 class Qwen3DecoderLayer(nn.Module):
-    """Pre-Norm Decoder：input_norm → attn → post_norm → mlp，残差与 norm 可融合。"""
-
     def __init__(self, config: Qwen3Config) -> None:
         super().__init__()
         self.self_attn = Qwen3Attention(
@@ -131,8 +120,6 @@ class Qwen3DecoderLayer(nn.Module):
 
 
 class Qwen3Model(nn.Module):
-    """词嵌入 + N 层 Decoder + 最终 RMSNorm。"""
-
     def __init__(self, config: Qwen3Config) -> None:
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
@@ -150,8 +137,6 @@ class Qwen3Model(nn.Module):
 
 
 class Qwen3ForCausalLM(nn.Module):
-    """对外入口：backbone 出 hidden；词表投影拆到 compute_logits。"""
-
     def __init__(self, config: Qwen3Config) -> None:
         super().__init__()
         self.model = Qwen3Model(config)
@@ -164,7 +149,6 @@ class Qwen3ForCausalLM(nn.Module):
         return self.lm_head(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
-        """消费 (name, tensor) 流：Q/K/V 按行写入 qkv_proj，其余按名 copy。"""
         params = dict(self.named_parameters())
         loaded: set[str] = set()
         attn0 = self.model.layers[0].self_attn
@@ -189,7 +173,6 @@ class Qwen3ForCausalLM(nn.Module):
                 default_weight_loader(params[name], w)
                 loaded.add(name)
 
-        # 部分小模型把 lm_head 与 embed 绑在一起，checkpoint 可能只存一份
         if "lm_head.weight" not in loaded and "model.embed_tokens.weight" in loaded:
             default_weight_loader(
                 params["lm_head.weight"], params["model.embed_tokens.weight"]

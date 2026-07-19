@@ -1,7 +1,4 @@
-"""logits → 下一个 token id：贪心，或 temperature + top-k / top-p / min-p。"""
-
 from __future__ import annotations
-
 import torch
 
 
