@@ -1,5 +1,3 @@
-"""vllm-v0 entry: single-model inference or multi-model verification."""
-
 from __future__ import annotations
 
 import argparse

@@ -23,7 +23,7 @@ $$
 
 下边我做一个简单的示例：
 
-- 输入向量 \(x = [1.0, -0.5]\) （2维）
+- 输入向量 $x = [1.0, -0.5]$ （2维）
 - 中间层维度也设为 2（实际中会扩到 4~8 倍，这里为计算方便）
 - 权重矩阵定义如下（偏置全部取 0）：
 
@@ -32,7 +32,7 @@ W_1 = \begin{bmatrix} 0.5 & 0.2 \\ -0.3 & 0.8 \end{bmatrix},\quad
 W_2 = \begin{bmatrix} 0.3 & -0.2 \\ 0.4 & 0.6 \end{bmatrix}
 $$
 
-在涉及门控机制时，我们还会增加一个门控权重矩阵 \(W_g\)，后面会逐步引入。
+在涉及门控机制时，我们还会增加一个门控权重矩阵 $W_g$，后面会逐步引入。
 
 现在，让我们从 ReLU 开始，一步步推动进化。
 
@@ -65,26 +65,26 @@ $$
 \text{SiLU}(x) = x \cdot \sigma(x), \quad \sigma(x) = \frac{1}{1+e^{-x}}
 $$
 
-这个形式非常有趣：**输入 \(x\) 自己控制自己通过的比例**，Sigmoid 输出一个 0~1 的门控值，再乘回 \(x\) 本身。这就是“自门控”的来历。
+这个形式非常有趣：**输入 $x$ 自己控制自己通过的比例**，Sigmoid 输出一个 0~1 的门控值，再乘回 $x$ 本身。这就是“自门控”的来历。
 
-我们用同一个 \(h = [0.65, -0.7]\) 计算 SiLU：
+我们用同一个 $h = [0.65, -0.7]$ 计算 SiLU：
 
 1. 计算 sigmoid：
-   - \(\sigma(0.65) \approx 0.657\)
-   - \(\sigma(-0.7) \approx 0.332\)
+   - $\sigma(0.65) \approx 0.657$
+   - $\sigma(-0.7) \approx 0.332$
 
 2. 计算 SiLU：
-   - \(\text{SiLU}(0.65) = 0.65 \times 0.657 \approx 0.427\)
-   - \(\text{SiLU}(-0.7) = -0.7 \times 0.332 \approx -0.232\)
+   - $\text{SiLU}(0.65) = 0.65 \times 0.657 \approx 0.427$
+   - $\text{SiLU}(-0.7) = -0.7 \times 0.332 \approx -0.232$
 
    负数仍然在，它得到一个微弱的负输出。梯度也依然存在。
 
-3. 降维：\(y = W_2 \cdot [0.427, -0.232]^T\)
-\[
+3. 降维：$y = W_2 \cdot [0.427, -0.232]^T$
+$$
 y \approx \begin{bmatrix} 0.3\times0.427 -0.2\times(-0.232) \\ 0.4\times0.427 +0.6\times(-0.232) \end{bmatrix} = \begin{bmatrix} 0.174 \\ 0.032 \end{bmatrix}
-\]
+$$
 
-对比 ReLU 的输出 \([0.195, 0.26]\)，SiLU 的输出完全不同。更重要的是，**SiLU 处处光滑、非单调**，允许梯度稳定流动，训练深层网络时表现显著优于 ReLU。在 LLaMA 等模型中，即便后来有了 SwiGLU，SiLU 本身作为激活函数也曾被直接使用。
+对比 ReLU 的输出 $[0.195, 0.26]$，SiLU 的输出完全不同。更重要的是，**SiLU 处处光滑、非单调**，允许梯度稳定流动，训练深层网络时表现显著优于 ReLU。在 LLaMA 等模型中，即便后来有了 SwiGLU，SiLU 本身作为激活函数也曾被直接使用。
 
 
 ## 4. GLU
@@ -103,28 +103,28 @@ $$
 \text{GLU}(x) = \underbrace{\sigma(x W_g)}_{\text{gate}} \odot \underbrace{(x W_v)}_{\text{value}}
 $$
 
-这需要额外引入一个权重矩阵 \(W_g\)。我们设：
+这需要额外引入一个权重矩阵 $W_g$。我们设：
 $$
 W_g = \begin{bmatrix} 0.8 & -0.4 \\ 0.1 & 0.3 \end{bmatrix}, \quad
 W_v = W_1 = \begin{bmatrix} 0.5 & 0.2 \\ -0.3 & 0.8 \end{bmatrix}
 $$
 
 ### 手算GLU
-1. **计算 gate**：\(g_{\text{raw}} = x W_g = [1.0, -0.5] \cdot W_g\)
-\[
+1. **计算 gate**：$g_{\text{raw}} = x W_g = [1.0, -0.5] \cdot W_g$
+$$
 g_{\text{raw}} = [0.75, -0.55]
-\]
-   门控使用激活函数：\(\sigma(0.75) \approx 0.679,\ \sigma(-0.55) \approx 0.366\)  
-   所以 \(gate = [0.679, 0.366]\)
+$$
+   门控使用激活函数：$\sigma(0.75) \approx 0.679,\ \sigma(-0.55) \approx 0.366$  
+   所以 $gate = [0.679, 0.366]$
 
-2. **计算 value**：\(v = x W_v = [0.65, -0.7]\)
+2. **计算 value**：$v = x W_v = [0.65, -0.7]$
 
-3. 逐元素乘（加权）：\(h_{GLU} = gate \odot v = [0.679\times0.65,\ 0.366\times(-0.7)] \approx [0.441, -0.256]\)
+3. 逐元素乘（加权）：$h_{GLU} = gate \odot v = [0.679\times0.65,\ 0.366\times(-0.7)] \approx [0.441, -0.256]$
 
 4. **降维输出**：
-\[
+$$
 y = W_2 \cdot h_{GLU} \approx \begin{bmatrix} 0.3\times0.441 -0.2\times(-0.256) \\ 0.4\times0.441 +0.6\times(-0.256) \end{bmatrix} 
-\]
+$$
 
 门控使得 value 的第二维 `-0.7` 被门控值 `0.366` 削弱，相当于网络自己学会了“这个特征不太重要”。
 
@@ -135,16 +135,16 @@ y = W_2 \cdot h_{GLU} \approx \begin{bmatrix} 0.3\times0.441 -0.2\times(-0.256) 
 
 2019 年，Shazeer 在《GLU Variants Improve Transformer》中系统比较了多种门控激活，发现**将 sigmoid 换成 SiLU**（即 Swish）能取得最佳效果。这就是 SwiGLU：
 
-\[
+$$
 \text{SwiGLU}(x) = \underbrace{\text{SiLU}(x W_g)}_{\text{gate}} \odot \underbrace{(x W_v)}_{\text{value}}
-\]
+$$
 
 我们用完全相同的数据，只改变门控函数，再算一遍：
 
 1. **gate 原始值不变**
    **SiLU 激活**：
-   - \(\text{SiLU}(0.75) = 0.75 \times \sigma(0.75) = 0.509\)
-   - \(\text{SiLU}(-0.55) = -0.55 \times \sigma(-0.55) = -0.201\)
+   - $\text{SiLU}(0.75) = 0.75 \times \sigma(0.75) = 0.509$
+   - $\text{SiLU}(-0.55) = -0.55 \times \sigma(-0.55) = -0.201$
     这里我们发现门控出现了负值。`-0.201`
 
 2. **value 不变**
@@ -153,9 +153,9 @@ y = W_2 \cdot h_{GLU} \approx \begin{bmatrix} 0.3\times0.441 -0.2\times(-0.256) 
 
    第二维原本是 `-0.7`，门控是 `-0.201`，负负得正，输出变成了 `+0.141`。**信息不仅被调制，符号都可能翻转**。
 4. **降维输出**：
-\[
+$$
 y = W_2 \cdot h_{SwiGLU} \approx \begin{bmatrix} 0.3\times0.331 -0.2\times0.141 \\ 0.4\times0.331 +0.6\times0.141 \end{bmatrix} = \begin{bmatrix} 0.071 \\ 0.217 \end{bmatrix}
-\]
+$$
 
 > [!NOTE] 为什么SwiGLU更强？
 > SiLU 的非单调性和负值区间让门控可以“反向激活”，实现更复杂的特征选择。  实验证明，在同等训练 FLOPs 下，SwiGLU 的困惑度明显低于 ReLU、GELU、GLU 等变体.PaLM、LLaMA、Mistral 等几乎所有主流 Decoder-Only 大模型都采用了 SwiGLU。
@@ -164,19 +164,19 @@ y = W_2 \cdot h_{SwiGLU} \approx \begin{bmatrix} 0.3\times0.331 -0.2\times0.141 
 
 ## 6. 工程实现
 
-数学上的 SwiGLU 需要用两个权重矩阵 \(W_g\) 和 \(W_v\) 分别做两次矩阵乘法。但在实际部署中，这两次矩阵乘法**读取的是同一个输入 \(x\)**，完全可以合并为一个更大的矩阵乘法，从而节省一半的内存带宽。
+数学上的 SwiGLU 需要用两个权重矩阵 $W_g$ 和 $W_v$ 分别做两次矩阵乘法。但在实际部署中，这两次矩阵乘法**读取的是同一个输入 $x$**，完全可以合并为一个更大的矩阵乘法，从而节省一半的内存带宽。
 
 ### 6.1 权重合并
 
-将 \(W_v\) 和 \(W_g\) 按列拼接：
-\[
+将 $W_v$ 和 $W_g$ 按列拼接：
+$$
 W_{\text{fused}} = [W_v \mid W_g] = \begin{bmatrix} 0.5 & 0.2 & 0.8 & -0.4 \\ -0.3 & 0.8 & 0.1 & 0.3 \end{bmatrix} \quad (2\times4)
-\]
+$$
 
 一次矩阵乘法得到拼接结果：
-\[
+$$
 x W_{\text{fused}} = \begin{bmatrix} 0.65 & -0.7 & 0.75 & -0.55 \end{bmatrix}
-\]
+$$
 前两维是 value，后两维是 gate。
 
 ### 6.2 融合算子 `SiluAndMul`

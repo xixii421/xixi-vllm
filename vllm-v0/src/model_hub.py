@@ -1,5 +1,3 @@
-"""Qwen3 model download, registry, and verification helpers."""
-
 from __future__ import annotations
 
 import os

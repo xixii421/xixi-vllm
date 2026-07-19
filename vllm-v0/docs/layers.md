@@ -2,7 +2,6 @@
 
 本文档逐层解释 `src/layers/` 和 `src/model.py` 中每一层的设计。
 
-<span style="color:#1d4ed8">**模块名**</span> · <span style="color:#b45309">**核心机制**</span> · <span style="color:#059669">**实现细节**</span> · <span style="color:#7c3aed">**数据流**</span>
 
 - [RMSNorm](./layers/rmsnorm.md)
 - [RotaryEmbedding](./layers/rotary.md)
@@ -13,41 +12,22 @@
 
 
 
-## 4. Qwen3Attention（`model.py`）
+## 4. Qwen3Attention
 
 ### 作用
 
-<span style="color:#1d4ed8">**模块名**</span> `Qwen3Attention` 是模型中对一层自注意力的完整封装：它把 QKV 投影、QK 归一化、RoPE、GQA Attention 和输出投影串成一条路径。
+<span style="color:#1d4ed8">**模块名**</span> 
+`Qwen3Attention` 是模型中对一层自注意力的完整封装。它把 QKV 投影、QK 归一化、RoPE、GQA Attention 和输出投影串成一条路径。
 
-<span style="color:#b45309">**核心机制**</span> 它的职责不是单独实现某一种算子，而是将「输入 hidden state」转换成「融合历史上下文后的 attention 输出」。其中 Q 决定当前 token 想查询什么，K 决定每个历史 token 提供什么索引，V 则携带被加权聚合的内容。
+<span style="color:#b45309">**核心机制**</span>
+它的职责不是单独实现某一种算子，而是将**输入 hidden state**转换成**融合历史上下文后的 attention 输出**。
+其中 Q 决定当前 token 想查询什么，K 决定每个历史 token 提供什么索引，V 则携带被加权聚合的内容。
 
 ### 数据流（一个 token 为例）
 
 <span style="color:#7c3aed">**数据流**</span> 下面以 Qwen3-0.6B 的张量形状为例。`hidden_states` 先被投影成 Q、K、V；Q 和 K 注入位置；随后 GQA 让多个 Q head 共享较少的 KV head；最后通过 `o_proj` 回到 hidden size。
 
-```
-输入: hidden_states [1, seq_len, 2048]
-│
-├─ qkv_proj:      2048 → 4096    (Q:2048 + K:1024 + V:1024)
-│  └─ split 得到 q[2048], k[1024], v[1024]
-│
-├─ q_norm:        RMSNorm(128)   对 Q 的每个 head 单独归一化
-│  └─ q [2048] → unflatten → [16, 128] → norm → flatten → [2048]
-│
-├─ k_norm:        RMSNorm(128)   对 K 的每个 head 单独归一化（同上）
-│
-├─ rotary_emb:    只对 Q 和 K 施加旋转位置编码
-│
-├─ view:          q → [1, seq_len, 16, 128]
-│                 k → [1, seq_len,  8, 128]
-│                 v → [1, seq_len,  8, 128]
-│
-├─ attn:          GQA attention，16 个 Q 查询 8 个 KV（内部自动扩展）
-│  └─ 输出 [1, seq_len, 16, 128]
-│
-└─ o_proj:        flatten → [1, seq_len, 2048] → [2048 → 2048]
-   └─ 输出 [1, seq_len, 2048]
-```
+![QwenAttention架构](./posts/QwenAttention.png)
 
 ### QK 归一化
 
@@ -55,15 +35,21 @@
 
 ```python
 q = self.q_norm(q.unflatten(-1, (-1, self.head_dim))).flatten(-2)
-#                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^   ^^^^^^^^^^^
-#                    把 2048 拆成 [16, 128]              归一化后拍平回 2048
+"""
+初始:  [1, seq_len, 2048]
+       ↓ unflatten(-1, (-1, 128))
+中间:  [1, seq_len, 16, 128]   ← 每个 head 独立
+       ↓ q_norm (RMSNorm on last dim)
+中间:  [1, seq_len, 16, 128]   ← 每个 head 被归一化
+       ↓ flatten(-2)
+最终:  [1, seq_len, 2048]      ← 恢复原始形状
+"""
 ```
 
 <span style="color:#059669">**实现细节**</span> 这被称为 **QK-Norm**，是 Qwen2/Qwen3 系列使用的技术。它控制 Q 与 K 点积的数值尺度，减少 attention logits 过大导致 softmax 过于尖锐的问题，从而让训练和长序列推理更稳定。
 
----
 
-## 5. Qwen3MLP（`model.py`）
+## 5. Qwen3MLP
 
 ### 作用
 
@@ -75,56 +61,20 @@ q = self.q_norm(q.unflatten(-1, (-1, self.head_dim))).flatten(-2)
 
 <span style="color:#7c3aed">**数据流**</span> MLP 不改变序列长度，只在最后一个 hidden 维度上先扩张、再压缩：
 
-```
-输入: hidden_states [1, seq_len, 2048]
-│
-├─ gate_proj:    2048 → 6144       门控投影
-├─ up_proj:      2048 → 6144       值投影
-│
-├─ cat([gate, up], dim=-1) → [6144 + 6144] → [12288]
-│
-├─ SiluAndMul:   取前 6144 = SiLU(gate), 后 6144 = up
-│                return SiLU(gate) × up  → [6144]
-│
-└─ down_proj:    6144 → 2048
-   └─ 输出 [1, seq_len, 2048]
-```
+![QwenMLP](./posts/QwenMLP.png)
 
 ## 6. Qwen3DecoderLayer（`model.py`）
 
 ### 作用
-
-<span style="color:#1d4ed8">**模块名**</span> `Qwen3DecoderLayer` 是一个完整的 Transformer 解码层，包含 Attention 和 MLP 两个子层。
+`Qwen3DecoderLayer` 是一个完整的 Transformer 解码层，包含 Attention 和 MLP 两个子层。
 
 <span style="color:#b45309">**核心机制**</span> 每层先用 Attention 混合序列上下文，再用 MLP 变换每个位置的特征；两处子层前后都通过 RMSNorm 和残差连接保持训练稳定，并让信息能跨越很多层传播。
 
 ### 数据流
+代码使用 fused residual 写法，因此 `h` 与 `residual` 会一起在层间传递：
 
-<span style="color:#7c3aed">**数据流**</span> 代码使用 fused residual 写法，因此 `h` 与 `residual` 会一起在层间传递：
+![Decoder](./posts/decoder.png)
 
-```
-输入: h, residual
-│
-├─ Pre-Attention Norm + Residual Add
-│  └─ h, residual = input_layernorm(h, residual)
-│     # h 被归一化，residual 被更新
-│
-├─ Attention 子层
-│  └─ h = self_attn(positions, h)
-│     # 多头的自注意力计算
-│
-├─ Post-Attention Norm + Residual Add
-│  └─ h, residual = post_attention_layernorm(h, residual)
-│     # 融合 attn 输出和之前残差，然后归一化
-│
-├─ MLP 子层
-│  └─ h = mlp(h)
-│     # SiLU-gated FFN
-│
-└─ return h, residual
-   # h 是 MLP 输出，residual 是 fused 的残差状态
-   # residual 会传递给下一层的 input_layernorm
-```
 
 ### Fused Residual 的完整轨迹
 
@@ -145,59 +95,29 @@ Layer 1（第二层）:
   return (mlp_out, ...)
 ```
 
-<span style="color:#059669">**实现细节**</span> 这个 fused 模式与传统的 `x = x + sublayer(norm(x))` 写法数学等价，但把残差相加和归一化放在同一个模块中，减少了中间 tensor 的读写与显存访问。
-
----
+这个 fused 模式与传统的 `x = x + sublayer(norm(x))` 写法数学等价，但把残差相加和归一化放在同一个模块中，减少了中间 tensor 的读写与显存访问。
 
 ## 7. Sampler（`sampler.py`）
-
 ### 作用
-
-<span style="color:#1d4ed8">**模块名**</span> `Sampler` 将模型输出的 logits 转换为下一个 token id。
+`Sampler` 将模型输出的 logits 转换为下一个 token id。
 
 <span style="color:#b45309">**核心机制**</span> logits 只是词表中每个 token 的未归一化分数；Sampler 通过 temperature、Top-K、Top-P 和 Min-P 控制候选集合与概率分布，最后才能按策略选出一个 token。
 
 ### 采样策略链
+过滤器按以下顺序作用于同一份 logits。每一步都会缩小或重塑候选分布，最后再交给 softmax 与随机采样：
 
-<span style="color:#7c3aed">**数据流**</span> 过滤器按以下顺序作用于同一份 logits。每一步都会缩小或重塑候选分布，最后再交给 softmax 与随机采样：
 
-```
-logits [1, vocab_size=151936]
-  │
-  ├─ ① Temperature scaling
-  │     logits = logits / temperature
-  │     T > 1: 分布更平坦（更多样）
-  │     T < 1: 分布更尖锐（更确定）
-  │     T = 0: 跳过所有，直接 argmax
-  │
-  ├─ ② Top-K filtering
-  │     只保留概率最高的 K 个 token，其余设为 -inf
-  │     例如 K=20: 151936 个 token 中只留 20 个
-  │
-  ├─ ③ Top-P filtering (nucleus sampling)
-  │     累积概率从高到低，超过 P 的部分截断
-  │     例如 P=0.95: 保留概率之和达到 95% 的最少 token 集合
-  │
-  ├─ ④ Min-P filtering
-  │     删除概率低于 max_prob × min_p 的 token
-  │     例如 min_p=0.1 且 max_prob=0.5: 删除所有 prob < 0.05 的
-  │
-  ├─ ⑤ Softmax → 概率分布
-  │
-  └─ ⑥ torch.multinomial → 按概率采样 1 个 token
-```
+![Sampler](./posts/Sampler.png)
 
-### 特殊模式：Greedy
 
-<span style="color:#059669">**实现细节**</span> 当 `temperature=0` 且所有其他参数为 None 时，直接 `argmax(logits)`，不做任何过滤和采样。这是最快、也最确定的模式；在对比 v0 与后续 KV Cache 版本的正确性时，应优先使用它。
+### Greedy 采样策略
+当 `temperature=0` 且所有其他参数为 None 时，直接 `argmax(logits)`，不做任何过滤和采样。这是最快、也最确定的模式，在对比 v0 与后续 KV Cache 版本的正确性时，应优先使用它。
 
----
 
 ## 8. 权重加载（`model_loader.py` + `model.py:load_weights`）
 
 ### 流程
-
-<span style="color:#7c3aed">**数据流**</span> 加载器逐个读取 checkpoint tensor，将 HuggingFace 中分开的 Q、K、V 权重按本项目 `qkv_proj` 的布局合并，再复制到模型参数中：
+加载器逐个读取 checkpoint tensor，将 HuggingFace 中分开的 Q、K、V 权重按本项目 `qkv_proj` 的布局合并，再复制到模型参数中：
 
 ```python
 # 1. 遍历所有 *.safetensors 文件
@@ -215,61 +135,16 @@ for name, tensor in safetensors_iterator(model_dir):
 ```
 
 ### 为什么要合并 QKV？
-
-<span style="color:#b45309">**核心机制**</span> HuggingFace 的 Qwen3 存储了三个独立的投影矩阵 `q_proj`、`k_proj`、`v_proj`。在推理时，把它们**合并成一个 `qkv_proj`** 可以用一次矩阵乘法同时计算 Q、K、V：
-
-```
-传统（三次 GEMM）:          合并后（一次 GEMM）:
-  q = x @ W_q                qkv = x @ [W_q; W_k; W_v]   ← 一次矩阵乘法
-  k = x @ W_k                q, k, v = qkv.split(...)
-  v = x @ W_v
-```
-
-<span style="color:#059669">**实现细节**</span> 这减少了 kernel launch 次数，也让 GPU 在一次更大的 GEMM 中完成原本三次独立投影，提高推理阶段的利用率。
+HuggingFace 的 Qwen3 存储了三个独立的投影矩阵 `q_proj`、`k_proj`、`v_proj`。在推理时，把它们**合并成一个 `qkv_proj`** 可以用一次矩阵乘法同时计算 Q、K、V，这减少了 kernel launch 次数，也让 GPU 在一次更大的 GEMM 中完成原本三次独立投影，提高推理阶段的利用率。
+![FusedQKV](./posts/FusedQKV.png)
 
 ### Gate/Up 的处理
 
-<span style="color:#059669">**实现细节**</span> Qwen3 的 `gate_proj` 和 `up_proj` 在 HF 中是分开存储的，在本项目中也保持为分开的 `nn.Linear` 层。forward 时通过 `torch.cat` 合并后送入 `SiluAndMul`。这和 QKV 合并不是同一回事：QKV 合并是为了减少 Attention 的 GEMM 次数；Gate/Up 在运行时拼接是为了贴合 SwiGLU 的计算语义。
+Qwen3 的 `gate_proj` 和 `up_proj` 在 HF 中是分开存储的，在本项目中也保持为分开的 `nn.Linear` 层。forward 时通过 `torch.cat` 合并后送入 `SiluAndMul`。这和 QKV 合并不是同一回事：QKV 合并是为了减少 Attention 的 GEMM 次数；Gate/Up 在运行时拼接是为了贴合 SwiGLU 的计算语义。
 
----
 
 ## 九、总结：一个 token 的完整旅程
 
 <span style="color:#7c3aed">**数据流**</span> 下面把 tokenizer、模型层、最终 logits 和采样器接起来。序列中的每个 token 都会经过相同的 decoder layer 堆栈，但只有最后一个位置的 logits 用于决定下一个 token：
 
-```
-"Hello, my name is Alice."
-
-            ↓ tokenizer.encode()
-      [39, 9370, 11, 716, 374, 16840]
-            ↓ model.forward()
-            ↓
-      ┌─ embed_tokens ─────────────────────┐
-      │  [6] → [6, 2048]                    │  查表，把 6 个 token ID 变成 6 个向量
-      └────────────────────────────────────┘
-            ↓
-      ┌─ Layer 0 ──────────────────────────┐
-      │  input_norm → attn(qkv→QKnorm→RoPE │  自注意力：每个 token
-      │  → GQA → o_proj)                   │  关注所有之前的 token
-      │  post_norm → mlp(gate/up→SiLU→down) │  逐位置 FFN 变换
-      └────────────────────────────────────┘
-            ↓  ...×27...
-            ↓
-      ┌─ Layer 27（最后一层）──────────────┐
-      │  同上                                │
-      └────────────────────────────────────┘
-            ↓
-      ┌─ final_norm ───────────────────────┐
-      │  [6, 2048] → [6, 2048]              │  最终归一化
-      └────────────────────────────────────┘
-            ↓
-      ┌─ lm_head ──────────────────────────┐
-      │  [6, 2048] → [6, 151936]            │  投影到词表，得到每个位置对每个词的分数
-      └────────────────────────────────────┘
-            ↓ 取最后一个位置
-      logits[-1] = [151936]
-            ↓ Sampler
-      下一个 token_id = 13  ( "." )
-            ↓ tokenizer.decode()
-      "." → 拼回 input_ids → 循环
-```
+![全流程](./posts/Total.png)
