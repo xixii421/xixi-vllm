@@ -6,7 +6,7 @@
 - [RMSNorm](./layers/rmsnorm.md)
 - [RotaryEmbedding](./layers/rotary.md)
 - [Attention](./layers/attention.md)
-- [SiluAndMul](./layers/attention.md)
+- [SiluAndMul](./layers/activation.md)
 - [Qwen3-0.6B Model](./model.md)
 
 

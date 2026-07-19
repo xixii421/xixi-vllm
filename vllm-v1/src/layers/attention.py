@@ -1,11 +1,30 @@
+"""GQA attention with block-pool KV (gather → SDPA)."""
+
+from __future__ import annotations
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from ..utils.context import get_forward_context
+from ..kv.context import get_forward_context
+
+
+def _sdpa_supports_gqa() -> bool:
+    try:
+        q = torch.zeros(1, 2, 1, 4)
+        k = torch.zeros(1, 1, 1, 4)
+        F.scaled_dot_product_attention(q, k, k, is_causal=True, enable_gqa=True)
+        return True
+    except TypeError:
+        return False
+
+
+_SDPA_HAS_GQA = _sdpa_supports_gqa()
 
 
 class Attention(nn.Module):
+    """Input/output layout ``[B, S, H, D]``; SDPA uses ``[B, H, S, D]``."""
+
     def __init__(
         self,
         num_heads: int,
@@ -13,59 +32,86 @@ class Attention(nn.Module):
         scaling: float,
         num_kv_heads: int,
         layer_id: int = 0,
-    ):
+    ) -> None:
         super().__init__()
+        if num_heads % num_kv_heads != 0:
+            raise ValueError("num_heads must be divisible by num_kv_heads")
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.num_kv_heads = num_kv_heads
         self.layer_id = layer_id
-
-        assert num_heads % num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
         self.num_kv_groups = num_heads // num_kv_heads
         self.scaling = scaling
 
-    def _expand_gqa(self, k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _expand_gqa(
+        self, k: torch.Tensor, v: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.num_kv_groups <= 1:
             return k, v
-        batch, kv_heads, seq, head_dim = k.shape
-        k = k.unsqueeze(2).expand(batch, kv_heads, self.num_kv_groups, seq, head_dim)
-        k = k.reshape(batch, self.num_heads, seq, head_dim)
-        v = v.unsqueeze(2).expand(batch, kv_heads, self.num_kv_groups, seq, head_dim)
-        v = v.reshape(batch, self.num_heads, seq, head_dim)
+        b, hkv, s, d = k.shape
+        k = k.unsqueeze(2).expand(b, hkv, self.num_kv_groups, s, d).reshape(
+            b, self.num_heads, s, d
+        )
+        v = v.unsqueeze(2).expand(b, hkv, self.num_kv_groups, s, d).reshape(
+            b, self.num_heads, s, d
+        )
         return k, v
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+    def _sdpa(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        is_causal: bool,
+        attn_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        kwargs: dict = {"scale": self.scaling}
+        if attn_mask is not None:
+            kwargs["attn_mask"] = attn_mask
+        else:
+            kwargs["is_causal"] = is_causal
+        if _SDPA_HAS_GQA and k.shape[1] != q.shape[1]:
+            kwargs["enable_gqa"] = True
+            return F.scaled_dot_product_attention(q, k, v, **kwargs)
+        if k.shape[1] != q.shape[1]:
+            k, v = self._expand_gqa(k, v)
+        return F.scaled_dot_product_attention(q, k, v, **kwargs)
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         ctx = get_forward_context()
-        q = q.transpose(1, 2)
+        q = q.transpose(1, 2)  # [B,H,S,D]
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        if ctx is None or ctx.kv_cache is None:
-            k, v = self._expand_gqa(k, v)
-            attn_output = F.scaled_dot_product_attention(
-                q, k, v, is_causal=True, scale=self.scaling
-            )
-            return attn_output.transpose(1, 2).contiguous()
+        if ctx is None:
+            out = self._sdpa(q, k, v, is_causal=True)
+            return out.transpose(1, 2).contiguous()
 
-        cache = ctx.kv_cache
-        layer_id = self.layer_id
+        mgr, seq = ctx.manager, ctx.seq
+        start = ctx.cache_len
+        n = q.shape[2]
+        # Store post-RoPE K/V into the block pool.
+        mgr.write(self.layer_id, seq, start, k.transpose(1, 2), v.transpose(1, 2))
+        total = start + n
+        k_c, v_c = mgr.gather(self.layer_id, seq, total)
+        k_c = k_c.unsqueeze(0).transpose(1, 2)  # [1,Hkv,T,D]
+        v_c = v_c.unsqueeze(0).transpose(1, 2)
 
-        if ctx.is_prefill:
-            start = ctx.cache_len
-            cache.write(layer_id, start, k.transpose(1, 2), v.transpose(1, 2))
-            k, v = self._expand_gqa(k, v)
-            attn_output = F.scaled_dot_product_attention(
-                q, k, v, is_causal=True, scale=self.scaling
-            )
+        if start == 0 and n == total:
+            out = self._sdpa(q, k_c, v_c, is_causal=True)
+        elif n == 1:
+            out = self._sdpa(q, k_c, v_c, is_causal=False)
         else:
-            pos = ctx.cache_len
-            cache.write(layer_id, pos, k.transpose(1, 2), v.transpose(1, 2))
-            k_cached, v_cached = cache.read(layer_id, pos + 1)
-            k_cached = k_cached.unsqueeze(0).transpose(1, 2)
-            v_cached = v_cached.unsqueeze(0).transpose(1, 2)
-            k_cached, v_cached = self._expand_gqa(k_cached, v_cached)
-            attn_output = F.scaled_dot_product_attention(
-                q, k_cached, v_cached, is_causal=False, scale=self.scaling
-            )
+            # Partial prefill after a prefix hit: Q is only the new span.
+            device, dtype = q.device, q.dtype
+            q_pos = torch.arange(start, start + n, device=device)[:, None]
+            kv_pos = torch.arange(total, device=device)[None, :]
+            # bool mask: True = keep (PyTorch SDPA additive uses float; use -inf)
+            keep = kv_pos <= q_pos
+            neg = torch.finfo(dtype).min
+            attn_mask = torch.zeros(n, total, device=device, dtype=dtype)
+            attn_mask = attn_mask.masked_fill(~keep, neg)
+            out = self._sdpa(q, k_c, v_c, is_causal=False, attn_mask=attn_mask)
 
-        return attn_output.transpose(1, 2).contiguous()
+        return out.transpose(1, 2).contiguous()

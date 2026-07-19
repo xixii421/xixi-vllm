@@ -1,24 +1,18 @@
-"""Per-forward metadata for KV Cache (prefill vs decode)."""
-
 from __future__ import annotations
-
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from ..kv_cache import KVCache
+if TYPE_CHECKING:
+    from .manager import KVManager
+    from .sequence import Sequence
 
 
 @dataclass
 class ForwardContext:
-    """Describes one model forward pass.
-
-    cache_len is the number of K/V slots already filled before this step writes.
-    Prefill writes new tokens starting at cache_len.
-    Decode writes exactly one new token at slot cache_len.
-    """
-
     is_prefill: bool
     cache_len: int
-    kv_cache: KVCache
+    manager: KVManager
+    seq: Sequence
 
 
 _forward_ctx: ForwardContext | None = None

@@ -1,6 +1,6 @@
 # vllm-v0 架构文档
 
-> [上一节](../README.md) | [下一节]()
+> [上一节](../README.md) | [下一节](./layers/rmsnorm.md)
 
 我们究竟为什么需要推理框架呢？原生的模型为什么不能做推理？
 
@@ -80,4 +80,13 @@ vllm-v0/
 
 
 ### 阅读顺序
+
+完整目录与推荐阅读路径见仓库根目录 [README.md](../README.md)。本目录下建议顺序：
+
+1. 本文（架构与自回归循环）
+2. [layers/rmsnorm.md](./layers/rmsnorm.md) → [rotary.md](./layers/rotary.md) → [attention.md](./layers/attention.md) → [activation.md](./layers/activation.md)
+3. [layers.md](./layers.md)（层装配总览）
+4. [model.md](./model.md)（组合成 Qwen3 + 权重加载）
+5. [sampler.md](./sampler.md)
+6. [engine.md](./engine.md) + `run.py`
 
