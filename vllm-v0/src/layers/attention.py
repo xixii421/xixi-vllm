@@ -1,5 +1,3 @@
-"""多头 / 分组查询注意力，走 PyTorch scaled_dot_product_attention。"""
-
 from __future__ import annotations
 
 import torch
@@ -22,11 +20,6 @@ _SDPA_HAS_GQA = _sdpa_supports_gqa()
 
 
 class Attention(nn.Module):
-    """输入 / 输出布局均为 [B, S, H, D]；内部转成 SDPA 需要的 [B, H, S, D]。
-
-    num_kv_heads < num_heads 时为 GQA：多个 Q 头共享同一组 K/V。
-    """
-
     def __init__(
         self,
         num_heads: int,

@@ -6,12 +6,6 @@ import torch
 
 
 class Sampler:
-    """无参数的后处理模块。
-
-    全部采样超参为 None 时走 argmax；否则按
-    temperature → top-k/top-p → min-p → softmax → multinomial。
-    """
-
     def __call__(
         self,
         logits: torch.Tensor,

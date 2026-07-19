@@ -1,5 +1,3 @@
-"""推理引擎：组装 tokenizer / 模型 / 采样器，驱动自回归 generate。"""
-
 from __future__ import annotations
 
 import torch
@@ -12,11 +10,6 @@ from .sampler import Sampler
 
 
 class Engine:
-    """单请求、同步、流式吐字的编排层。
-
-    把 prompt 变成 GPU 张量，调模型前向，再经 Sampler 得到 token。
-    """
-
     def __init__(self, config: EngineConfig) -> None:
         self.config = config
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -58,23 +51,18 @@ class Engine:
         top_k: int | None = None,
         min_p: float | None = None,
     ):
-        """自回归生成；每产出一个 token 的文本就 yield 一次。
-
-        每一步把「当前整段 ids」送入模型，再只取**最后一个位置**的 logits 采样。
-        中间位置的 hidden 也算过，但本循环只用末位决定下一个字。
-        """
         ids = (
             list(prompt)
             if isinstance(prompt, list)
             else self.tokenizer.encode(prompt)
         )
         ctx = self.config.context_len
-        # 超长 prompt：只保留右侧 context_len（硬截断）
+
         if len(ids) > ctx:
             ids = ids[-ctx:]
 
         def pack(v, dtype):
-            # 采样超参做成 [1] 张量，循环内复用，避免每步 new tensor
+
             return None if v is None else torch.tensor([v], device=self.device, dtype=dtype)
 
         # temperature<=0 → 传 None，Sampler 走 argmax 快路径

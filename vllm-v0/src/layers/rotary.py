@@ -1,7 +1,4 @@
-"""RoPE：预计算 cos/sin 表，按 positions 查表后旋转 Q 与 K。"""
-
 from __future__ import annotations
-
 import torch
 from torch import nn
 

@@ -1,10 +1,6 @@
-"""引擎配置：模型路径、上下文长度、精度与 eager / compile。"""
-
 from __future__ import annotations
-
 import os
 from dataclasses import dataclass, field
-
 from transformers import AutoConfig, PretrainedConfig
 
 
