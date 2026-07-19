@@ -1,5 +1,3 @@
-"""Compressed radix tree over block-hash keys (teaching slim of v7)."""
-
 from __future__ import annotations
 
 import time

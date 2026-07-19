@@ -1,5 +1,3 @@
-"""No prefix sharing — always allocate fresh blocks."""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

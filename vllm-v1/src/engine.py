@@ -1,5 +1,3 @@
-"""推理引擎：prefill + decode，经 KVManager（hash/radix 前缀可选）。"""
-
 from __future__ import annotations
 
 import torch

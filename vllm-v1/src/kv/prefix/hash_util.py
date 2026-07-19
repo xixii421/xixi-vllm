@@ -1,5 +1,3 @@
-"""Shared block-hash helper (blake2b, no xxhash dependency)."""
-
 from __future__ import annotations
 
 import hashlib

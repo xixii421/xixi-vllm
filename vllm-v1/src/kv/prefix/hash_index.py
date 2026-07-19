@@ -1,5 +1,3 @@
-"""Flat chained block-hash → physical block_id."""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

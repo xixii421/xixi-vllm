@@ -7,12 +7,6 @@ from torch import nn
 
 
 class RMSNorm(nn.Module):
-    """y = x / rms(x) * weight；若传入 residual，则先 x = x + residual。
-
-    返回：无 residual 时只返回 y；有 residual 时返回 (y, x+residual)。
-    Decoder 用后者在层间传递融合后的残差，少一次单独的 add kernel。
-    """
-
     def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
