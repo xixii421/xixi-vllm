@@ -1,7 +1,7 @@
 # vllm-v1
-> KV Management
+> **核心设计**：KV Management
 
-> [上一节](../README.md) · 图示备查见本文后半 · 细节可对照源码
+> [上一节](../README.md) | [下一节](./ADDED_vs_v0.md)
 
 v0 解决的是怎样把 Qwen3 从权重到逐字输出这条链路跑通。
 
@@ -30,7 +30,7 @@ v0 的自回归循环可以压成五步：
 3. 我们按什么理念设计
 4. 最终换来什么效果。
 
-### 2.1 当前缺点
+### 2.1 当前 V0 缺点
 
 自回归里，第 $t$ 步要预测下一个 token，Attention 必须看见位置 $0\ldots t-1$ 的 Key / Value。这件事数学上没问题。v0 也确实是这么实现的：
 **每一步都把整段序列重新送进模型，让每一层现场重算全部历史的 K/V。**
@@ -39,96 +39,57 @@ v0 的自回归循环可以压成五步：
 1. **计算重复**。生成第 $N$ 个新 token 时，前面 $N-1$ 个位置的 K/V 在上一步其实已经算过了，但因为没有地方存放，下一步只能再算一遍。decode 的 Attention 工作量随长度近似按 $O(N^2)$ 涨，长上下文时延迟暴涨。
 2. **显存碎片化**。如果按最大输出长度给每条请求预留一整段连续 KV，这倒是可以消除重算，但长度不可预知时会大量预留、碎片化。KV缓存不能只做一个大 tensor 粘在模型上，而是应该设计一个类似内存池的东西，高效的对整个池子进行管理。
 
-所以 v1 要同时解决两件事：**缓存 K/V**，以及 **管理KV**。
+所以 v1 要同时解决两件事：**缓存KV**，以及 **管理KV**。
 
 ### 2.2 KV Cache 的核心作用
-KV Cache可以让模型在输出过程中，每个 token 的 K/V 只算一次；之后每一步生成只负责算新 token 的 K/V 并追加，Attention的时候 再把缓存里的历史 + 当前生成的新token拼起来做注意力。
+KV Cache可以让模型在输出过程中，每个 token 的 K/V 只算一次；之后每一步生成只负责算新 token 的 K/V 并追加，计算Attention的时候 再把缓存里的历史 + 当前生成的新token拼起来做注意力。
 
 对应到两阶段：
 
 - **Prefill**：把 prompt尚未在缓存里的那一段过一遍模型，把得到的 K/V 写入缓存。这一步仍可能处理较长序列，但是一次性计算。
 - **Decode**：每一轮模型输入长度变为 **1**。新算出的 K/V 添加进缓存；做 Attention 时 读出长度为当前总序列的 K/V，再和长度为 1 的 Q 做 SDPA。
 
-因此 Cache 的第一性收益是 **算力**。decode 从【每步重算整段】变成【每步只算增量】。  
+因此 Cache 的第一性收益是 **算力**。decode 从每步重算整段，变成每步只算增量。  
 第二性收益是 **显存形态**与 **跨请求复用**。页式存放可以减少预留浪费；前缀索引让相同 prompt 前缀不必再 prefill 一遍。
 
-### 2.3 KV Management的设计理念
+### 2.3 KV 管理的设计理念
+
+明确了要缓存 K/V，还要管得住显存之后，真正难的其实不是实现，而是怎么把这一套设计划分好任务边界。如果把所有事塞进 `Attention`，或塞进一个超级 `Manager`，后面任何改动都会牵一发而动全身。
+因此我在这里的设计方案是先想清楚**三条理念**：
+
+我用一个例子来带大家体会一下KV Management的逻辑设计，北邮旁边有一个金谷园饺子店，有很多桌位，人们会来这里吃饺子。
 
 
-**第一刀：逻辑地址与物理显存分离（PagedAttention）。**  
-请求眼里只有「我这条序列第几个 token、第几页」；GPU 上则是固定大小的物理页池。页可以不连续，用时再分配，用完可回池。这借鉴操作系统虚拟内存，避免「按最大长度连续预留」。
+**理念一：逻辑与物理分开**
+从顾客的角度来说，每一个人拿到的都是一个连续的号码，例如A01、A02等号码，但是实际上坐到的地方可能是33号、68号桌子等等，物理位置和逻辑位置是分离的。
+顾客只需要知道自己是逻辑第几位就可以了，并不关心桌子在哪，对照着表来映射即可。
+同理，操作系统管理内存的关键，并不是把一块巨大的 RAM 直接裸给进程，而是让进程看见连续的虚拟地址，每一个进程都有完整的地址映射空间，但是硬件上是一页一页不连续的物理页，中间靠页表翻译。
+KV 也一样。一条请求在逻辑上拥有从第 0 个 token 往后连续增长的地址空间；GPU 上则是预先划好的**固定大小页池**，请求变长就多拿几页，用完再还。请求不需要知道某页落在显存的哪一片连续区间。
 
-**第二刀：生命周期与张量读写分离。**  
-「谁占用哪些页、前缀能否命中、请求结束页去哪」是**调度 / 资源**问题；「给定页号如何把 K/V 写进大张量、如何按逻辑顺序读回」是**存储契约**问题。两者不应糊在同一个类里，否则 Attention、分配器、前缀树会互相 import 到失控。
+**理念二：管资源与做存储分开。**  
+在金谷园有一个非常特殊的岗位，门口查看监控的阿姨。她实际上是在管理资源，谁来了坐哪张桌子？是坐小桌子还是大桌子？前边一桌的人是不是已经吃完空出来了等等？这个其实是资源管理。
 
-**第三刀：编排与计算分离，用「本步合同」对接。**  
-Engine 负责决定：这一步要算哪段 token、页表是什么、从哪写到哪。Model / Attention 仍应尽量只做「算」，但必须能看见 Cache。我们不把 `KVManager` 塞进 `Attention.__init__`，也不改 `Qwen3ForCausalLM.forward` 的外壳；而是让 Engine 在每次 `model(...)` **之前**放入一份短命的 `ForwardContext`，Attention `forward` 时取用。**融合点只有这一处合同，而不是把 Cache 状态散进每一层参数。**
+而还有保洁员，需要对上一桌子的残羹剩饭进行清理，以及摆放新的餐具，并且通知给前台阿姨。这个阿姨是实际上在管理各个桌子的”读写“。
+那么从KV的角度来说，一旦有了页，就会分成两类问题。第一类偏**资源与生命周期**：这页现在归谁，前缀能不能复用，请求结束是留下还是回收？第二类偏**存储怎么访问**：已经知道页号之后，怎样把算出来的 K/V 写进张量，怎样按逻辑顺序读回来给 Attention？对应到代码，KVManager就是前台，PagedStore就是保洁员。
 
-### 2.4 如何设计：映射到本仓库的四个模块
-
-按上面三刀，代码落成四块，读目录就能对上理念。
-
-```text
-src/kv/pool.py            物理页池 BlockPool（大张量 k/v + free/used/cached）
-src/kv/sequence.py        逻辑序列 Sequence（token_ids + block_table）
-src/kv/manager.py         生命周期 KVManager（allocate / ensure / finish + 前缀）
-src/kv/context.py         本步合同 ForwardContext（set/get_forward_context）
-src/pagedattention/       存储契约 PagedStore.write / gather + slots_tensor
-src/layers/attention.py   消费合同：write → gather → SDPA
-src/engine.py             编排：Prefill/Decode、绑合同、喂增量 ids/positions
-```
-
-用「一次 token 的 K/V 从诞生到被看见」串起来：
-
-1. **`BlockPool`**：引擎启动时按模型层数、KV 头维，预开一整块  
-   `[num_layers, num_blocks, block_size, num_kv_heads, head_dim]`。  
-   真正的数值住在这里；`_Block` 只挂元数据（引用计数、块哈希等）。页在 `free → used → cached` 间流转。
-
-2. **`Sequence` + `KVManager.allocate`**：请求到来时先建立逻辑对象，再向池子要页，填好 `block_table`（逻辑页号 → 物理块号）。可选地问 `PrefixIndex` 能不能直接认领别人留下的满块。**这一步还不跑 Attention，只解决「住哪里」。**
-
-3. **`Engine._bind_ctx`**：真正 `model.forward` 前，根据 `block_table` 算出本步 `slot_mapping`（新 token 写到哪些物理 slot），连同 `store / cache_len / seq_len` 打进 `ForwardContext`，`set_forward_context`。**这一步解决「Model 本步该看见什么合同」。**
-
-4. **`Attention` + `PagedStore`**：层内仍先算当前输入的 Q/K/V（与 v0 相同）；接着 `store.write` 把本步 K/V 按 slot 写入池子，`store.gather` 按 `block_table` 读回 `[0, seq_len)` 的历史，再 SDPA。**这一步解决「算一次、写入；读全量、做注意力」。**
-
-5. **Decode 变长时 `ensure_blocks`，结束时 `finish`**：新 token 跨页就追加物理页；请求结束把满块 `publish` 进前缀索引并进入 `cached`，未满尾块回 `free`。池子跨多次 `generate` 存活，**禁止**每次生成 `zero_()` 整池。
-
-一张职责表方便对代码：
-
-| 模块 | 设计上负责什么 | 刻意不负责什么 |
-| :--- | :--- | :--- |
-| `KVManager` / `BlockPool` / `Sequence` | 页的占用、补页、结束回收、前缀 match/publish | Attention 数值、SDPA |
-| `PagedStore` / `slots_tensor` | 页表地址 ↔ 张量下标的读写 | 请求何时开始结束 |
-| `ForwardContext` | Engine → Attention 的短命合同 | 长期存储 |
-| `Attention` | 执行 write→gather→SDPA | 是否前缀命中、页是否够用 |
-| `Engine` | Prefill/Decode 切分、绑合同、增量 ids/positions | 哈希树内部、物理 index_copy 细节 |
-
-### 2.5 效果：相对 v0 立刻能感知到什么
-
-1. **Decode 计算量质变**。模型每步输入从长度 $N$ 变为长度 $1$；历史 K/V 来自 Cache。这是打开 tok/s 的主因，也是「KV Cache 核心作用」的可观测结果。
-
-2. **显存按需长页，而不是按 `max_length` 预留一整条连续缓冲**。请求短就占少量 `used` 页；结束后满块可留在 `cached` 供复用，空页回 `free`。同一块物理显存被多请求、多轮次轮转使用，为后续 Continuous Batching 留出同一套页表语义。
-
-3. **模型骨架几乎不用为 Cache 改接口**。`forward(ids, positions)` 仍在；变的是 Engine 喂什么，以及 Attention 是否走合同。排错时边界清晰：页不够找 `KVManager`，写错位找 `slot_mapping` / `PagedStore`，算子不对找 `Attention`。
-
-4. **前缀命中是叠加收益，不是主路径本身**。`prefix_backend=hash|radix` 时，第二次相同前缀的 `allocate` 可跳过已缓存满块的 Prefill；关掉后端则退化为「单请求内 Paged KV」，主链路不变。
-
-一句话收束本节：
-
-> **KV Cache 的核心作用是让每个 token 的 K/V 只算一次；  
-> 本仓库的设计理念是「页式物理池 + 生命周期管理 + 本步合同接入 Attention」；  
-> 代码上就是 `kv` 管住哪、`pagedattention` 管怎么读写、`Engine` 管何时绑定、`Attention` 管按合同完成 write/gather/SDPA。**
-
----
+**理念三：编排与计算分开。** 
+保洁不需要知道来了多少人，前台也并不关心保洁的工作，顾客更是不担心桌子是否收拾好，因此它们都是有权责边界的。
+并且它们之间是有状态切换和先后顺序调度的，因此Engine就需要管理，什么时候告诉保洁、什么时候告诉顾客，什么时候更新前台信息等等。
+因此需要第三层关系：**编排层告诉计算层这一步的规则，计算层按规则读写 Cache。** 
 
 
-## 三、整条流程：从 prompt 到逐字输出
 
-下面按一次 `Engine.generate` 走完整路径。这是读 v1 时最该先建立的心理模型。
+### 2.4 效果
+1. **Decode 计算量下降**。模型每步输入从长度 $N$ 变为长度 $1$；历史 K/V 来自 Cache。这是提升 tok/s 的主因。
+2. **显存按需占页**。短请求少占页；结束后满块可留作前缀复用，其余回池。同一块物理显存可被多轮请求轮转，语义上也对齐后续 Continuous Batching。
+3. **模型骨架几乎不变**。变的是 Engine 喂什么、Attention 是否按规则走 Cache。排错边界清晰：资源问题找 `kv`，读写问题找 `pagedattention`，算子问题找 `Attention`。
+4. **前缀命中是叠加项**。打开 hash/radix 可跳过已缓存满块的 Prefill；关掉则退化为单请求内的分页 KV，主路径不变。
+
+## 三、计算流程
+下面按一次 `Engine.generate` 走完整路径。
 
 ### 3.1 启动时多出来了什么
-
-相对 v0，`Engine.__init__` 在 model / sampler 之外，会构造一个常驻的：
-
+相比较v0，Engine会构造一个KVManager：
 ```text
 KVManager
   ├─ BlockPool     物理 k/v + free/used/cached 三态
@@ -136,9 +97,9 @@ KVManager
   └─ PrefixIndex   none | hash | radix（可选）
 ```
 
-模型权重仍按 v0 方式加载；**KV 池按层数、KV 头数从模型结构推出来**，与权重并行存在。
+模型权重没有任何变化，只是在涉及到kV的时候，从计算变成了访存读取。
 
-### 3.2 请求进入：从字符串到有页表的 Sequence
+### 3.2 请求进入
 
 ```text
 prompt
@@ -151,20 +112,17 @@ prompt
   → seq.num_cached_tokens = 命中满块 × block_size
 ```
 
-此时还没有算任何 Attention。只是：**这条请求已经知道「逻辑上第几页对应物理上哪一块」**。
+此时还没有进行计算，先进行映射：**这条请求已经知道，逻辑上第几页对应物理上哪一块。**
 
-### 3.3 Prefill：把「还没在缓存里的 prompt」算进去
-
-分两种常见情况：
-
-**A. 未命中或只部分命中**（`cached < prompt_len`）
+### 3.3 Prefill
+**A. 未命中或只部分命中**
 
 ```text
 Engine._bind_ctx(seq, is_prefill=True, cache_len=cached, write_end=prompt_len)
   → 用 block_table 生成 slot_mapping（只覆盖要新写入的那段）
   → set_forward_context(ForwardContext(...))
 
-模型输入只给「未缓存段」：
+模型输入只给未缓存段：
   ids       = input_ids[cached : prompt_len]
   positions = cached … prompt_len-1
 
@@ -176,13 +134,13 @@ model.forward → 各层 Attention：
 取末位 hidden → logits → 采出第一个生成 token
 ```
 
-**B. 整段 prompt 都在前缀缓存里**（极少见的「满命中」边界）
+**B. 整段 prompt 都在前缀缓存里**
 
-历史上的 K/V 都在，但最后一位的 hidden / logits 仍要落到「下一个生成 token」。v1 会退成：只对最后一个 prompt token 再走一步类似 decode 的 forward，然后采样。
+历史上的 K/V 都在，但最后一位的 hidden / logits 仍要落到下一个生成 token。v1 会退成：只对最后一个 prompt token 再走一步类似 decode 的 forward，然后采样。
 
 无论 A/B，**Prefill 结束后，pool 里已经放好了这条请求当前所需的物理 KV。**
 
-### 3.4 Decode：每步只喂一个新 token
+### 3.4 Decode
 
 ```text
 seq.append_token(next_id)
@@ -199,21 +157,13 @@ kv.ensure_blocks(seq)          # 可能跨过页边界，需要新物理页
   cache_len += 1
 ```
 
-与 v0 对比一句话：
-
-| | v0 | v1 decode |
-| :--- | :--- | :--- |
-| 模型输入长度 | 整段历史 | **恒为 1**（新 token） |
-| positions | `0…N-1` 整段重编 | **只给新位置** `cache_len` |
-| Attention 历史 | 当场重算 | **从 PagedStore gather** |
-
-### 3.5 收尾：finish，而不是把池子扔掉
+### 3.5 收尾
 
 ```text
 finally:
   set_forward_context(None)
   kv.finish(seq)
-      ├─ 把「满块」的元数据 publish 进 PrefixIndex（若开启）
+      ├─ 把满块的元数据 publish 进 PrefixIndex（若开启）
       ├─ 满块页 → cached（供下次 match）
       └─ 尾块未满 / 或 none 后端 → free
 ```
@@ -222,7 +172,7 @@ finally:
 
 ---
 
-## 四、KV 如何「长进」Engine：编排职责对照
+## 四、KV 如何并入 Engine：编排职责对照
 
 可以把 Engine 理解成导演，KV 是场务，Model 是演员。
 
@@ -249,7 +199,7 @@ Engine **仍然不实现** Attention 数学，也 **不直接** `index_copy_` �
 
 ---
 
-## 五、KV 如何「长进」Model：只改 Attention 契约
+## 五、KV 如何并入 Model：只改 Attention 契约
 
 模型堆叠方式与 v0 一致：`Embedding → N × DecoderLayer → Norm → lm_head`。  
 Decoder 里仍是 RMSNorm → QKV → RoPE → **Attention** → 残差 → MLP。
@@ -272,9 +222,9 @@ v1 Attention.forward(q, k, v):
 
 因此：
 
-- **上层 `Qwen3ForCausalLM.forward(ids, positions)` 签名可以不变**——仍然是「当前这批 token 的 id 与位置」。
+- **上层 `Qwen3ForCausalLM.forward(ids, positions)` 签名可以不变**，仍然表示当前这批 token 的 id 与位置。
 - **变的是 ids/positions 的语义**：v0 是整段；v1 Prefill 是未缓存段，Decode 是单 token。
-- **Attention 从「自给自足」变成「读合同」**；合同由 Engine 写好，与层编号 `layer_id` 一起决定写到池的哪一层。
+- **Attention 从自给自足，变成读合同**；合同由 Engine 写好，与层编号 `layer_id` 一起决定写到池的哪一层。
 
 这就是融合方式的全部要点：**Model 不算生命周期，只认本步合同；合同由 Engine 在调用 Model 之前放进线程局部上下文。**
 
@@ -330,7 +280,7 @@ EngineConfig + 权重
 前缀不是另一套管线，而是挂在 **allocate / finish** 两端的加速器：
 
 ```text
-请求结束 finish ——publish→ 索引记住「这些满块 token ↔ 这些物理页」
+请求结束 finish ——publish→ 索引记住：这些满块 token 对应哪些物理页
 下一次 allocate ——match→  直接拿回物理页，Prefill 跳过对应长度
 ```
 
@@ -338,7 +288,7 @@ EngineConfig + 权重
 - `none`：只有单次请求内的 KV Cache，无跨请求复用。
 - `hash` / `radix`：索引结构不同，对 Engine / Attention 完全透明。
 
-理解主流程时，可以先当成「allocate 总是全 miss」；主链路通了再打开前缀后端。
+理解主流程时，可以先当成 allocate 总是全 miss。主链路通了再打开前缀后端。
 
 ---
 
@@ -351,7 +301,7 @@ EngineConfig + 权重
 | 多卡 / 异步服务 | 单卡同步 | TP、多进程 |
 | 调度驱逐策略 | free 不够才挤 cached | 更完整的 eviction |
 
-<span style="color:#b45309">**机制**</span> 先把「历史 K/V 存在哪、谁分配、Model 怎么看见」这条主脊梁立住；吞吐向优化应落在调度与算子，而不是再把 Attention 与页管理耦死。
+<span style="color:#b45309">**机制**</span> 先把主脊梁立住：历史 K/V 存在哪，谁负责分配，Model 怎么看见。吞吐向优化应落在调度与算子，而不是再把 Attention 与页管理耦死。
 
 ---
 
@@ -446,4 +396,4 @@ sequenceDiagram
 - **v1**：Engine 用 `KVManager` 管页、用 `ForwardContext` 把页表合同塞进当步；Model 的 Attention 按合同把 K/V 写入物理池并读回历史，从而 Prefill 写缓存、Decode 只算新 token。  
 - **前缀**：只是把 finish 留下的满块页，在下一次 allocate 时再认领回来。
 
-读完本文，应能不看代码说出一次 `generate` 里「谁在什么时候写 KV、谁在什么时候读 KV」。再下钻时，用文末图 + `engine.py` → `attention.py` → `manager.py` → `store.py` 这条路径即可。
+读完本文，应能不看代码说出一次 `generate` 里，谁在什么时候写 KV，谁在什么时候读 KV。再下钻时，用文末图加 `engine.py` → `attention.py` → `manager.py` → `store.py` 这条路径即可。
