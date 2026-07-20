@@ -1,52 +1,42 @@
 # vllm-v7
 
-主题：**ullm 风格控制面** — ZMQ RPC、Radix 前缀缓存、Async + OpenAI API、多机 NCCL 配置、PD 分离 stub。底座仍是 v6 的 TP/PP + Qwen3-VL + FlashInfer。
+教学向连续批处理引擎：控制面（Engine / Scheduler）与计算面（ModelRunner / layers）分离。
 
-## 快速开始
+## 文档
+
+- 架构：[`docs/README.md`](docs/README.md)（控制/计算、调度流、计算流）
+- 设计约定：[`DESIGN.md`](DESIGN.md)
+
+## 入口
 
 ```bash
-cd vllm-v7
-export CUDA_DEVICE_ORDER=PCI_BUS_ID PYTHONPATH=.
-source .venv/bin/activate   # → vllm-v6/.venv
+# 公共 API
+from src import Engine, EngineConfig, SamplingParams
 
-# 单卡（Radix 默认开；ZMQ 仅 world_size>1 生效）
-python run.py --model ~/huggingface/Qwen3-0.6B --temperature 0 --max-new-tokens 64 --eager
+# 微基准（bench/lib）
+PYTHONPATH=. python -m bench.run --suite e2e,ttft,decode
 
-# TP=2 + ZMQ（默认）
-python run.py --model ~/huggingface/Qwen3-0.6B \
-  --tp-size 2 --device-ids 0,1 --rpc-backend zmq --eager
+# vs 官方 vLLM（CG 矩阵）
+PYTHONPATH=. python scripts/bench_vs_vllm_full.py --mode cg --suite text
 
-# 回退到 v6 Pipe
-python run.py --model ~/huggingface/Qwen3-0.6B \
-  --tp-size 2 --device-ids 0,1 --rpc-backend pipe --eager
-
-# OpenAI API
-python -m src.entrypoints.openai_api --model ~/huggingface/Qwen3-0.6B --port 8000 --eager
+# 模型下载辅助
+PYTHONPATH=. python scripts/hub.py --help
 ```
-
-## 架构（相对 v6）
-
-```text
-OpenAI / AsyncLLM
-       │
-   Engine + Scheduler + RadixBlockManager
-       │  ZMQ PUB  (或 Pipe)
-   Workers (TP×PP) ── NCCL tcp://nccl_host:port
-       │
-   (optional PD stub) Prefill ↔ Decode KV transfer
-```
-
-详见 [DESIGN.md](DESIGN.md)。异构 / 多机验证步骤也在其中。
 
 ## 测试
 
 ```bash
-./.venv/bin/python -m pytest -m unit -q
-./.venv/bin/python -m pytest tests/unit/test_radix.py -q
-# 双卡
-./.venv/bin/python -m pytest -m distributed -q --tb=short
+pytest tests/unit -q          # CPU 快测
+pytest tests/gpu -q           # 单卡
+pytest tests/distributed -q   # 多卡
 ```
 
-## 依赖增量
+## 目录
 
-`pyzmq`、`fastapi`、`uvicorn`、`pydantic`（已写入 `requirements.txt`）。
+```text
+src/           引擎核心
+docs/          架构讲义
+bench/lib/     微基准核心库
+scripts/       少量 CLI（对比 / hub / 分片）
+tests/         精简 unit / gpu / distributed
+```

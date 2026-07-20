@@ -1,4 +1,4 @@
-"""GQA attention with block-pool KV (gather → SDPA)."""
+"""GQA attention with PagedAttention storage (slot write → gather → SDPA)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,11 @@ _SDPA_HAS_GQA = _sdpa_supports_gqa()
 
 
 class Attention(nn.Module):
-    """Input/output layout ``[B, S, H, D]``; SDPA uses ``[B, H, S, D]``."""
+    """Input/output layout ``[B, S, H, D]``; SDPA uses ``[B, H, S, D]``.
+
+    Couples only to ``ForwardContext``'s PagedAttention fields
+    (``store`` / ``slot_mapping`` / ``block_table``), not to ``KVManager``.
+    """
 
     def __init__(
         self,
@@ -88,13 +92,18 @@ class Attention(nn.Module):
             out = self._sdpa(q, k, v, is_causal=True)
             return out.transpose(1, 2).contiguous()
 
-        mgr, seq = ctx.manager, ctx.seq
         start = ctx.cache_len
         n = q.shape[2]
-        # Store post-RoPE K/V into the block pool.
-        mgr.write(self.layer_id, seq, start, k.transpose(1, 2), v.transpose(1, 2))
-        total = start + n
-        k_c, v_c = mgr.gather(self.layer_id, seq, total)
+        # Post-RoPE K/V → physical pages via slot_mapping.
+        ctx.store.write(
+            self.layer_id,
+            ctx.slot_mapping,
+            k.transpose(1, 2),
+            v.transpose(1, 2),
+        )
+        total = ctx.seq_len
+        assert total == start + n
+        k_c, v_c = ctx.store.gather(self.layer_id, ctx.block_table, total)
         k_c = k_c.unsqueeze(0).transpose(1, 2)  # [1,Hkv,T,D]
         v_c = v_c.unsqueeze(0).transpose(1, 2)
 
@@ -107,7 +116,6 @@ class Attention(nn.Module):
             device, dtype = q.device, q.dtype
             q_pos = torch.arange(start, start + n, device=device)[:, None]
             kv_pos = torch.arange(total, device=device)[None, :]
-            # bool mask: True = keep (PyTorch SDPA additive uses float; use -inf)
             keep = kv_pos <= q_pos
             neg = torch.finfo(dtype).min
             attn_mask = torch.zeros(n, total, device=device, dtype=dtype)

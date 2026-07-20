@@ -1,16 +1,43 @@
+"""Decode-path CUDA Graph runner for text / PP stages."""
+
 from __future__ import annotations
+
 import gc
+import logging
 from typing import Literal
+
 import torch
 from flashinfer import BatchDecodeWithPagedKVCacheWrapper
-from ..layers.attention import AttentionMetadata, attention_context
+
+from ..runtime.context import forward_context
 from ..distributed.pp import IntermediateTensors
-from ..context import forward_context
-PPRole = Literal['full', 'first', 'middle', 'last']
+from ..layers.attention import AttentionMetadata, attention_context
+
+logger = logging.getLogger(__name__)
+
+PPRole = Literal["full", "first", "middle", "last"]
+
 
 class CUDAGraphRunner:
 
-    def __init__(self, model, max_batch_size: int, max_model_len: int, block_size: int, hidden_size: int, num_kv_heads: int, head_dim: int, device: torch.device, dtype: torch.dtype, *, backend: object, kv_cache_pool: torch.Tensor, dummy_page_id: int, workspace_bytes: int=256 * 1024 * 1024, pp_role: PPRole='full') -> None:
+
+    def __init__(
+        self,
+        model,
+        max_batch_size: int,
+        max_model_len: int,
+        block_size: int,
+        hidden_size: int,
+        head_dim: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        *,
+        backend: object,
+        kv_cache_pool: torch.Tensor,
+        dummy_page_id: int,
+        workspace_bytes: int = 256 * 1024 * 1024,
+        pp_role: PPRole = "full",
+    ) -> None:
         self.model = model
         self.device = device
         self.max_bs = max_batch_size
@@ -23,17 +50,58 @@ class CUDAGraphRunner:
         self.hidden_size = hidden_size
         self.bs_list = _make_bs_list(max_batch_size)
         max_blocks = (max_model_len + block_size - 1) // block_size
-        self._max_blocks = max_blocks
-        self.workspace_buffer = torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
+
+        self.workspace_buffer = torch.empty(
+            workspace_bytes, dtype=torch.uint8, device=device
+        )
         self.input_ids = torch.zeros(max_batch_size, dtype=torch.int64, device=device)
         self.positions = torch.zeros(max_batch_size, dtype=torch.int64, device=device)
-        self.slot_mapping = torch.full((max_batch_size,), -1, dtype=torch.int32, device=device)
-        self.outputs = torch.zeros(max_batch_size, hidden_size, dtype=dtype, device=device)
-        self.residual_out = torch.zeros(max_batch_size, hidden_size, dtype=dtype, device=device)
-        self.hidden_in = torch.zeros(max_batch_size, hidden_size, dtype=dtype, device=device)
-        self.residual_in = torch.zeros(max_batch_size, hidden_size, dtype=dtype, device=device)
-        self._cg_bufs: dict[int, dict[str, torch.Tensor]] = {bs: {'indptr': torch.zeros(bs + 1, dtype=torch.int32, device=device), 'indices': torch.zeros(bs * max_blocks, dtype=torch.int32, device=device), 'last_page': torch.zeros(bs, dtype=torch.int32, device=device)} for bs in self.bs_list}
-        self._host_bufs: dict[int, dict[str, torch.Tensor]] = {bs: {'indptr': torch.zeros(bs + 1, dtype=torch.int32, pin_memory=True), 'last_page': torch.ones(bs, dtype=torch.int32, pin_memory=True), 'indices': torch.zeros(bs * max_blocks, dtype=torch.int32, pin_memory=True)} for bs in self.bs_list}
+        self.slot_mapping = torch.full(
+            (max_batch_size,), -1, dtype=torch.int32, device=device
+        )
+        self.outputs = torch.zeros(
+            max_batch_size, hidden_size, dtype=dtype, device=device
+        )
+
+        # PP-only buffers: allocate only what this stage actually reads/writes.
+        needs_residual_out = pp_role in ("first", "middle")
+        needs_pp_in = pp_role in ("middle", "last")
+        self.residual_out = (
+            torch.zeros(max_batch_size, hidden_size, dtype=dtype, device=device)
+            if needs_residual_out
+            else None
+        )
+        self.hidden_in = (
+            torch.zeros(max_batch_size, hidden_size, dtype=dtype, device=device)
+            if needs_pp_in
+            else None
+        )
+        self.residual_in = (
+            torch.zeros(max_batch_size, hidden_size, dtype=dtype, device=device)
+            if needs_pp_in
+            else None
+        )
+
+        self._cg_bufs: dict[int, dict[str, torch.Tensor]] = {
+            bs: {
+                "indptr": torch.zeros(bs + 1, dtype=torch.int32, device=device),
+                "indices": torch.zeros(
+                    bs * max_blocks, dtype=torch.int32, device=device
+                ),
+                "last_page": torch.zeros(bs, dtype=torch.int32, device=device),
+            }
+            for bs in self.bs_list
+        }
+        self._host_bufs: dict[int, dict[str, torch.Tensor]] = {
+            bs: {
+                "indptr": torch.zeros(bs + 1, dtype=torch.int32, pin_memory=True),
+                "last_page": torch.ones(bs, dtype=torch.int32, pin_memory=True),
+                "indices": torch.zeros(
+                    bs * max_blocks, dtype=torch.int32, pin_memory=True
+                ),
+            }
+            for bs in self.bs_list
+        }
         self.cg_wrappers: dict[int, BatchDecodeWithPagedKVCacheWrapper] = {}
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
         self._metas: dict[int, AttentionMetadata] = {}
@@ -42,23 +110,31 @@ class CUDAGraphRunner:
 
     def _forward_once(self, bs: int):
         role = self.pp_role
-        if role == 'full':
-            return self.model(input_ids=self.input_ids[:bs], positions=self.positions[:bs])
-        if role == 'first':
-            out = self.model(input_ids=self.input_ids[:bs], positions=self.positions[:bs])
+        if role == "full":
+            return self.model(
+                input_ids=self.input_ids[:bs], positions=self.positions[:bs]
+            )
+        if role == "first":
+            out = self.model(
+                input_ids=self.input_ids[:bs], positions=self.positions[:bs]
+            )
             assert isinstance(out, IntermediateTensors)
-            return (out['hidden_states'], out['residual'])
-        inter = IntermediateTensors(hidden_states=self.hidden_in[:bs], residual=self.residual_in[:bs])
-        if role == 'middle':
+            return (out.hidden_states, out.residual)
+        assert self.hidden_in is not None and self.residual_in is not None
+        inter = IntermediateTensors(
+            hidden_states=self.hidden_in[:bs], residual=self.residual_in[:bs]
+        )
+        if role == "middle":
             out = self.model(positions=self.positions[:bs], intermediate_tensors=inter)
             assert isinstance(out, IntermediateTensors)
-            return (out['hidden_states'], out['residual'])
+            return (out.hidden_states, out.residual)
         return self.model(positions=self.positions[:bs], intermediate_tensors=inter)
 
     def _assign_outputs(self, bs: int, result) -> None:
-        if self.pp_role in ('full', 'last'):
+        if self.pp_role in ("full", "last"):
             self.outputs[:bs] = result
         else:
+            assert self.residual_out is not None
             h, r = result
             self.outputs[:bs] = h
             self.residual_out[:bs] = r
@@ -73,11 +149,18 @@ class CUDAGraphRunner:
         for bs in sorted(self.bs_list, reverse=True):
             cg = self._make_cg_wrapper(bs)
             self.cg_wrappers[bs] = cg
-            meta = AttentionMetadata(wrapper=cg, kv_cache_pool=self.kv_cache_pool, slot_mapping=self.slot_mapping[:bs])
+            meta = AttentionMetadata(
+                wrapper=cg,
+                kv_cache=self.kv_cache_pool,
+                slot_mapping=self.slot_mapping[:bs],
+            )
             self._metas[bs] = meta
             graph = torch.cuda.CUDAGraph()
-            with forward_context(is_prefill=False, seqs=[], slot_mapping=self.slot_mapping[:bs]):
+            with forward_context(
+                is_prefill=False, seqs=[], slot_mapping=self.slot_mapping[:bs]
+            ):
                 with attention_context(meta):
+                    # Warmup outside the graph, then capture.
                     self._assign_outputs(bs, self._forward_once(bs))
                     with torch.cuda.graph(graph, pool=graph_pool):
                         self._assign_outputs(bs, self._forward_once(bs))
@@ -87,17 +170,43 @@ class CUDAGraphRunner:
         self.kv_cache_pool.zero_()
         torch.cuda.synchronize(self.device)
         self._captured = True
+        logger.info(
+            "CUDA Graph captured for decode (bs_list=%s, pp_role=%s)",
+            self.bs_list,
+            self.pp_role,
+        )
 
     def _make_cg_wrapper(self, bs: int) -> BatchDecodeWithPagedKVCacheWrapper:
         c = self.backend.cfg
         bufs = self._cg_bufs[bs]
         host = self._host_bufs[bs]
-        w = BatchDecodeWithPagedKVCacheWrapper(self.workspace_buffer, 'NHD', use_tensor_cores=False, use_cuda_graph=True, paged_kv_indptr_buffer=bufs['indptr'], paged_kv_indices_buffer=bufs['indices'], paged_kv_last_page_len_buffer=bufs['last_page'])
-        host['indptr'].copy_(torch.arange(0, bs + 1, dtype=torch.int32))
-        host['last_page'].fill_(1)
-        host['indices'][:bs].fill_(self.dummy_page_id)
-        bufs['indices'][:bs].fill_(self.dummy_page_id)
-        w.plan(indptr=host['indptr'], indices=bufs['indices'][:bs], last_page_len=host['last_page'], num_qo_heads=c.num_qo_heads, num_kv_heads=c.num_kv_heads, head_dim=c.head_dim, page_size=c.block_size, sm_scale=self._sm_scale, q_data_type=c.dtype, kv_data_type=c.dtype, non_blocking=False)
+        # Match official vLLM FlashInfer decode: use_tensor_cores=True.
+        w = BatchDecodeWithPagedKVCacheWrapper(
+            self.workspace_buffer,
+            "NHD",
+            use_tensor_cores=True,
+            use_cuda_graph=True,
+            paged_kv_indptr_buffer=bufs["indptr"],
+            paged_kv_indices_buffer=bufs["indices"],
+            paged_kv_last_page_len_buffer=bufs["last_page"],
+        )
+        host["indptr"].copy_(torch.arange(0, bs + 1, dtype=torch.int32))
+        host["last_page"].fill_(1)
+        # Device indices are read during capture; host indices are rewritten each replay.
+        bufs["indices"][:bs].fill_(self.dummy_page_id)
+        w.plan(
+            indptr=host["indptr"],
+            indices=bufs["indices"][:bs],
+            last_page_len=host["last_page"],
+            num_qo_heads=c.num_heads,
+            num_kv_heads=c.num_kv_heads,
+            head_dim=c.head_dim,
+            page_size=c.block_size,
+            sm_scale=self._sm_scale,
+            q_data_type=c.dtype,
+            kv_data_type=c.dtype,
+            non_blocking=False,
+        )
         return w
 
     def can_use(self, bs: int) -> bool:
@@ -109,39 +218,62 @@ class CUDAGraphRunner:
                 return b
         return bs
 
-    def replay(self, input_ids: torch.Tensor | None, positions: torch.Tensor, slot_mapping: torch.Tensor, *, seq_lens: list[int], block_tables: list[list[int]], intermediate_tensors: IntermediateTensors | None=None) -> torch.Tensor | IntermediateTensors:
+    def replay(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        *,
+        seq_lens: list[int],
+        block_tables: list[list[int]],
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         bs = positions.shape[0] if positions.ndim == 1 else positions.shape[-1]
         assert bs == len(seq_lens) == len(block_tables)
         pbs = self._pad_bs(bs)
-        if self.pp_role in ('full', 'first'):
+        if self.pp_role in ("full", "first"):
             assert input_ids is not None
             self.input_ids[:bs] = input_ids
-        if intermediate_tensors is not None and self.pp_role in ('middle', 'last'):
-            self.hidden_in[:bs] = intermediate_tensors['hidden_states']
-            self.residual_in[:bs] = intermediate_tensors['residual']
-        assert positions.ndim == 1, 'decode CUDA Graph expects 1D positions'
+        if intermediate_tensors is not None and self.pp_role in ("middle", "last"):
+            assert self.hidden_in is not None and self.residual_in is not None
+            self.hidden_in[:bs] = intermediate_tensors.hidden_states
+            self.residual_in[:bs] = intermediate_tensors.residual
+        assert positions.ndim == 1, "decode CUDA Graph expects 1D positions"
         self.positions[:bs] = positions
-        self.slot_mapping.fill_(-1)
+        # Only the captured slice is referenced by the graph.
+        self.slot_mapping[:pbs].fill_(-1)
         self.slot_mapping[:bs] = slot_mapping
         self._replan_cg(pbs, bs, seq_lens, block_tables)
         meta = self._metas[pbs]
-        with forward_context(is_prefill=False, seqs=[], slot_mapping=self.slot_mapping[:pbs]):
+        with forward_context(
+            is_prefill=False, seqs=[], slot_mapping=self.slot_mapping[:pbs]
+        ):
             with attention_context(meta):
                 self.graphs[pbs].replay()
-        if self.pp_role in ('full', 'last'):
+        if self.pp_role in ("full", "last"):
             return self.outputs[:bs]
-        return IntermediateTensors(hidden_states=self.outputs[:bs].clone(), residual=self.residual_out[:bs].clone())
+        assert self.residual_out is not None
+        return IntermediateTensors(
+            hidden_states=self.outputs[:bs].clone(),
+            residual=self.residual_out[:bs].clone(),
+        )
 
-    def _replan_cg(self, pbs: int, real_bs: int, seq_lens: list[int], block_tables: list[list[int]]) -> None:
+    def _replan_cg(
+        self,
+        pbs: int,
+        real_bs: int,
+        seq_lens: list[int],
+        block_tables: list[list[int]],
+    ) -> None:
         c = self.backend.cfg
         block = self.block_size
         bufs = self._cg_bufs[pbs]
         host = self._host_bufs[pbs]
         dummy = self.dummy_page_id
         nbs = [(s + block - 1) // block for s in seq_lens]
-        indptr_h = host['indptr']
-        last_h = host['last_page']
-        idx_h = host['indices']
+        indptr_h = host["indptr"]
+        last_h = host["last_page"]
+        idx_h = host["indices"]
         indptr_np = indptr_h.numpy()
         last_np = last_h.numpy()
         idx_np = idx_h.numpy()
@@ -150,8 +282,10 @@ class CUDAGraphRunner:
         acc = 0
         for i, (s, nb, table) in enumerate(zip(seq_lens, nbs, block_tables)):
             if nb > len(table):
-                raise RuntimeError(f'block_table shorter than needed pages: need {nb}, have {len(table)}')
-            idx_np[acc:acc + nb] = table[:nb]
+                raise RuntimeError(
+                    f"block_table shorter than needed pages: need {nb}, have {len(table)}"
+                )
+            idx_np[acc : acc + nb] = table[:nb]
             acc += nb
             indptr_np[i + 1] = acc
             last_np[i] = (s - 1) % block + 1
@@ -160,8 +294,23 @@ class CUDAGraphRunner:
             acc += 1
             indptr_np[i + 1] = acc
             last_np[i] = 1
-        bufs['indices'][:acc].copy_(idx_h[:acc], non_blocking=False)
-        self.cg_wrappers[pbs].plan(indptr=indptr_h, indices=bufs['indices'][:acc], last_page_len=last_h, num_qo_heads=c.num_qo_heads, num_kv_heads=c.num_kv_heads, head_dim=c.head_dim, page_size=block, sm_scale=self._sm_scale, q_data_type=c.dtype, kv_data_type=c.dtype, non_blocking=False)
+        # Stage page indices from pinned host memory on the current stream.
+        # FlashInfer's plan then enqueues its fixed-buffer updates on that same
+        # stream, so graph replay observes the metadata without a host stall.
+        bufs["indices"][:acc].copy_(idx_h[:acc], non_blocking=True)
+        self.cg_wrappers[pbs].plan(
+            indptr=indptr_h,
+            indices=bufs["indices"][:acc],
+            last_page_len=last_h,
+            num_qo_heads=c.num_heads,
+            num_kv_heads=c.num_kv_heads,
+            head_dim=c.head_dim,
+            page_size=block,
+            sm_scale=self._sm_scale,
+            q_data_type=c.dtype,
+            kv_data_type=c.dtype,
+            non_blocking=True,
+        )
 
     def destroy(self) -> None:
         del self.graphs
@@ -171,6 +320,7 @@ class CUDAGraphRunner:
         self._captured = False
         gc.collect()
         torch.cuda.empty_cache()
+
 
 def _make_bs_list(max_bs: int) -> list[int]:
     bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))

@@ -1,28 +1,38 @@
-# v1 KV 设计（block 池 + hash / radix）
+# v1 KV 设计（PagedAttention 存储 + hash / radix 前缀）
+
+架构总览与类图 / 时序 / 页状态机见 [architecture.md](./architecture.md)。
 
 ## 相对 v0 多了什么
 
 v0 每步重算整段序列，无 KV。v1：
 
 1. **物理 KV**：按 page（block）存放 `[layers, blocks, block_size, kv_heads, dim]`
-2. **前缀索引**：跨 `generate()` 复用满块前缀（可选）
-3. **Attention**：write 进池 → gather 成连续 → SDPA（无 FlashInfer）
+2. **PagedAttention 契约**：`slot_mapping` 写、`block_table` 读（教学 gather→SDPA）
+3. **前缀索引**：跨 `generate()` 复用满块前缀（可选）
 
-## 目录
+## 高内聚分包
 
 ```text
-src/kv/
-  context.py      ForwardContext（manager + seq + cache_len）
-  sequence.py     token_ids / block_table / num_cached_tokens
-  pool.py         Block + BlockPool
-  gather.py       write_kv / gather_kv
-  manager.py      allocate / ensure_blocks / finish
-  prefix/
-    noop.py       none：永不命中
-    hash_index.py 链式 blake2b → block_id
-    radix_tree.py 压缩基数树
-    radix_index.py 树上的前缀匹配
+src/pagedattention/          # 纯页表读写（不感知前缀 / Sequence）
+  slots.py                   # 公开 slots_tensor；内部 _slot_of / _slots_for_range
+  store.py                   # 公开 PagedStore.write / gather；内部 Protocol/helper
+
+src/kv/                      # 分配生命周期 + 前缀索引 + ForwardContext
+  context.py                 # store + slot_mapping + block_table
+  sequence.py                # token_ids / block_table / num_cached_tokens
+  pool.py                    # _Block + BlockPool（物理页 + refcount）
+  manager.py                 # allocate / ensure_blocks / finish
+  prefix/                    # none | hash | radix
 ```
+
+依赖方向：
+
+```text
+Engine → kv(KVManager, ForwardContext) → pagedattention(PagedStore)
+Attention → ForwardContext（只碰 store / slot_mapping / block_table）
+```
+
+Attention **不**依赖 `KVManager` / `Sequence`。读写只走 ``PagedStore``，无兼容包装层。
 
 ## 数据流
 
@@ -30,8 +40,9 @@ src/kv/
 prompt → Sequence → KVManager.allocate
                       ├─ index.match → 命中满块（hash 或 radix）
                       └─ 其余 allocate_fresh
-        → Prefill 仅 token_ids[num_cached:]
-        → Decode 逐步 append + ensure_blocks
+        → Engine 生成 slot_mapping = slots[cache_len:write_end)
+        → Attention: store.write(slots) → store.gather(block_table) → SDPA
+        → Decode 逐步 append + ensure_blocks + 单 token slot
         → finish：publish 满块 + 页进入 cached（供下次命中）
 ```
 
@@ -54,4 +65,4 @@ prompt → Sequence → KVManager.allocate
 
 ## 非目标（留给后续 fork）
 
-Continuous batching、Scheduler、CUDA Graph、FlashInfer PagedAttention、多卡。
+Continuous batching、Scheduler、CUDA Graph、FlashInfer 真·PagedAttention kernel（内核内按页表打分、无全量 gather）、多卡。

@@ -95,12 +95,13 @@ def test_multi_image_single_request_matches_hf(model_path, cuda):
         )
     )
 
-    from src.sampling_params import SamplingParams
-    from src.runtime.model_inputs import build_model_inputs
+    from src.sampling import SamplingParams
+    from src.runtime.runner.model_inputs import build_model_inputs
 
     peek = eng.add_request(prompt, SamplingParams(max_tokens=1, temperature=0.0), images=imgs)
     assert len(peek.mm_features) == 2
-    seqs, is_pf = eng.scheduler.schedule()
+    sched_out = eng.scheduler.schedule()
+    seqs, is_pf = list(sched_out.seqs), sched_out.is_prefill
     assert is_pf and seqs
     inputs = build_model_inputs(seqs, True, eng.model_runner.block_size, eng.device)
     _, _, pos = eng.model.encode_and_merge(inputs.input_ids, seqs, eng.device)
@@ -127,7 +128,7 @@ def test_concurrent_two_requests_match_hf(model_path, cuda):
 
     from src.config import EngineConfig
     from src.runtime.engine import Engine
-    from src.sampling_params import SamplingParams
+    from src.sampling import SamplingParams
 
     prompts = [
         "What is the dominant color? One word.",

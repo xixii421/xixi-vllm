@@ -1,6 +1,17 @@
-"""v1 KV 模块：block 池 + hash/radix 前缀索引 + gather SDPA。
+""" KV 管理：块分配 + 前缀缓存；物理读写见 ``pagedattention``。
 
-相对 v0 **新增**的全部内容都在本包内（见 docs/ADDED_vs_v0.md）。
+对外（包 ``__all__``）：
+  Sequence / KVManager / ForwardContext
+  set_forward_context / get_forward_context
+
+常用跨文件公开（非 __all__，仍可 import）：
+  BlockPool / HashPrefixIndex / RadixPrefixIndex / NoopPrefixIndex / compute_block_hash / RadixTree
+
+命名约定：仅本文件使用 → ``_`` 前缀；跨文件引用 → 正常名。
+
+与 pagedattention 分工：
+  kv            — 谁占哪些页、前缀能否复用
+  pagedattention — 给定页表如何 write / gather
 """
 
 from .context import ForwardContext, get_forward_context, set_forward_context

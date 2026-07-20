@@ -1,3 +1,5 @@
+"""Compressed radix tree over block-hash keys."""
+
 from __future__ import annotations
 
 import heapq
@@ -36,6 +38,20 @@ class RadixNode:
 class RadixTree:
     def __init__(self) -> None:
         self.root = RadixNode(ref_count=1)
+        # O(1) reverse lookup: physical page → owning compressed node
+        self._block_to_node: dict[int, RadixNode] = {}
+
+    def contains_block(self, block_id: int) -> bool:
+        return block_id in self._block_to_node
+
+    def detach_leaf_for_block(self, block_id: int) -> list[int]:
+        """Remove the zero-ref node that owns ``block_id``; return its page IDs."""
+        node = self._block_to_node.get(block_id)
+        if node is None or node is self.root or node.ref_count > 0:
+            return []
+        freed = list(node.value)
+        self._remove(node)
+        return freed
 
     def match_prefix(self, key: list[int]) -> tuple[list[int], RadixNode]:
         if not key:
@@ -105,6 +121,15 @@ class RadixTree:
                 heapq.heappush(leaves, parent)
         return freed
 
+    def _index_node(self, node: RadixNode) -> None:
+        for bid in node.value:
+            self._block_to_node[bid] = node
+
+    def _unindex_node(self, node: RadixNode) -> None:
+        for bid in node.value:
+            if self._block_to_node.get(bid) is node:
+                del self._block_to_node[bid]
+
     def _leaves(self) -> list[RadixNode]:
         out: list[RadixNode] = []
 
@@ -121,6 +146,7 @@ class RadixTree:
     def _remove(self, node: RadixNode) -> None:
         if node.parent is None or not node.key:
             return
+        self._unindex_node(node)
         node.parent.children.pop(node.key[0], None)
 
     def _add(
@@ -128,9 +154,11 @@ class RadixTree:
     ) -> RadixNode:
         node = RadixNode(parent=parent, key=key, value=value)
         parent.children[key[0]] = node
+        self._index_node(node)
         return node
 
     def _split(self, node: RadixNode, split_at: int) -> RadixNode:
+        self._unindex_node(node)
         new_node = RadixNode(
             parent=node.parent,
             key=node.key[:split_at],
@@ -143,4 +171,6 @@ class RadixTree:
         node.value = node.value[split_at:]
         if new_node.parent is not None and new_node.key:
             new_node.parent.children[new_node.key[0]] = new_node
+        self._index_node(new_node)
+        self._index_node(node)
         return new_node

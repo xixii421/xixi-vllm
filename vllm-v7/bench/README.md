@@ -1,31 +1,28 @@
-# vllm-v3 Benchmark
+# Bench
 
-## 入口
+两层，职责分离：
 
-```bash
-cd vllm-v3 && source ../vllm-v0/.venv/bin/activate
+| 层 | 路径 | 用途 |
+|----|------|------|
+| **微基准** | `bench/lib` + `bench/suites` + `python -m bench.run` | 单卡 e2e / TTFT / prefill / decode / KV |
+| **对比矩阵** | `scripts/bench_vs_vllm_full.py` | v7 vs 官方 vLLM（text / VL / MoE × TP/PP × CG） |
 
-python -m bench.run_all --suite decode --model Qwen3-1.7B
-python -m bench.run_all --suite kv_vram --model Qwen3-1.7B --context-len 4096
-python -m bench.run_all --suite all --model Qwen3-1.7B
-```
+## 微基准（推荐日常）
 
-## 输出
-
-所有结果写入固定目录 ``bench/results/``（不再创建 ``{timestamp}_{model}/`` 子目录）：
-
-| 文件 | 说明 |
-| --- | --- |
-| `meta.csv` | 最近一次运行元数据，含 `run_timestamp` |
-| `report.md` | 汇总 Markdown；一次 `run_all` 多套件时追加章节 |
-| `decode.csv` 等 | 各套件数据，运行该套件时覆盖 |
-
-## 套件
-
-与 v2 相同：`ttft` / `prefill` / `decode` / `e2e` / `vram` / `latency_seqlen` / `paged_overhead` / `kv_vram` / `paged`；`--suite all` 全跑。
-
-v3 额外关注 **连续批处理** 下的 decode 吞吐与 v2 串行对比，可用仓库根目录：
+核心库在 `bench/lib/`（`BenchConfig` / `BenchSession` / timing / report）。
 
 ```bash
-python scripts/compare_v0_v3_bench.py --quick
+cd vllm-v7
+PYTHONPATH=. python -m bench.run --suite e2e,ttft,decode
+PYTHONPATH=. python -m bench.run --suite all
 ```
+
+套件：`e2e` `ttft` `prefill` `decode` `kv_vram`。结果写入 `bench/results/`。
+
+## 官方对比
+
+```bash
+PYTHONPATH=. python scripts/bench_vs_vllm_full.py --mode cg --suite text,vl,moe
+```
+
+需 `.venv`（v7）与 `.venv-vllm`（官方）。分析报告见 `bench/results/PERF_ANALYSIS_*.md`。

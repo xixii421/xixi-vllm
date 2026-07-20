@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from src.runtime.mrope_sync import (
+from src.runtime.runner.mrope_sync import (
     MRopeStateUpdate,
     apply_mrope_updates,
     snapshot_mrope_updates,
 )
 from src.scheduling import MultiModalFeature, Sequence
-from src.sampling_params import SamplingParams
+from src.sampling import SamplingParams
 import torch
 
 

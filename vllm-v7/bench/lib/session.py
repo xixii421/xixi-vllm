@@ -10,7 +10,7 @@ import torch
 
 from src import Engine, EngineConfig, SamplingParams
 from src.scheduling import Sequence
-from src.context import reset_context
+from src.runtime.context import reset_context
 
 from .config import BenchConfig
 from .timing import CudaTimer, sync
@@ -124,8 +124,7 @@ class BenchSession:
     @torch.inference_mode()
     def prefill_forward_only(self, input_ids: list[int]) -> None:
         self._free_bench_seq()
-        seq = Sequence(list(input_ids))
-        Sequence.block_size = self.engine.block_size
+        seq = Sequence(list(input_ids), block_size=self.engine.block_size)
         n_cached = self.block_manager.can_allocate(seq)
         assert n_cached != -1
         self.block_manager.allocate(seq, n_cached)
@@ -159,10 +158,9 @@ class BenchSession:
             torch.cuda.reset_peak_memory_stats()
         seqs: list[Sequence] = []
         self._held_seqs = seqs
-        Sequence.block_size = self.engine.block_size
         for t_len in lengths:
             ids = self.make_prompt_tokens(t_len)
-            seq = Sequence(ids)
+            seq = Sequence(ids, block_size=self.engine.block_size)
             n_cached = self.block_manager.can_allocate(seq)
             if n_cached == -1:
                 raise RuntimeError("block pool exhausted during multi_request_prefill")

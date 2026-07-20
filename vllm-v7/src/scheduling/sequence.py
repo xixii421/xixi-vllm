@@ -1,47 +1,118 @@
+"""Request state owned by the scheduler (and shared with the engine loop).
+
+Keep this object lean:
+  - tokens + KV page table + schedule counters  → scheduler / runner
+  - ``sampling_params``                          → sampler (via properties)
+  - ``mm_features``                              → runtime input/vision (CPU meta;
+    pixels are registered once via RPC, not embedded in every execute payload)
+  - mRoPE scalars                                → vision / mrope_sync
+"""
+
 from __future__ import annotations
+
 from copy import copy
-from dataclasses import dataclass
 from enum import Enum, auto
 from itertools import count
+
 import torch
-from ..sampling_params import SamplingParams
+
+from ..sampling import SamplingParams
+
 
 class SequenceStatus(Enum):
     WAITING = auto()
     RUNNING = auto()
     FINISHED = auto()
 
-@dataclass
+
 class MultiModalFeature:
-    modality: str
-    data: torch.Tensor
-    start: int
-    end: int
-    num_encoder_tokens: int
-    uid: str
-    grid_thw: torch.Tensor | None = None
-    deepstack: list[torch.Tensor] | None = None
-    mrope_origin: int | None = None
+    """CPU modality span. Prefer ``token_end`` over a possibly-stale ``end``."""
+
+    __slots__ = (
+        "modality",
+        "data",
+        "start",
+        "end",
+        "num_encoder_tokens",
+        "uid",
+        "grid_thw",
+        "mrope_origin",
+    )
+
+    def __init__(
+        self,
+        modality: str,
+        data: torch.Tensor | None,
+        start: int,
+        end: int,
+        num_encoder_tokens: int,
+        uid: str,
+        grid_thw: torch.Tensor | None = None,
+        mrope_origin: int | None = None,
+    ) -> None:
+        self.modality = modality
+        self.data = data
+        self.start = start
+        self.end = end
+        self.num_encoder_tokens = num_encoder_tokens
+        self.uid = uid
+        self.grid_thw = grid_thw
+        self.mrope_origin = mrope_origin
+
+    @property
+    def token_end(self) -> int:
+        return self.start + self.num_encoder_tokens
+
+    def meta_copy(self) -> "MultiModalFeature":
+        """Span metadata without pixel tensors (safe for RPC wire)."""
+        return MultiModalFeature(
+            modality=self.modality,
+            data=None,
+            start=self.start,
+            end=self.end,
+            num_encoder_tokens=self.num_encoder_tokens,
+            uid=self.uid,
+            grid_thw=self.grid_thw,
+            mrope_origin=self.mrope_origin,
+        )
+
 
 def slot_of(block_table: list[int], pos: int, block_size: int) -> int:
     block_idx = pos // block_size
     if block_idx >= len(block_table):
-        raise IndexError(f'pos={pos} needs block_idx={block_idx}, but block_table has {len(block_table)} pages')
+        raise IndexError(
+            f"pos={pos} needs block_idx={block_idx}, but block_table has "
+            f"{len(block_table)} pages"
+        )
     return block_table[block_idx] * block_size + pos % block_size
 
-def slots_for_range(block_table: list[int], start: int, end: int, block_size: int) -> list[int]:
+
+def slots_for_range(
+    block_table: list[int], start: int, end: int, block_size: int
+) -> list[int]:
     return [slot_of(block_table, pos, block_size) for pos in range(start, end)]
 
+
 class Sequence:
-    block_size = 256
     _counter = count()
 
-    def __init__(self, token_ids: list[int], sampling_params: SamplingParams | None=None, mm_features: list[MultiModalFeature] | None=None) -> None:
+    def __init__(
+        self,
+        token_ids: list[int],
+        sampling_params: SamplingParams | None = None,
+        mm_features: list[MultiModalFeature] | None = None,
+        *,
+        block_size: int = 256,
+    ) -> None:
         if not token_ids:
-            raise ValueError('empty token_ids')
-        sp = sampling_params or SamplingParams()
+            raise ValueError("empty token_ids")
+        if block_size <= 0:
+            raise ValueError(f"block_size must be positive, got {block_size}")
         self.seq_id = next(Sequence._counter)
         self.status = SequenceStatus.WAITING
+        self.block_size = int(block_size)
+        self.sampling_params = sampling_params or SamplingParams()
+
         self.token_ids: list[int] = copy(token_ids)
         self.last_token = token_ids[-1]
         self.num_tokens = len(self.token_ids)
@@ -50,15 +121,35 @@ class Sequence:
         self.num_scheduled_tokens = 0
         self.is_prefill = True
         self.block_table: list[int] = []
+
         self.mm_features: list[MultiModalFeature] = list(mm_features or [])
         self.rope_delta: int = 0
         self.mrope_next: int | None = None
-        self.temperature = sp.temperature
-        self.top_p = sp.top_p
-        self.top_k = sp.top_k
-        self.min_p = sp.min_p
-        self.max_tokens = sp.max_tokens
-        self.ignore_eos = sp.ignore_eos
+
+    # --- sampling (compat properties; prefer ``sampling_params``) ---
+    @property
+    def temperature(self) -> float:
+        return self.sampling_params.temperature
+
+    @property
+    def top_p(self) -> float | None:
+        return self.sampling_params.top_p
+
+    @property
+    def top_k(self) -> int | None:
+        return self.sampling_params.top_k
+
+    @property
+    def min_p(self) -> float | None:
+        return self.sampling_params.min_p
+
+    @property
+    def max_tokens(self) -> int:
+        return self.sampling_params.max_tokens
+
+    @property
+    def ignore_eos(self) -> bool:
+        return self.sampling_params.ignore_eos
 
     def __len__(self) -> int:
         return self.num_tokens
@@ -73,6 +164,24 @@ class Sequence:
     @property
     def has_multimodal(self) -> bool:
         return bool(self.mm_features)
+
+    @property
+    def first_mm_token(self) -> int | None:
+        if not self.mm_features:
+            return None
+        return min(int(mf.start) for mf in self.mm_features)
+
+    def prefix_cacheable_full_blocks(self) -> int:
+        """Full pages entirely before the first image token (text-only prefix).
+
+        Pages that overlap or follow multimodal spans are not published/matched
+        with token-ids alone (image content is not in the token stream).
+        """
+        n_full = max(self.num_blocks - 1, 0)
+        first = self.first_mm_token
+        if first is None:
+            return n_full
+        return min(n_full, int(first) // self.block_size)
 
     @property
     def num_completion_tokens(self) -> int:

@@ -1,188 +1,215 @@
-from typing import Any, Optional, Union
+from __future__ import annotations
+
+from typing import Optional
+
 import torch
 import torch.distributed as dist
-from .parallel_state import Group, get_tp_group, get_world_group
 
-def all_gather(input: torch.Tensor, dim: int=-1, group: Optional[Group]=None) -> torch.Tensor:
+from .parallel_state import Communicator, get_tp_group, get_world_group
+from .pp import IntermediateTensors
+
+_DTYPE_TO_CODE: dict[torch.dtype, int] = {
+    torch.float16: 0,
+    torch.bfloat16: 1,
+    torch.float32: 2,
+    torch.float64: 3,
+    torch.int32: 4,
+    torch.int64: 5,
+    torch.uint8: 6,
+    torch.int8: 7,
+}
+_CODE_TO_DTYPE: dict[int, torch.dtype] = {v: k for k, v in _DTYPE_TO_CODE.items()}
+
+_PP_SHARD_CACHE: dict[tuple[int, torch.dtype, str], torch.Tensor] = {}
+
+
+def clear_pp_buffer_cache() -> None:
+    _PP_SHARD_CACHE.clear()
+
+
+def all_gather(
+    input: torch.Tensor,
+    dim: int = -1,
+    group: Optional[Communicator] = None,
+) -> torch.Tensor:
+    """Concatenate shards along ``dim``. Output is contiguous."""
     if dim < 0:
         dim += input.dim()
-    group = get_world_group() if group is None else group
-    input_size = input.size()
-    world_size = group.size
-    if world_size == 1:
-        return input
-    output_size = (input_size[0] * world_size, *input_size[1:])
-    output_tensor = torch.empty(output_size, dtype=input.dtype, device=input.device)
-    dist.all_gather_into_tensor(output_tensor, input, group=group.device_group)
-    output_tensor = output_tensor.reshape((world_size,) + input_size)
-    output_tensor = output_tensor.movedim(0, dim)
-    output_tensor = output_tensor.reshape(input_size[:dim] + (world_size * input_size[dim],) + input_size[dim + 1:])
-    return output_tensor
+    if not (0 <= dim < input.dim()):
+        raise ValueError(f"Invalid dim ({dim}) for input shape {tuple(input.size())}")
 
-def all_reduce(input: torch.Tensor, op=dist.ReduceOp.SUM, group: Optional[Group]=None) -> torch.Tensor:
     group = get_world_group() if group is None else group
     world_size = group.size
     if world_size == 1:
         return input
+
+    if group.device_group is None:
+        raise RuntimeError("all_gather requires a device process group")
+
+    input_t = input.movedim(dim, 0).contiguous()
+    gathered = torch.empty(
+        (world_size * input_t.shape[0],) + tuple(input_t.shape[1:]),
+        dtype=input.dtype,
+        device=input.device,
+    )
+    dist.all_gather_into_tensor(gathered, input_t, group=group.device_group)
+    out = gathered.movedim(0, dim)
+    return out if out.is_contiguous() else out.contiguous()
+
+
+def all_reduce(
+    input: torch.Tensor,
+    op=dist.ReduceOp.SUM,
+    group: Optional[Communicator] = None,
+) -> torch.Tensor:
+    """In-place all-reduce. Caller must pass a contiguous tensor."""
+    group = get_world_group() if group is None else group
+    if group.size == 1:
+        return input
+    if group.device_group is None:
+        raise RuntimeError("all_reduce requires a device process group")
+    if not input.is_contiguous():
+        raise ValueError("all_reduce requires a contiguous input tensor")
     dist.all_reduce(input, op, group=group.device_group)
     return input
 
-def reduce_scatter(input: torch.Tensor, dim: int=-1, op=dist.ReduceOp.SUM, group: Optional[Group]=None) -> torch.Tensor:
+
+def tensor_model_parallel_all_reduce(
+    input: torch.Tensor, op=dist.ReduceOp.SUM
+) -> torch.Tensor:
+    return all_reduce(input, op, group=get_tp_group())
+
+
+def tensor_model_parallel_all_gather(
+    input: torch.Tensor, dim: int = -1
+) -> torch.Tensor:
+    return all_gather(input, dim=dim, group=get_tp_group())
+
+
+def _dtype_code(dtype: torch.dtype) -> int:
+    code = _DTYPE_TO_CODE.get(dtype)
+    if code is None:
+        raise TypeError(f"unsupported PP dtype: {dtype}")
+    return code
+
+
+def _shard_payload(
+    tensor: torch.Tensor, all_gather_group: Communicator | None
+) -> tuple[torch.Tensor, bool]:
+    """Return (payload, use_all_gather). Payload may be a shard view."""
+    if all_gather_group is None or all_gather_group.size <= 1:
+        return tensor, False
+    ag_size = all_gather_group.size
+    if tensor.numel() % ag_size != 0:
+        return tensor, False
+    shard = tensor.reshape(ag_size, -1)[all_gather_group.group_rank]
+    return shard.contiguous(), True
+
+
+def _recv_shard_buffer(
+    numel: int, dtype: torch.dtype, device: torch.device
+) -> torch.Tensor:
+    key = (numel, dtype, str(device))
+    buf = _PP_SHARD_CACHE.get(key)
+    if buf is None or buf.numel() < numel or buf.dtype != dtype or buf.device != device:
+        buf = torch.empty(numel, dtype=dtype, device=device)
+        _PP_SHARD_CACHE[key] = buf
+    return buf[:numel]
+
+
+def send_intermediate_tensors(
+    tensors: IntermediateTensors,
+    dst: int,
+    *,
+    group: Optional[Communicator] = None,
+    all_gather_group: Optional[Communicator] = None,
+) -> None:
+    """Send fixed-schema PP activations: hidden_states then residual."""
     group = get_world_group() if group is None else group
-    world_size = group.size
-    if world_size == 1:
-        return input
-    assert -input.dim() <= dim < input.dim(), f'Invalid dim ({dim}) for input tensor with shape {input.size()}'
-    if dim < 0:
-        dim += input.dim()
-    input_tensor = input.movedim(dim, 0).contiguous()
-    assert input_tensor.shape[0] % world_size == 0
-    chunk_size = input_tensor.shape[0] // world_size
-    output_shape = (chunk_size,) + input_tensor.shape[1:]
-    output_tensor = torch.empty(output_shape, dtype=input_tensor.dtype, device=input_tensor.device)
-    dist.reduce_scatter_tensor(output_tensor, input_tensor, group=group.device_group, op=op)
-    return output_tensor.movedim(0, dim).contiguous()
-
-def gather(input: torch.Tensor, dst: int=0, dim: int=-1, group: Optional[Group]=None):
-    group = get_world_group() if group is None else group
-    world_size = group.size
-    if world_size == 1:
-        return input
-    assert -input.dim() <= dim < input.dim(), f'Invalid dim ({dim}) for input tensor with shape {input.size()}'
-    if dim < 0:
-        dim += input.dim()
-    rank_in_group = group.group_rank
-    if rank_in_group == dst:
-        gather_list = [torch.empty_like(input) for _ in range(world_size)]
-    else:
-        gather_list = None
-    dist.gather(input, gather_list, group_dst=dst, group=group.device_group)
-    if rank_in_group == dst:
-        output_tensor = torch.cat(gather_list, dim=dim)
-    else:
-        output_tensor = None
-    return output_tensor
-
-def broadcast(input: torch.Tensor, src: int=0, group: Optional[Group]=None):
-    group = get_world_group() if group is None else group
-    world_size = group.size
-    assert src < world_size, f'Invalid src rank ({src})'
-    if world_size == 1:
-        return input
-    dist.broadcast(input, group_src=src, group=group.device_group)
-    return input
-
-def tensor_model_parallel_all_reduce(input: torch.Tensor, op=dist.ReduceOp.SUM) -> torch.Tensor:
-    tp_group = get_tp_group()
-    return all_reduce(input, op, group=tp_group)
-
-def tensor_model_parallel_all_gather(input: torch.Tensor, dim: int=-1) -> torch.Tensor:
-    tp_group = get_tp_group()
-    return all_gather(input, dim=dim, group=tp_group)
-
-def tensor_model_parallel_reduce_scatter(input: torch.Tensor, dim: int=-1, op=dist.ReduceOp.SUM) -> torch.Tensor:
-    tp_group = get_tp_group()
-    return reduce_scatter(input, dim=dim, op=op, group=tp_group)
-
-def tensor_model_parallel_gather(input: torch.Tensor, dst: int=0, dim: int=-1) -> torch.Tensor | None:
-    tp_group = get_tp_group()
-    return gather(input, dst=dst, dim=dim, group=tp_group)
-
-def broadcast_tensor_dict(tensor_dict: dict[Any, torch.Tensor] | None=None, src: int=0, group: Optional[Group]=None) -> dict[Any, torch.Tensor] | None:
-    group = get_world_group() if group is None else group
-    world_size = group.size
-    rank_in_group = group.group_rank
-    if not dist.is_initialized() or world_size == 1:
-        return tensor_dict
-    assert src < world_size, f'Invalid src rank ({src})'
-    metadata_list: list[tuple[Any, str, torch.dtype, torch.Size]] = []
-    if rank_in_group == src:
-        assert isinstance(tensor_dict, dict), f'Expecting a dictionary, got {type(tensor_dict)}'
-        for key, tensor in tensor_dict.items():
-            metadata_list.append((key, tensor.device.type, tensor.dtype, tensor.shape))
-    recv = [metadata_list]
-    dist.broadcast_object_list(recv, group_src=src, group=group.cpu_group)
-    metadata_list = recv[0]
-    result: dict[Any, torch.Tensor] = {}
-    async_handles: list[dist.Work] = []
-    for key, device, dtype, shape in metadata_list:
-        if rank_in_group == src:
-            assert isinstance(tensor_dict, dict), f'Expecting a dictionary, got {type(tensor_dict)}'
-            tensor = tensor_dict[key]
-        else:
-            tensor = torch.empty(shape, dtype=dtype, device=device)
-            if tensor.numel() == 0:
-                result[key] = tensor
-                continue
-        if tensor.is_cpu:
-            handle = dist.broadcast(tensor, group_src=src, group=group.cpu_group, async_op=True)
-        else:
-            handle = dist.broadcast(tensor, group_src=src, group=group.device_group, async_op=True)
-        if handle is not None:
-            async_handles.append(handle)
-        result[key] = tensor
-    for async_handle in async_handles:
-        async_handle.wait()
-    return result
-
-def send_tensor_dict(tensor_dict: dict[str, Union[torch.Tensor, Any]], dst: Optional[int]=None, group: Optional[Group]=None, all_gather_group: Optional[Group]=None):
-    group = get_world_group() if group is None else group
-    world_size = group.size
-    rank_in_group = group.group_rank
-    if not dist.is_initialized() or world_size == 1:
+    if not dist.is_initialized() or group.size == 1:
         return
-    all_gather_size = 1 if all_gather_group is None else all_gather_group.size
-    all_gather_rank = 0 if all_gather_group is None else all_gather_group.group_rank
-    if dst is None:
-        dst = (rank_in_group + 1) % world_size
-    assert dst < world_size, f'Invalid dst rank ({dst})'
-    metadata_list: list[tuple[Any, str, torch.dtype, torch.Size]] = []
-    tensor_list: list[torch.Tensor] = []
-    assert isinstance(tensor_dict, dict), f'Expecting a dictionary, got {type(tensor_dict)}'
-    for key, tensor in tensor_dict.items():
-        metadata_list.append((key, tensor.device.type, tensor.dtype, tensor.shape))
-        tensor_list.append(tensor)
-    dist.send_object_list([metadata_list], group_dst=dst, group=group.cpu_group)
-    for tensor in tensor_list:
-        if tensor.numel() == 0:
-            continue
-        if all_gather_group is not None and tensor.numel() % all_gather_size == 0:
-            tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
-        if tensor.is_cpu:
-            dist.send(tensor, group_dst=dst, group=group.cpu_group)
-        else:
-            dist.send(tensor, group_dst=dst, group=group.device_group)
+    if not (0 <= dst < group.size):
+        raise ValueError(f"Invalid dst rank ({dst})")
+    if group.device_group is None:
+        raise RuntimeError("PP send requires a device process group")
 
-def recv_tensor_dict(src: Optional[int]=None, group: Optional[Group]=None, all_gather_group: Optional[Group]=None) -> Optional[dict[str, torch.Tensor]]:
-    group = get_world_group() if group is None else group
-    world_size = group.size
-    rank_in_group = group.group_rank
-    if not dist.is_initialized() or world_size == 1:
-        return None
-    all_gather_size = 1 if all_gather_group is None else all_gather_group.size
-    all_gather_rank = 0 if all_gather_group is None else all_gather_group.group_rank
-    if src is None:
-        src = (rank_in_group - 1) % world_size
-    assert src < world_size, f'Invalid src rank ({src})'
-    recv_metadata_list = [[]]
-    dist.recv_object_list(recv_metadata_list, group_src=src, group=group.cpu_group)
-    recv_metadata_list = recv_metadata_list[0]
-    tensor_dict: dict[str, torch.Tensor] = {}
-    for key, device, dtype, shape in recv_metadata_list:
-        tensor = torch.empty(shape, dtype=dtype, device=device)
+    hs = tensors.hidden_states
+    res = tensors.residual
+    if hs.shape != res.shape:
+        raise ValueError(
+            f"hidden_states shape {tuple(hs.shape)} != residual shape {tuple(res.shape)}"
+        )
+    if hs.dtype != res.dtype:
+        raise ValueError(f"dtype mismatch: {hs.dtype} vs {res.dtype}")
+    if hs.dim() != 2:
+        raise ValueError(f"expected 2D activations, got shape {tuple(hs.shape)}")
+
+    # Compact header on Gloo: [tokens, hidden, dtype_code, use_tp_shard]
+    use_shard = (
+        all_gather_group is not None
+        and all_gather_group.size > 1
+        and hs.numel() % all_gather_group.size == 0
+    )
+    header = torch.tensor(
+        [hs.shape[0], hs.shape[1], _dtype_code(hs.dtype), int(use_shard)],
+        dtype=torch.int64,
+    )
+    if group.cpu_group is None:
+        raise RuntimeError("PP send requires a cpu_group for the shape header")
+    dist.send(header, group_dst=dst, group=group.cpu_group)
+
+    for tensor in (hs, res):
         if tensor.numel() == 0:
-            tensor_dict[key] = tensor
             continue
-        use_all_gather = all_gather_group is not None and tensor.numel() % all_gather_size == 0
-        orig_shape = tensor.shape
-        if use_all_gather:
-            tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
-        if tensor.is_cpu:
-            dist.recv(tensor, group_src=src, group=group.cpu_group)
+        payload, _ = _shard_payload(tensor, all_gather_group if use_shard else None)
+        dist.send(payload, group_dst=dst, group=group.device_group)
+
+
+def recv_intermediate_tensors(
+    src: int,
+    *,
+    group: Optional[Communicator] = None,
+    all_gather_group: Optional[Communicator] = None,
+) -> IntermediateTensors:
+    """Receive fixed-schema PP activations."""
+    group = get_world_group() if group is None else group
+    if not dist.is_initialized() or group.size == 1:
+        raise RuntimeError("recv_intermediate_tensors requires an active multi-rank group")
+    if not (0 <= src < group.size):
+        raise ValueError(f"Invalid src rank ({src})")
+    if group.device_group is None or group.cpu_group is None:
+        raise RuntimeError("PP recv requires device and cpu process groups")
+
+    header = torch.empty(4, dtype=torch.int64)
+    dist.recv(header, group_src=src, group=group.cpu_group)
+    tokens = int(header[0].item())
+    hidden = int(header[1].item())
+    dtype = _CODE_TO_DTYPE[int(header[2].item())]
+    use_shard = bool(header[3].item())
+    shape = (tokens, hidden)
+    device = torch.device("cuda", torch.cuda.current_device())
+
+    outs: list[torch.Tensor] = []
+    for _ in range(2):
+        full_numel = tokens * hidden
+        if full_numel == 0:
+            outs.append(torch.empty(shape, dtype=dtype, device=device))
+            continue
+
+        if use_shard:
+            if all_gather_group is None or all_gather_group.size <= 1:
+                raise RuntimeError("sender used TP shard but receiver has no all_gather_group")
+            ag_size = all_gather_group.size
+            if full_numel % ag_size != 0:
+                raise RuntimeError("activation numel not divisible by TP size")
+            shard_numel = full_numel // ag_size
+            shard = _recv_shard_buffer(shard_numel, dtype, device)
+            dist.recv(shard, group_src=src, group=group.device_group)
+            gathered = all_gather(shard, dim=0, group=all_gather_group)
+            outs.append(gathered.view(shape))
         else:
-            dist.recv(tensor, group_src=src, group=group.device_group)
-        if use_all_gather:
-            tensor = all_gather(tensor, dim=0, group=all_gather_group)
-            tensor = tensor.reshape(orig_shape)
-        tensor_dict[key] = tensor
-    return tensor_dict
+            buf = torch.empty(shape, dtype=dtype, device=device)
+            dist.recv(buf, group_src=src, group=group.device_group)
+            outs.append(buf)
+
+    return IntermediateTensors(hidden_states=outs[0], residual=outs[1])

@@ -4,7 +4,7 @@ __all__ = ['Engine', 'EngineConfig', 'SamplingParams']
 if TYPE_CHECKING:
     from .config import EngineConfig as EngineConfig
     from .runtime import Engine as Engine
-    from .sampling_params import SamplingParams as SamplingParams
+    from .sampling import SamplingParams as SamplingParams
 
 def __getattr__(name: str) -> Any:
     if name == 'EngineConfig':
@@ -14,6 +14,6 @@ def __getattr__(name: str) -> Any:
         from .runtime import Engine
         return Engine
     if name == 'SamplingParams':
-        from .sampling_params import SamplingParams
+        from .sampling import SamplingParams
         return SamplingParams
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

@@ -15,11 +15,14 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA pref
 
 class TestLayers:
     def test_silu_and_mul(self):
+        from src.layers.activation import _silu_and_mul_native
+
         m = SiluAndMul().cuda()
-        x = torch.randn(4, 16, device="cuda", dtype=torch.float16)
-        # SiluAndMul expects concatenated [gate, up]
+        x = torch.randn(128, 2048, device="cuda", dtype=torch.float16)
         y = m(x)
-        assert y.shape == (4, 8)
+        assert y.shape == (128, 1024)
+        ref = _silu_and_mul_native(x)
+        assert torch.allclose(y, ref, atol=2e-2, rtol=2e-2)
 
     def test_rmsnorm(self):
         m = RMSNorm(32, eps=1e-6).cuda().half()
