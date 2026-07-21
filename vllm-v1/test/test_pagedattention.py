@@ -1,5 +1,3 @@
-"""Unit tests for PagedAttention slot mapping + store ops."""
-
 from __future__ import annotations
 
 import sys
@@ -16,7 +14,6 @@ from src.pagedattention.slots import _slot_of, _slots_for_range
 
 
 def test_slot_of_and_range() -> None:
-    # physical blocks 7, 3 — non-contiguous page table
     table = [7, 3]
     bs = 4
     assert _slot_of(table, 0, bs) == 7 * 4 + 0
@@ -43,7 +40,6 @@ def test_write_gather_roundtrip() -> None:
         dtype=dtype,
     )
     store = PagedStore(pool)
-    # Non-contiguous page table (physical ids 5,1,3).
     table = [5, 1, 3]
     for bid in table:
         if bid in pool.free_ids:
@@ -60,7 +56,6 @@ def test_write_gather_roundtrip() -> None:
     assert torch.allclose(gk, k[0], atol=0, rtol=0)
     assert torch.allclose(gv, v[0], atol=0, rtol=0)
 
-    # Partial write on layer 1 (decode-style).
     pos = 7
     k1 = torch.randn(1, 1, 2, 8, device=device, dtype=dtype)
     v1 = torch.randn(1, 1, 2, 8, device=device, dtype=dtype)

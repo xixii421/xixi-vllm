@@ -1,5 +1,3 @@
-"""E2E smoke: Engine generate with prefix none/hash after PagedAttention extract."""
-
 from __future__ import annotations
 
 import argparse
@@ -9,9 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.config import EngineConfig  # noqa: E402
-from src.engine import Engine  # noqa: E402
-from src.model_hub import DEFAULT_CACHE_DIR  # noqa: E402
+from src.config import EngineConfig
+from src.engine import Engine
+from src.model_hub import DEFAULT_CACHE_DIR
 
 
 def _resolve_model(name: str) -> str:
