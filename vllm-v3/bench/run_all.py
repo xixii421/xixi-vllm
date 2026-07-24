@@ -42,8 +42,8 @@ def run_suites(cfg: BenchConfig, suite_names: list[str]) -> ResultWriter:
     writer = ResultWriter(cfg, meta)
 
     # kv_vram 需要按场景扩池；若同一次 run 里有它，先算好 num_gpu_blocks。
-    if "kv_vram" in suite_names and cfg.num_gpu_blocks is None:
-        cfg.num_gpu_blocks = kv_vram_suite.needed_gpu_blocks(cfg)
+    if "kv_vram" in suite_names and cfg.num_kvcache_blocks is None:
+        cfg.num_kvcache_blocks = kv_vram_suite.needed_gpu_blocks(cfg)
 
     own_session = {"latency_seqlen"}
     shared = [n for n in suite_names if n not in own_session]

@@ -23,10 +23,10 @@ class BenchConfig:
     prompt: str = DEFAULT_PROMPT
     max_new_tokens: int = 128
     context_len: int = DEFAULT_MAX_SEQ_LEN
-    block_size: int = 16
+    block_size: int = 256
     max_num_seqs: int = 4
-    num_gpu_blocks: int | None = None
-    enforce_eager: bool = True
+    num_kvcache_blocks: int | None = None
+    enforce_eager: bool = False
     warmup_iters: int = 10
     measure_iters: int = 25
     prefill_lengths: list[int] = field(default_factory=lambda: list(DEFAULT_LENGTH_SWEEP))

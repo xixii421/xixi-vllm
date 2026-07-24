@@ -84,8 +84,9 @@ class BlockManager:
         h = -1
         num_cached_blocks = 0
         num_new_blocks = seq.num_blocks
-        # Only full blocks (exclude the last possibly partial page) can hit.
-        for i in range(max(seq.num_blocks - 1, 0)):
+        # Only full blocks can hit. Use floor division so an exact multiple of
+        # block_size (e.g. 256 with B=256) still matches the last published page.
+        for i in range(seq.num_tokens // self.block_size):
             token_ids = seq.block_token_ids(i)
             h = self.compute_hash(token_ids, h)
             block_id = self.hash_to_block_id.get(h, -1)
@@ -147,4 +148,11 @@ class BlockManager:
             token_ids = seq.block_token_ids(i)
             h = self.compute_hash(token_ids, h)
             block.update(h, token_ids)
-            self.hash_to_block_id[h] = block.block_id
+            # Do not overwrite a different block on hash collision.
+            old = self.hash_to_block_id.get(h, -1)
+            if (
+                old == -1
+                or old == block.block_id
+                or self.blocks[old].token_ids == token_ids
+            ):
+                self.hash_to_block_id[h] = block.block_id

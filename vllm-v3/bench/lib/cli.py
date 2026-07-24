@@ -20,8 +20,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--block-size",
         type=int,
-        default=16,
-        help="页大小 B（token/页）",
+        default=256,
+        help="页大小 B（token/页，FlashInfer 需 256 倍数）",
     )
     parser.add_argument(
         "--max-num-seqs",

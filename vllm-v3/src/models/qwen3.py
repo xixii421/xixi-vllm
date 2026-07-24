@@ -57,17 +57,17 @@ class Qwen3Attention(nn.Module):
         qkv = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        q = self.q_norm(q.unflatten(-1, (-1, self.head_dim))).flatten(-2)
-        k = self.k_norm(k.unflatten(-1, (-1, self.head_dim))).flatten(-2)
+        q = q.view(-1, self.num_heads, self.head_dim)
+        k = k.view(-1, self.num_kv_heads, self.head_dim)
+        v = v.view(-1, self.num_kv_heads, self.head_dim)
+
+        q = self.q_norm(q)
+        k = self.k_norm(k)
 
         q, k = self.rotary_emb(positions, q, k)
 
-        q = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
-        k = k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)
-        v = v.view(*v.shape[:-1], self.num_kv_heads, self.head_dim)
-
         out = self.attn(q, k, v)
-        return self.o_proj(out.flatten(-2))
+        return self.o_proj(out.flatten(1, -1))
 
 
 class Qwen3DecoderLayer(nn.Module):

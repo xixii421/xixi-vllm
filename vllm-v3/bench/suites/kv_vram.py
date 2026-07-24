@@ -6,7 +6,7 @@
 本版：
 
 1. 按场景把共享池预留到「本跑所需页数」；
-2. 对 R 个请求**依次真实 Prefill**，页表同时占用、KV 写进 ``PagedKVCache``；
+2. 对 R 个请求**依次真实 Prefill**，页表同时占用、KV 写进共享 FlashInfer 池；
 3. 再对各请求做 1 步 Decode，确认 gather 路径可读；
 4. 「连续对照」= R×M×每token字节（估算标注清楚：若每请求按满上下文预留）。
 
@@ -58,19 +58,19 @@ def needed_gpu_blocks(cfg: BenchConfig) -> int:
 
 def run(cfg: BenchConfig, writer: ResultWriter | None = None, session: BenchSession | None = None) -> dict:
     # 池按「场景最大占页」sizing，避免 max_num_seqs×M 虚高，也避免页不够。
-    if cfg.num_gpu_blocks is None:
-        cfg.num_gpu_blocks = needed_gpu_blocks(cfg)
+    if cfg.num_kvcache_blocks is None:
+        cfg.num_kvcache_blocks = needed_gpu_blocks(cfg)
 
     session = session or BenchSession(cfg)
     meta = collect_meta(cfg)
     writer = writer or ResultWriter(cfg, meta)
 
     engine = session.engine
-    cache = engine.kv_cache
+    mr = engine.model_runner
     B = engine.block_size
     M = cfg.context_len
-    bpt = cache.bytes_per_token
-    pool_mib = round(cache.pool_nbytes / (1024**2), 2)
+    bpt = mr.bytes_per_token
+    pool_mib = round(mr.pool_nbytes / (1024**2), 2)
 
     scenarios = default_scenarios(M)
     if cfg.paged_lengths:

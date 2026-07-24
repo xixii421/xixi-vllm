@@ -1,4 +1,4 @@
-"""vllm-v3 entry: continuous batching + hash-prefix PagedAttention."""
+"""vllm-v3 entry: FlashInfer + CUDA Graph + continuous batching."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def run_inference(
     temperature: float = 0.9,
     top_p: float = 0.95,
     top_k: int = 20,
-    enforce_eager: bool = True,
+    enforce_eager: bool = False,
 ) -> None:
     model_path = _resolve_model_path(model)
     print(f"Loading {model_path} ...")
@@ -61,7 +61,7 @@ def run_batch(
     model: str,
     *,
     max_new_tokens: int = 32,
-    enforce_eager: bool = True,
+    enforce_eager: bool = False,
 ) -> None:
     model_path = _resolve_model_path(model)
     print(f"Loading {model_path} for continuous batching ...")
@@ -87,7 +87,7 @@ def run_batch(
 def main() -> None:
     names = ", ".join(s.local_name for s in QWEN3_REGISTRY)
     parser = argparse.ArgumentParser(
-        description="vllm-v3 Qwen3 inference (Scheduler + Continuous Batching)"
+        description="vllm-v3 Qwen3 inference (FlashInfer + CUDA Graph + Continuous Batching)"
     )
     parser.add_argument(
         "--model",
@@ -99,7 +99,11 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.9)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--top-k", type=int, default=20)
-    parser.add_argument("--compile", action="store_true")
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="disable enforce_eager to enable Decode CUDA Graph",
+    )
     parser.add_argument(
         "--batch",
         action="store_true",

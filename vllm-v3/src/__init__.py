@@ -1,13 +1,13 @@
 """vllm-v3 public API.
 
-Layered layout (bottom → top)::
+Layered layout (v2 three-plane + Fast data plane)::
 
-    layers/   → operators (Attention, RMSNorm, RoPE, …)
-    models/   → Qwen3 graph + weight load
-    memory/   → PagedKVCache + BlockManager (hash prefix) + Sequence
-    engine/   → Scheduler + ModelRunner + Engine.step continuous batching
-    utils/    → ForwardContext
-    config.py → EngineConfig
+    memory/  → KVManager (pages + pool + hash) + Sequence + Triton KV
+    engine/  → Scheduler + ModelRunner (FlashInfer/CG) + Engine
+    layers/  → FlashInfer Attention + Triton Norm/RoPE
+    core/    → CUDA Graph decode runner
+    models/  → Qwen3
+    config.py
 
 ``from src import Engine, EngineConfig, SamplingParams`` via lazy ``__getattr__``.
 """
