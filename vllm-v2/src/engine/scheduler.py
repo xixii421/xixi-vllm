@@ -1,12 +1,3 @@
-"""Control-plane scheduler: Continuous Batching + chunked prefill.
-
-Policies (``mix_prefill_decode``):
-
-* ``False`` — legacy Prefill-first: a step is either all-prefill or all-decode.
-* ``True``  — decode first (1 tok/seq), then **one** prefill chunk with leftover
-  token budget. One ``Engine.step`` may run both (two forwards, teaching path).
-"""
-
 from __future__ import annotations
 
 from collections import deque
@@ -41,7 +32,6 @@ class Scheduler:
         self.waiting.append(seq)
 
     def schedule(self) -> tuple[list[Sequence], list[Sequence]]:
-        """Return ``(prefills, decodes)`` for this step (either may be empty)."""
         if self.mix_prefill_decode:
             return self._schedule_mixed()
         return self._schedule_prefill_first()
@@ -89,7 +79,6 @@ class Scheduler:
         decodes: list[Sequence],
         tokens_used: int,
     ) -> int:
-        """Schedule at most one waiting seq for up to ``remaining`` tokens."""
         if not self.waiting or not self._room(prefills, decodes):
             return tokens_used
         remaining = self.max_num_batched_tokens - tokens_used
@@ -115,7 +104,6 @@ class Scheduler:
         return tokens_used + chunk
 
     def _schedule_prefill_first(self) -> tuple[list[Sequence], list[Sequence]]:
-        """Legacy: pack as many full prefills as budget allows; first may chunk."""
         prefills: list[Sequence] = []
         decodes: list[Sequence] = []
         tokens_used = 0
@@ -155,10 +143,8 @@ class Scheduler:
         decodes: list[Sequence] = []
         used = self._schedule_decode(prefills, decodes, 0)
         if decodes:
-            # In-flight decode keeps moving; one prefill chunk fills leftover budget.
             self._pull_prefill_chunk(prefills, decodes, used)
             return prefills, decodes
-        # No running work: pack prefills the same way as legacy (incl. chunking).
         return self._schedule_prefill_first()
 
     def preempt(self, seq: Sequence) -> None:

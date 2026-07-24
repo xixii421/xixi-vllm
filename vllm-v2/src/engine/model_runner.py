@@ -99,7 +99,6 @@ class ModelRunner:
             set_forward_context(None)
 
     def run(self, prefills: list[Sequence], decodes: list[Sequence]) -> tuple[list[int], list[int]]:
-        """Run decode batch then serial prefill chunks; returns ``(p_ids, d_ids)``."""
         d_ids = self.run_decode_batch(decodes) if decodes else []
         p_ids = [self.run_prefill_one(s) for s in prefills] if prefills else []
         return p_ids, d_ids

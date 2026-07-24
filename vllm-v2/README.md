@@ -1,11 +1,12 @@
 # vllm-v2 — Continuous Batching
 
-在 **v1**（分页 KV + PagedAttention 契约 + hash/radix 前缀）之上加入多请求调度。  
+在 **v1**（分页 KV + PagedAttention 契约 + hash/radix 前缀）之上加入多请求调度。
 
+**设计说明（推荐阅读）**：[docs/00-V2版本设计解释.md](docs/00-V2版本设计解释.md)（CB 动机） · [docs/02-代码架构与三面分离.md](docs/02-代码架构与三面分离.md)（源码怎么拆） · [docs/01-相比v1的增改.md](docs/01-相比v1的增改.md)
 
 | 平面 | 职责 | 路径 |
 | --- | --- | --- |
-| **控制面** | waiting/running、Prefill-first、preempt | `src/engine/scheduler.py` |
+| **控制面** | waiting/running、chunked prefill、PD 混跑、preempt | `src/engine/scheduler.py` |
 | **数据面** | 组 batch、绑 `ForwardContext`、跑模型、采样 | `src/engine/model_runner.py` |
 | **计算面** | Attention / PagedStore / Qwen3 / Sampler | `src/layers/` · `src/pagedattention/` · `src/model*.py` |
 
