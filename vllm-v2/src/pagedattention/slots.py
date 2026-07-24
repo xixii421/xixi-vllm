@@ -1,8 +1,9 @@
 from __future__ import annotations
+
 import torch
 
 
-def slot_of(block_table: list[int], pos: int, block_size: int) -> int:
+def _slot_of(block_table: list[int], pos: int, block_size: int) -> int:
     block_idx = pos // block_size
     if block_idx >= len(block_table):
         raise IndexError(
@@ -12,7 +13,7 @@ def slot_of(block_table: list[int], pos: int, block_size: int) -> int:
     return block_table[block_idx] * block_size + (pos % block_size)
 
 
-def slots_for_range(
+def _slots_for_range(
     block_table: list[int],
     start: int,
     end: int,
@@ -20,7 +21,7 @@ def slots_for_range(
 ) -> list[int]:
     if end < start:
         raise ValueError(f"end={end} < start={start}")
-    return [slot_of(block_table, pos, block_size) for pos in range(start, end)]
+    return [_slot_of(block_table, pos, block_size) for pos in range(start, end)]
 
 
 def slots_tensor(
@@ -31,5 +32,5 @@ def slots_tensor(
     *,
     device: torch.device,
 ) -> torch.Tensor:
-    slots = slots_for_range(block_table, start, end, block_size)
+    slots = _slots_for_range(block_table, start, end, block_size)
     return torch.tensor(slots, device=device, dtype=torch.long)

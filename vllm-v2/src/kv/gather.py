@@ -1,5 +1,3 @@
-"""Backward-compatible wrappers; new code should use ``pagedattention.PagedStore``."""
-
 from __future__ import annotations
 
 import torch
@@ -9,7 +7,7 @@ from .pool import BlockPool
 from .sequence import Sequence
 
 
-def write_kv(
+def _write_kv(
     pool: BlockPool,
     seq: Sequence,
     layer_id: int,
@@ -29,7 +27,7 @@ def write_kv(
     store.write(layer_id, slots, k, v)
 
 
-def gather_kv(
+def _gather_kv(
     pool: BlockPool,
     seq: Sequence,
     layer_id: int,

@@ -5,14 +5,22 @@
 - **kv**：块分配、前缀索引、Engine 编排（通过 ForwardContext 注入本包）
 
 Attention 只依赖 ``PagedStore`` + ``slot_mapping`` / ``block_table``，与 KVManager 解耦。
+
+对外公开 API（``__all__``）::
+
+    slots_tensor   — 逻辑区间 → GPU slot_mapping
+    PagedStore     — write / gather
+
+内部实现（下划线，见各模块）::
+
+    slots._slot_of / slots._slots_for_range
+    store._BlockTensorStore / _coerce_kv_token_major / _flat_layer_views
 """
 
-from .slots import slot_of, slots_for_range, slots_tensor
+from .slots import slots_tensor
 from .store import PagedStore
 
 __all__ = [
     "PagedStore",
-    "slot_of",
-    "slots_for_range",
     "slots_tensor",
 ]

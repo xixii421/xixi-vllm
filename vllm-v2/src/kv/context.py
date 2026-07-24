@@ -1,5 +1,3 @@
-"""ForwardContext: data-plane metadata consumed by the compute-plane Attention."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field

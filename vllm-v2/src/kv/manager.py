@@ -1,5 +1,3 @@
-"""KV block lifecycle + prefix index (shared by control & data planes)."""
-
 from __future__ import annotations
 
 from typing import Literal
@@ -8,15 +6,15 @@ import torch
 from torch import nn
 
 from ..pagedattention import PagedStore
-from .gather import gather_kv, write_kv
+from .gather import _gather_kv, _write_kv
 from .pool import BlockPool
 from .prefix import HashPrefixIndex, NoopPrefixIndex, RadixPrefixIndex
 from .sequence import Sequence
 
-PrefixBackend = Literal["none", "hash", "radix"]
+_PrefixBackend = Literal["none", "hash", "radix"]
 
 
-def _make_index(backend: PrefixBackend):
+def _make_index(backend: _PrefixBackend):
     if backend == "hash":
         return HashPrefixIndex()
     if backend == "radix":
@@ -31,7 +29,7 @@ class KVManager:
         *,
         num_blocks: int,
         block_size: int,
-        prefix_backend: PrefixBackend,
+        prefix_backend: _PrefixBackend,
         device: torch.device,
         dtype: torch.dtype,
     ) -> None:
@@ -129,12 +127,12 @@ class KVManager:
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> None:
-        write_kv(self.pool, seq, layer_id, start, k, v)
+        _write_kv(self.pool, seq, layer_id, start, k, v)
 
     def gather(
         self, layer_id: int, seq: Sequence, length: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return gather_kv(self.pool, seq, layer_id, length)
+        return _gather_kv(self.pool, seq, layer_id, length)
 
     def deallocate(self, seq: Sequence, *, publish: bool) -> None:
         """Release pages. ``publish=True`` keeps full blocks in prefix cache."""

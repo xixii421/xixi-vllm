@@ -12,18 +12,18 @@ def _prefix_len(a: AbcSequence[int], b: AbcSequence[int]) -> int:
     return n
 
 
-class RadixNode:
+class _RadixNode:
     __slots__ = ("children", "parent", "key", "value", "ref_count", "access_time")
 
     def __init__(
         self,
         *,
-        parent: RadixNode | None = None,
+        parent: _RadixNode | None = None,
         key: tuple[int, ...] = (),
         value: tuple[int, ...] = (),
         ref_count: int = 0,
     ) -> None:
-        self.children: dict[int, RadixNode] = {}
+        self.children: dict[int, _RadixNode] = {}
         self.parent = parent
         self.key = key
         self.value = value
@@ -33,10 +33,10 @@ class RadixNode:
 
 class RadixTree:
     def __init__(self) -> None:
-        self.root = RadixNode(ref_count=1)
-        self._block_to_node: dict[int, RadixNode] = {}
+        self.root = _RadixNode(ref_count=1)
+        self._block_to_node: dict[int, _RadixNode] = {}
 
-    def match_prefix(self, key: list[int]) -> tuple[list[int], RadixNode]:
+    def match_prefix(self, key: list[int]) -> tuple[list[int], _RadixNode]:
         if not key:
             return [], self.root
         node = self.root
@@ -56,7 +56,7 @@ class RadixTree:
             child_key = key[0] if key else -1
         return values, node
 
-    def insert(self, key: list[int], value: list[int]) -> RadixNode:
+    def insert(self, key: list[int], value: list[int]) -> _RadixNode:
         if not key:
             return self.root
         node = self.root
@@ -76,36 +76,36 @@ class RadixTree:
             return self._add(node, tuple(key), tuple(value))
         return node
 
-    def inc_ref(self, node: RadixNode) -> None:
+    def inc_ref(self, node: _RadixNode) -> None:
         while node is not self.root:
             node.ref_count += 1
             node = node.parent or self.root
 
-    def dec_ref(self, node: RadixNode) -> None:
+    def dec_ref(self, node: _RadixNode) -> None:
         while node is not self.root:
             node.ref_count -= 1
             node = node.parent or self.root
 
-    def _index(self, node: RadixNode) -> None:
+    def _index(self, node: _RadixNode) -> None:
         for bid in node.value:
             self._block_to_node[bid] = node
 
-    def _unindex(self, node: RadixNode) -> None:
+    def _unindex(self, node: _RadixNode) -> None:
         for bid in node.value:
             if self._block_to_node.get(bid) is node:
                 del self._block_to_node[bid]
 
     def _add(
-        self, parent: RadixNode, key: tuple[int, ...], value: tuple[int, ...]
-    ) -> RadixNode:
-        node = RadixNode(parent=parent, key=key, value=value)
+        self, parent: _RadixNode, key: tuple[int, ...], value: tuple[int, ...]
+    ) -> _RadixNode:
+        node = _RadixNode(parent=parent, key=key, value=value)
         parent.children[key[0]] = node
         self._index(node)
         return node
 
-    def _split(self, node: RadixNode, split_at: int) -> RadixNode:
+    def _split(self, node: _RadixNode, split_at: int) -> _RadixNode:
         self._unindex(node)
-        new_node = RadixNode(
+        new_node = _RadixNode(
             parent=node.parent,
             key=node.key[:split_at],
             value=node.value[:split_at],

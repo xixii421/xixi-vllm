@@ -5,7 +5,7 @@ from torch import nn
 
 
 @dataclass
-class Block:
+class _Block:
     ref_count: int = 0
     hash: int = -1
     token_ids: list[int] = field(default_factory=list)
@@ -36,7 +36,7 @@ class BlockPool:
         self.block_size = block_size
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
-        self.blocks = [Block() for _ in range(num_blocks)]
+        self.blocks = [_Block() for _ in range(num_blocks)]
         self.free_ids: set[int] = set(range(num_blocks))
         self.used_ids: set[int] = set()
         self.cached_ids: set[int] = set()

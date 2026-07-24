@@ -1,8 +1,7 @@
-"""Engine: wires control plane (Scheduler) + data plane (ModelRunner)."""
-
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Literal
 
 import torch
 from transformers import AutoTokenizer
@@ -39,26 +38,41 @@ class Engine:
             self.model = torch.compile(self.model, mode="reduce-overhead")
 
         self.sampler = Sampler()
+        self._init_kv()
+        self.last_num_cached_tokens = 0
+
+    def _init_kv(self) -> None:
         self.kv = KVManager(
             self.model,
-            num_blocks=config.num_kv_blocks,
-            block_size=config.block_size,
-            prefix_backend=config.prefix_backend,
+            num_blocks=self.config.num_kv_blocks,
+            block_size=self.config.block_size,
+            prefix_backend=self.config.prefix_backend,
             device=self.device,
             dtype=self.dtype,
         )
-        # Control plane
         self.scheduler = Scheduler(
             self.kv,
-            max_num_seqs=config.max_num_seqs,
-            max_num_batched_tokens=config.max_num_batched_tokens,
+            max_num_seqs=self.config.max_num_seqs,
+            max_num_batched_tokens=self.config.max_num_batched_tokens,
             eos_token_id=self.eos_token_id,
+            mix_prefill_decode=self.config.mix_prefill_decode,
         )
-        # Data plane
         self.model_runner = ModelRunner(
             self.model, self.kv, self.sampler, device=self.device
         )
+
+    def reset_kv(
+        self, prefix_backend: Literal["none", "hash", "radix"] | None = None
+    ) -> None:
+        """清空 KV / 调度队列；可选切换 prefix_backend。供测试复用同一模型。"""
+        if prefix_backend is not None:
+            if prefix_backend not in ("none", "hash", "radix"):
+                raise ValueError(f"invalid prefix_backend: {prefix_backend!r}")
+            self.config.prefix_backend = prefix_backend
+        self._init_kv()
         self.last_num_cached_tokens = 0
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
 
     def _resolve_dtype(self) -> torch.dtype:
         if self.config.dtype != "auto":
@@ -84,22 +98,34 @@ class Engine:
         return seq
 
     def step(self) -> tuple[list[tuple[int, list[int]]], int]:
-        seqs, is_prefill = self.scheduler.schedule()
-        if not seqs:
+        prefills, decodes = self.scheduler.schedule()
+        if not prefills and not decodes:
             return [], 0
-        metric = (
-            sum(s.num_scheduled_tokens for s in seqs) if is_prefill else -len(seqs)
-        )
-        token_ids = self.model_runner.run(seqs, is_prefill)
-        finished = self.scheduler.postprocess(seqs, token_ids, is_prefill)
-        if is_prefill and seqs:
-            self.last_num_cached_tokens = max(
-                (s.num_cached_tokens for s in seqs), default=0
+
+        prefill_toks = sum(s.num_scheduled_tokens for s in prefills)
+        metric = prefill_toks + len(decodes)
+
+        # Decode first so in-flight requests keep moving; then prefill chunks.
+        p_ids, d_ids = self.model_runner.run(prefills, decodes)
+
+        finished: list = []
+        if decodes:
+            finished.extend(
+                self.scheduler.postprocess(decodes, d_ids, is_prefill=False)
             )
+        if prefills:
+            finished.extend(
+                self.scheduler.postprocess(prefills, p_ids, is_prefill=True)
+            )
+            self.last_num_cached_tokens = max(
+                (s.num_cached_tokens for s in prefills), default=0
+            )
+
         outputs = [
             (seq.seq_id, seq.token_ids[seq.num_prompt_tokens :]) for seq in finished
         ]
         return outputs, metric
+
 
     def generate_batch(
         self,
@@ -108,12 +134,12 @@ class Engine:
     ) -> list[str]:
         if sampling_params is None:
             sps = [SamplingParams() for _ in prompts]
-        elif isinstance(sampling_params, SamplingParams):
-            sps = [sampling_params for _ in prompts]
-        else:
+        elif isinstance(sampling_params, (list, tuple)):
             sps = list(sampling_params)
             if len(sps) != len(prompts):
                 raise ValueError("sampling_params length must match prompts")
+        else:
+            sps = [sampling_params for _ in prompts]
 
         seqs = [self.add_request(p, sp) for p, sp in zip(prompts, sps)]
         finished_text: dict[int, str] = {}

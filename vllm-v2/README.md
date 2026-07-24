@@ -1,7 +1,7 @@
-# vllm-v2 — Continuous Batching（基于 v1）
+# vllm-v2 — Continuous Batching
 
 在 **v1**（分页 KV + PagedAttention 契约 + hash/radix 前缀）之上加入多请求调度。  
-主体计算/存储代码复用 v1；批处理控制流参考原 v3，并按 **三面分离** 重组。
+
 
 | 平面 | 职责 | 路径 |
 | --- | --- | --- |
@@ -15,14 +15,17 @@
 
 ```bash
 cd vllm-v2
-source ../.venv/bin/activate   # 或 vllm-v0/.venv
+source ../.venv/bin/activate   
 
 python run.py --model Qwen3-0.6B --temperature 0 --max-new-tokens 32
 python run.py --model Qwen3-0.6B --batch --max-new-tokens 16
 
-python test/test_scheduler.py
-python test/test_pagedattention.py
-python test/test_e2e_batch.py --model Qwen3-0.6B
+python -m bench.compare --model Qwen3-0.6B
+python -m bench.compare --model Qwen3-0.6B --batch-size 4 --max-new 32,64 --skip-prefix
+
+# Chunked P+D 混跑：看的是公平性（dec@P / short_P），不是总吞吐
+python -m bench.compare_chunked --model Qwen3-0.6B --budget 32 --long-prompt 512 --conc 2,4
+python -m bench.compare_chunked --model Qwen3-0.6B --skip-uniform --budget 32 --long-prompt 512
 ```
 
 ## 布局
@@ -30,14 +33,16 @@ python test/test_e2e_batch.py --model Qwen3-0.6B
 ```text
 src/
   config.py / sampling_params.py
-  kv/                 # 块池 + 前缀（v1）+ 多请求 Sequence
-  pagedattention/     # slots + PagedStore（v1，write 支持 B>1）
+  kv/                 # 块池 + 前缀（与 v1 对齐命名）+ 多请求 Sequence
+  pagedattention/     # slots + PagedStore（公开: slots_tensor / PagedStore）
   layers/             # Attention 支持 Decode 多请求
   model*.py sampler   # 计算面
   engine/
     scheduler.py      # 控制面
     model_runner.py   # 数据面
-    engine.py         # 门面
+    engine.py         # 门面（含 reset_kv）
+bench/                # v0/v1/v2 对比
 ```
 
-设计说明见 [docs/architecture.md](docs/architecture.md)。原 `vllm-v3/` 仍保留作对照，本版为推荐入口。
+
+

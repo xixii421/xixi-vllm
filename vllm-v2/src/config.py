@@ -23,6 +23,8 @@ class EngineConfig:
     # --- continuous batching ---
     max_num_seqs: int = 8
     max_num_batched_tokens: int = 4096
+    # True: decode + prefill chunk 同一步（推荐）；False: 旧 Prefill-first
+    mix_prefill_decode: bool = True
     hf_config: PretrainedConfig = field(init=False)
 
     def __post_init__(self) -> None:

@@ -1,9 +1,16 @@
+"""PagedStore：按 slot 写 / 按 block_table 读。
+
+v2 相对 v1：``write`` 支持 decode 批 ``[B, S, H, D]``（展平后一次 index_copy）。
+"""
+
 from __future__ import annotations
+
 from typing import Protocol
+
 import torch
 
 
-class BlockTensorStore(Protocol):
+class _BlockTensorStore(Protocol):
     block_size: int
     num_kv_heads: int
     head_dim: int
@@ -11,8 +18,29 @@ class BlockTensorStore(Protocol):
     v: torch.Tensor
 
 
+def _coerce_kv_token_major(
+    k: torch.Tensor, v: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """规范化为 ``[N, Hkv, D]``；允许 B>1 的 decode 批展平。"""
+    if k.dim() == 4:
+        b, s, h, d = k.shape
+        return k.reshape(b * s, h, d), v.reshape(b * s, h, d)
+    if k.dim() == 3:
+        return k, v
+    raise ValueError(f"unexpected k rank {k.dim()}")
+
+
+def _flat_layer_views(
+    pool: _BlockTensorStore, layer_id: int
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    flat_dim = pool.num_kv_heads * pool.head_dim
+    flat_k = pool.k[layer_id].reshape(-1, flat_dim)
+    flat_v = pool.v[layer_id].reshape(-1, flat_dim)
+    return flat_k, flat_v, flat_dim
+
+
 class PagedStore:
-    def __init__(self, pool: BlockTensorStore) -> None:
+    def __init__(self, pool: _BlockTensorStore) -> None:
         self.pool = pool
 
     @property
@@ -30,23 +58,13 @@ class PagedStore:
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> None:
-
-        # [B, S, H, D] (decode batch) or [1, S, H, D] / [S, H, D]
-        if k.dim() == 4:
-            b, s, h, d = k.shape
-            k = k.reshape(b * s, h, d)
-            v = v.reshape(b * s, h, d)
-        elif k.dim() != 3:
-            raise ValueError(f"unexpected k rank {k.dim()}")
-
+        k, v = _coerce_kv_token_major(k, v)
         n = k.shape[0]
         if slot_mapping.numel() != n:
             raise ValueError(
                 f"slot_mapping length {slot_mapping.numel()} != seq length {n}"
             )
-        flat_dim = self.pool.num_kv_heads * self.pool.head_dim
-        flat_k = self.pool.k[layer_id].reshape(-1, flat_dim)
-        flat_v = self.pool.v[layer_id].reshape(-1, flat_dim)
+        flat_k, flat_v, flat_dim = _flat_layer_views(self.pool, layer_id)
         with torch.no_grad():
             flat_k.index_copy_(0, slot_mapping, k.reshape(n, flat_dim).detach())
             flat_v.index_copy_(0, slot_mapping, v.reshape(n, flat_dim).detach())
@@ -57,7 +75,7 @@ class PagedStore:
         block_table: list[int],
         seq_len: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Gather logical prefix ``[0, seq_len)`` → contiguous ``[seq_len, Hkv, D]``."""
+        """Gather 逻辑前缀 ``[0, seq_len)`` → ``[seq_len, Hkv, D]``。"""
         if seq_len <= 0:
             empty = self.pool.k.new_empty(0, self.pool.num_kv_heads, self.pool.head_dim)
             return empty, empty.clone()

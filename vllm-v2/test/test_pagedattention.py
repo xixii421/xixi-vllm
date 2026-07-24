@@ -11,13 +11,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.kv.pool import BlockPool
-from src.pagedattention import PagedStore, slot_of, slots_tensor
+from src.pagedattention import PagedStore, slots_tensor
+from src.pagedattention.slots import _slot_of
 
 
 def test_slots() -> None:
     table = [7, 3]
     bs = 4
-    assert slot_of(table, 4, bs) == 3 * 4
+    assert _slot_of(table, 4, bs) == 3 * 4
     print("ok: slots")
 
 
@@ -39,7 +40,6 @@ def test_roundtrip_and_batch_write() -> None:
         pool.used_ids.add(bid)
         pool.blocks[bid].ref_count = 1
 
-    # Single-seq write
     k = torch.randn(1, 6, 2, 8)
     v = torch.randn(1, 6, 2, 8)
     slots = slots_tensor(table, 0, 6, 4, device=device)
@@ -48,7 +48,6 @@ def test_roundtrip_and_batch_write() -> None:
     assert torch.allclose(gk, k[0])
     assert torch.allclose(gv, v[0])
 
-    # Batched decode-style write: [B,1,H,D] with B=2
     table2 = [2, 4]
     for bid in table2:
         pool.free_ids.discard(bid)
@@ -56,7 +55,6 @@ def test_roundtrip_and_batch_write() -> None:
         pool.blocks[bid].ref_count = 1
     kb = torch.randn(2, 1, 2, 8)
     vb = torch.randn(2, 1, 2, 8)
-    # write at pos 0 of each block
     sm = torch.tensor([2 * 4 + 0, 4 * 4 + 0], dtype=torch.long)
     store.write(0, sm, kb, vb)
     g0, _ = store.gather(0, [2], 1)

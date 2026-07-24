@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import torch
 
@@ -52,7 +51,12 @@ def _sched(**kw) -> Scheduler:
         device=torch.device("cpu"),
         dtype=torch.float32,
     )
-    defaults = dict(max_num_seqs=4, max_num_batched_tokens=128, eos_token_id=2)
+    defaults = dict(
+        max_num_seqs=4,
+        max_num_batched_tokens=128,
+        eos_token_id=2,
+        mix_prefill_decode=False,
+    )
     defaults.update(kw)
     return Scheduler(kv, **defaults)
 
@@ -63,13 +67,13 @@ def test_prefill_then_decode() -> None:
         [1, 2, 3, 4, 5], block_size=4, sampling=SamplingParams(max_tokens=3)
     )
     sch.add(seq)
-    batch, is_prefill = sch.schedule()
-    assert is_prefill and batch == [seq]
+    prefills, decodes = sch.schedule()
+    assert prefills == [seq] and not decodes
     assert seq.status.name == "RUNNING"
-    sch.postprocess(batch, [9], True)
+    sch.postprocess(prefills, [9], is_prefill=True)
     assert seq.token_ids[-1] == 9
-    batch2, is_prefill2 = sch.schedule()
-    assert not is_prefill2 and batch2 == [seq]
+    prefills2, decodes2 = sch.schedule()
+    assert not prefills2 and decodes2 == [seq]
     print("  [PASS] prefill then decode")
 
 
@@ -79,9 +83,45 @@ def test_multi_waiting_prefills() -> None:
     b = Sequence.from_prompt([4, 5, 6], block_size=4, sampling=SamplingParams(max_tokens=1))
     sch.add(a)
     sch.add(b)
-    batch, is_prefill = sch.schedule()
-    assert is_prefill and len(batch) == 2
+    prefills, decodes = sch.schedule()
+    assert len(prefills) == 2 and not decodes
     print("  [PASS] multi waiting prefills")
+
+
+def test_chunked_prefill() -> None:
+    sch = _sched(max_num_batched_tokens=3)
+    seq = Sequence.from_prompt(
+        list(range(10)), block_size=4, sampling=SamplingParams(max_tokens=1)
+    )
+    sch.add(seq)
+    p1, d1 = sch.schedule()
+    assert p1 == [seq] and not d1 and seq.num_scheduled_tokens == 3
+    assert seq.status.name == "WAITING"
+    sch.postprocess(p1, [0], is_prefill=True)
+    assert seq.num_cached_tokens == 3 and len(seq.token_ids) == 10
+    p2, _ = sch.schedule()
+    assert seq.num_scheduled_tokens == 3
+    print("  [PASS] chunked prefill")
+
+
+def test_mix_decode_and_prefill() -> None:
+    sch = _sched(max_num_batched_tokens=8, mix_prefill_decode=True)
+    run = Sequence.from_prompt(
+        [1, 2, 3, 4], block_size=4, sampling=SamplingParams(max_tokens=8)
+    )
+    sch.add(run)
+    p0, d0 = sch.schedule()
+    assert not d0 and p0 == [run] and run.status.name == "RUNNING"
+    sch.postprocess(p0, [10], is_prefill=True)
+
+    long = Sequence.from_prompt(
+        list(range(20, 40)), block_size=4, sampling=SamplingParams(max_tokens=2)
+    )
+    sch.add(long)
+    prefills, decodes = sch.schedule()
+    assert decodes == [run] and run.num_scheduled_tokens == 1
+    assert prefills == [long] and long.num_scheduled_tokens == 7  # budget 8-1
+    print("  [PASS] mix decode + prefill chunk")
 
 
 def test_finish_on_eos() -> None:
@@ -90,8 +130,8 @@ def test_finish_on_eos() -> None:
         [1, 2, 3, 4], block_size=4, sampling=SamplingParams(max_tokens=8)
     )
     sch.add(seq)
-    batch, _ = sch.schedule()
-    finished = sch.postprocess(batch, [99], True)
+    prefills, _ = sch.schedule()
+    finished = sch.postprocess(prefills, [99], is_prefill=True)
     assert finished and seq.is_finished and sch.is_finished()
     print("  [PASS] finish on eos")
 
@@ -100,6 +140,8 @@ def main() -> None:
     print("── Scheduler ──")
     test_prefill_then_decode()
     test_multi_waiting_prefills()
+    test_chunked_prefill()
+    test_mix_decode_and_prefill()
     test_finish_on_eos()
     print("ALL_OK")
 

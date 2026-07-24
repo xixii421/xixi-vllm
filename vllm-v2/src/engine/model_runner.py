@@ -1,12 +1,10 @@
-"""Data plane: assemble tensors, bind ForwardContext, run model, sample."""
-
 from __future__ import annotations
 
 import torch
 from torch import nn
 
 from ..kv import ForwardContext, Sequence, set_forward_context
-from ..pagedattention import slots_for_range
+from ..pagedattention import slots_tensor
 from ..sampler import Sampler
 from ..kv.manager import KVManager
 
@@ -50,13 +48,15 @@ class ModelRunner:
         start = seq.num_cached_tokens
         end = start + seq.num_scheduled_tokens
         tokens = seq.token_ids[start:end]
-        slots = slots_for_range(seq.block_table, start, end, self.block_size)
+        slots = slots_tensor(
+            seq.block_table, start, end, self.block_size, device=self.device
+        )
         set_forward_context(
             ForwardContext(
                 is_prefill=True,
                 store=self.kv.store,
                 block_tables=[seq.block_table],
-                slot_mapping=self._tensor(slots),
+                slot_mapping=slots,
                 query_lens=[end - start],
                 context_lens=[end],
                 cached_lens=[start],
@@ -98,10 +98,8 @@ class ModelRunner:
         finally:
             set_forward_context(None)
 
-    def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
-        if not seqs:
-            return []
-        if is_prefill:
-            # Scheduling is continuous; Prefill forwards stay serial (teaching).
-            return [self.run_prefill_one(seq) for seq in seqs]
-        return self.run_decode_batch(seqs)
+    def run(self, prefills: list[Sequence], decodes: list[Sequence]) -> tuple[list[int], list[int]]:
+        """Run decode batch then serial prefill chunks; returns ``(p_ids, d_ids)``."""
+        d_ids = self.run_decode_batch(decodes) if decodes else []
+        p_ids = [self.run_prefill_one(s) for s in prefills] if prefills else []
+        return p_ids, d_ids
