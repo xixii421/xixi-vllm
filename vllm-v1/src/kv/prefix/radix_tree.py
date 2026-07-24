@@ -1,4 +1,4 @@
-""" 压缩前缀树（key=块哈希序列，value=物理块号序列） """
+""" 压缩前缀树 """
 
 from __future__ import annotations
 

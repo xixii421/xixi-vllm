@@ -1,4 +1,4 @@
-""" 满块链式哈希（blake2b） """
+""" 满块链式哈希 """
 
 from __future__ import annotations
 

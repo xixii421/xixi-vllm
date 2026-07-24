@@ -94,25 +94,29 @@ class Attention(nn.Module):
 
         start = ctx.cache_len
         n = q.shape[2]
-        # Post-RoPE K/V → physical pages via slot_mapping.
+        total = ctx.seq_len
+        assert total == start + n
+
+        # 1) write：本步 Post-RoPE 的 K/V → 按 slot_mapping 写入页池（仅新增位置）
         ctx.store.write(
             self.layer_id,
             ctx.slot_mapping,
             k.transpose(1, 2),
             v.transpose(1, 2),
         )
-        total = ctx.seq_len
-        assert total == start + n
+
+        # 2) gather：按 block_table 读回逻辑长度 seq_len 的全部历史 K/V
         k_c, v_c = ctx.store.gather(self.layer_id, ctx.block_table, total)
-        k_c = k_c.unsqueeze(0).transpose(1, 2)  # [1,Hkv,T,D]
+        k_c = k_c.unsqueeze(0).transpose(1, 2)  # [1, Hkv, T, D]
         v_c = v_c.unsqueeze(0).transpose(1, 2)
 
+        # 3) attend：本步 Q 与读回的历史做注意力（掩码随 Prefill / Decode / 部分 Prefill）
         if start == 0 and n == total:
             out = self._sdpa(q, k_c, v_c, is_causal=True)
         elif n == 1:
             out = self._sdpa(q, k_c, v_c, is_causal=False)
         else:
-            # Partial prefill after a prefix hit: Q is only the new span.
+            # 前缀命中后的部分 Prefill：Q 只覆盖新增区间
             device, dtype = q.device, q.dtype
             q_pos = torch.arange(start, start + n, device=device)[:, None]
             kv_pos = torch.arange(total, device=device)[None, :]

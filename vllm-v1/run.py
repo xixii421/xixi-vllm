@@ -1,5 +1,3 @@
-"""vllm-v1 命令行：下载 / 列表 / 流式推理（支持 prefix backend）。"""
-
 from __future__ import annotations
 
 import argparse

@@ -10,7 +10,7 @@ from torch import nn
 
 @dataclass
 class _Block:
-    """ 单页元数据（真 KV 在 pool.k/v 里）。 """
+    """ 单页元数据。 """
 
     ref_count: int = 0
     hash: int = -1

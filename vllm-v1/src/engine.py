@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 import torch
 from transformers import AutoTokenizer
 
@@ -32,15 +34,35 @@ class Engine:
             self.model = torch.compile(self.model, mode="reduce-overhead")
 
         self.sampler = Sampler()
+        self._init_kv()
+        self.last_num_cached_tokens = 0
+
+    def _init_kv(self) -> None:
+        """按当前 config 重建页池与前缀索引（不重载模型权重）。"""
         self.kv = KVManager(
             self.model,
-            num_blocks=config.num_kv_blocks,
-            block_size=config.block_size,
-            prefix_backend=config.prefix_backend,
+            num_blocks=self.config.num_kv_blocks,
+            block_size=self.config.block_size,
+            prefix_backend=self.config.prefix_backend,
             device=self.device,
             dtype=self.dtype,
         )
+
+    def reset_kv(
+        self, prefix_backend: Literal["none", "hash", "radix"] | None = None
+    ) -> None:
+        """清空 KV / 前缀状态；可选切换 prefix_backend。供测试复用同一模型。"""
+        if prefix_backend is not None:
+            if prefix_backend not in ("none", "hash", "radix"):
+                raise ValueError(f"invalid prefix_backend: {prefix_backend!r}")
+            self.config.prefix_backend = prefix_backend
+        old = getattr(self, "kv", None)
+        self._init_kv()
         self.last_num_cached_tokens = 0
+        if old is not None:
+            del old
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
 
     def _resolve_dtype(self) -> torch.dtype:
         if self.config.dtype != "auto":
