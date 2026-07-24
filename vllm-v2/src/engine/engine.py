@@ -64,7 +64,6 @@ class Engine:
     def reset_kv(
         self, prefix_backend: Literal["none", "hash", "radix"] | None = None
     ) -> None:
-        """清空 KV / 调度队列；可选切换 prefix_backend。供测试复用同一模型。"""
         if prefix_backend is not None:
             if prefix_backend not in ("none", "hash", "radix"):
                 raise ValueError(f"invalid prefix_backend: {prefix_backend!r}")
@@ -102,6 +101,9 @@ class Engine:
         if not prefills and not decodes:
             return [], 0
 
+        # Prefix-hit size from allocate() (not post-prefill num_cached).
+        self.last_num_cached_tokens = self.kv.last_num_cached_tokens
+
         prefill_toks = sum(s.num_scheduled_tokens for s in prefills)
         metric = prefill_toks + len(decodes)
 
@@ -116,9 +118,6 @@ class Engine:
         if prefills:
             finished.extend(
                 self.scheduler.postprocess(prefills, p_ids, is_prefill=True)
-            )
-            self.last_num_cached_tokens = max(
-                (s.num_cached_tokens for s in prefills), default=0
             )
 
         outputs = [

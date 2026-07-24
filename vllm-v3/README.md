@@ -20,10 +20,17 @@
 
 ## 文档
 
-- [相比 v2 的增改](./docs/01-相比v2的增改.md)
-- [调度与 Continuous Batching](./docs/scheduling.md)
-- [算子优化（FlashInfer / CG / Triton）](./docs/operators.md)
-- [优化全景与 FlashInfer CG 路线](./docs/optimization_guide.md)
+入口：[docs/README.md](./docs/README.md)  
+**主线：v2 性能瓶颈 → v3 如何消除 → 实测证据。**
+
+| 文档 | 说明 |
+| --- | --- |
+| [00 总览](./docs/00-总览与阅读路径.md) | 为什么要有 v3 |
+| [01 v2 性能瓶颈](./docs/01-v2性能瓶颈.md) | **重点：慢在哪** |
+| [02 如何消除瓶颈](./docs/02-v3如何消除瓶颈.md) | 每个瓶颈的改法 |
+| [03 实测证据](./docs/03-实测证据.md) | bench 数字 |
+| [04 前缀 APC](./docs/04-前缀APC.md) / [05 代码地图](./docs/05-模块与代码地图.md) | 专题 |
+| [scheduling](./docs/scheduling.md) / [operators](./docs/operators.md) / [optimization_guide](./docs/optimization_guide.md) | 调度 · 算子 · vs v7 下一步 |
 
 ## 快速开始
 

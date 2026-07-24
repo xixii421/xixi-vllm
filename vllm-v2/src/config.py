@@ -1,5 +1,3 @@
-"""vllm-v2 引擎配置：v1 KV/前缀 + Continuous Batching 批处理上限。"""
-
 from __future__ import annotations
 
 import math
@@ -16,14 +14,14 @@ class EngineConfig:
     context_len: int = 2048
     enforce_eager: bool = True
     dtype: str = "auto"
-    # --- from v1 ---
+    # from v1 
     prefix_backend: Literal["none", "hash", "radix"] = "hash"
     block_size: int = 16
     num_kv_blocks: int = 0  # 0 → derive
-    # --- continuous batching ---
+    # continuous batching
     max_num_seqs: int = 8
     max_num_batched_tokens: int = 4096
-    # True: decode + prefill chunk 同一步（推荐）；False: 旧 Prefill-first
+    # True: decode + prefill chunk 同一步；False: 旧 Prefill-first
     mix_prefill_decode: bool = True
     hf_config: PretrainedConfig = field(init=False)
 
@@ -42,5 +40,4 @@ class EngineConfig:
             raise ValueError("max_num_batched_tokens must be > 0")
         if self.num_kv_blocks <= 0:
             pages = math.ceil(self.context_len / self.block_size)
-            # Room for concurrent seqs + a few cached prefix pages.
             self.num_kv_blocks = max(pages * self.max_num_seqs, pages + 8)

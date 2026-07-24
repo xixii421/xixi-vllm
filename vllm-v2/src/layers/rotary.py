@@ -1,5 +1,3 @@
-"""RoPE：预计算 cos/sin 表，按 positions 查表后旋转 Q 与 K。"""
-
 from __future__ import annotations
 
 import torch
@@ -7,15 +5,11 @@ from torch import nn
 
 
 def _rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """半维交错旋转：x1' = x1*cos - x2*sin，x2' = x2*cos + x1*sin。"""
-    # x: [N, n_heads, rotary_dim]；cos/sin: [N, 1, rotary_dim/2]，靠广播对齐
     x1, x2 = x.chunk(2, dim=-1)
     return torch.cat((x1 * cos - x2 * sin, x2 * cos + x1 * sin), dim=-1)
 
 
 class RotaryEmbedding(nn.Module):
-    """标准 RoPE；V 不旋转，由调用方只把 Q、K 传进来。"""
-
     def __init__(
         self,
         head_size: int,
@@ -48,7 +42,6 @@ class RotaryEmbedding(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # 按绝对位置从预计算表取 cos/sin，与当前序列长度对齐
         flat = positions.reshape(-1)
         cos_sin = self.cos_sin_cache.index_select(0, flat).to(dtype=query.dtype)
         cos, sin = cos_sin.chunk(2, dim=-1)
@@ -59,7 +52,6 @@ class RotaryEmbedding(nn.Module):
             shape = x.shape
             x = x.reshape(flat.numel(), -1, self.head_size)
             rot = _rotate(x[..., : self.rotary_dim], cos, sin)
-            # rotary_dim < head_size 时，尾部通道保持不动
             if self.rotary_dim < self.head_size:
                 rot = torch.cat((rot, x[..., self.rotary_dim :]), dim=-1)
             return rot.reshape(shape)

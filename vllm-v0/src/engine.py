@@ -15,7 +15,7 @@ class Engine:
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.dtype = self._resolve_dtype()
 
-        # ① 分词器：部分模型无 pad_token，回退到 eos，避免后续填充报错
+        # 分词器：部分模型无 pad_token，回退到 eos，避免后续填充报错
         self.tokenizer = AutoTokenizer.from_pretrained(
             config.model, trust_remote_code=True
         )
@@ -23,7 +23,7 @@ class Engine:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.eos_token_id = self.tokenizer.eos_token_id
 
-        # ② 先建空骨架，再把 safetensors 灌进参数，最后上设备
+        # 先建空骨架，再把 safetensors 灌进参数，最后上设备
         self.model = Qwen3ForCausalLM(config.hf_config)
         load_model(self.model, config.model)
         self.model = self.model.to(dtype=self.dtype, device=self.device).eval()
@@ -31,7 +31,7 @@ class Engine:
             # reduce-overhead：降低反复进图时的 Python / 调度开销
             self.model = torch.compile(self.model, mode="reduce-overhead")
 
-        # ③ 采样器无训练参数；放在同一设备上即可
+        # 采样器无训练参数；放在同一设备上即可
         self.sampler = Sampler()
 
     def _resolve_dtype(self) -> torch.dtype:

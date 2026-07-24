@@ -1,5 +1,3 @@
-"""Qwen3 CausalLM 骨架：Decoder 堆叠 + HF 权重装载（含 QKV 合并）。"""
-
 from __future__ import annotations
 
 from collections.abc import Iterable

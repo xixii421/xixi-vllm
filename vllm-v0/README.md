@@ -23,7 +23,7 @@ python run.py --model Qwen3-0.6B --prompt "Hello, my name is"
 vllm-v0/
 ├── README.md                 ← 本页
 ├── run.py                    命令行入口
-├── docs/                     讲义（按下方顺序读）
+├── docs/                     讲义
 └── src/
     ├── config.py             引擎配置
     ├── engine.py             加载模型 + generate 循环
@@ -40,7 +40,7 @@ vllm-v0/
 
 ## 推荐阅读顺序
 
-讲义在 `docs/`，源码路径写在各篇开头。建议按这条路径读，和代码依赖方向一致：
+讲义在 `docs/`，源码路径写在各篇开头。建议按这条路径读，和代码依赖方向一致。
 
 | 顺序 | 文档 | 对应源码 | 这一步弄清什么 |
 | :---: | :--- | :--- | :--- |

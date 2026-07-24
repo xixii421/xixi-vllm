@@ -44,7 +44,10 @@ class KVManager:
 
         self.blocks = BlockManager(self.num_blocks_schedulable, block_size)
         self.index = make_prefix_index(prefix_backend)
+        # Hash: page-pool LRU + invalidate. Radix: tree leaf LRU reclaim first.
         self.blocks.on_evict = lambda bid: self.index.invalidate(bid, self.blocks)
+        if isinstance(self.index, RadixPrefixIndex):
+            self.blocks.reclaim_fn = lambda n: self.index.reclaim_pages(n, self.blocks)
         self.kv_cache = self._alloc_pool(hf_config, num_blocks, block_size, device, dtype)
         self.last_num_cached_tokens = 0
 

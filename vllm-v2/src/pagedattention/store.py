@@ -1,8 +1,3 @@
-"""PagedStore：按 slot 写 / 按 block_table 读。
-
-v2 相对 v1：``write`` 支持 decode 批 ``[B, S, H, D]``（展平后一次 index_copy）。
-"""
-
 from __future__ import annotations
 
 from typing import Protocol
@@ -21,7 +16,6 @@ class _BlockTensorStore(Protocol):
 def _coerce_kv_token_major(
     k: torch.Tensor, v: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """规范化为 ``[N, Hkv, D]``；允许 B>1 的 decode 批展平。"""
     if k.dim() == 4:
         b, s, h, d = k.shape
         return k.reshape(b * s, h, d), v.reshape(b * s, h, d)
@@ -75,7 +69,6 @@ class PagedStore:
         block_table: list[int],
         seq_len: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Gather 逻辑前缀 ``[0, seq_len)`` → ``[seq_len, Hkv, D]``。"""
         if seq_len <= 0:
             empty = self.pool.k.new_empty(0, self.pool.num_kv_heads, self.pool.head_dim)
             return empty, empty.clone()

@@ -1,7 +1,5 @@
 from __future__ import annotations
-
 from collections import deque
-
 from ..kv import KVManager, Sequence, SequenceStatus
 
 
@@ -47,6 +45,17 @@ class Scheduler:
         self.kv.allocate(seq)
         return True
 
+    def _promote_full_hit(self, seq: Sequence) -> None:
+        """Prefix covered the whole prompt — skip prefill, decode next step."""
+        if not seq.block_table:
+            if not self._try_alloc(seq):
+                return
+        seq.num_scheduled_tokens = 0
+        seq.is_prefill = True
+        seq.status = SequenceStatus.RUNNING
+        self.waiting.popleft()
+        self.running.append(seq)
+
     def _schedule_decode(
         self,
         prefills: list[Sequence],
@@ -91,6 +100,7 @@ class Scheduler:
 
         need = seq.num_tokens - seq.num_cached_tokens
         if need <= 0:
+            self._promote_full_hit(seq)
             return tokens_used
 
         chunk = min(need, remaining)
@@ -117,7 +127,8 @@ class Scheduler:
                 break
             need = seq.num_tokens - seq.num_cached_tokens
             if need <= 0:
-                break
+                self._promote_full_hit(seq)
+                continue
             if remaining < need and prefills:
                 break
 

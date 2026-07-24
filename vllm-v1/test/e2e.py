@@ -1,11 +1,3 @@
-"""vllm-v1 端到端测试：greedy 一致性 + 前缀二次命中。
-
-用法:
-
-    cd vllm-v1
-    python test/test_e2e.py --model Qwen3-0.6B
-"""
-
 from __future__ import annotations
 
 import argparse

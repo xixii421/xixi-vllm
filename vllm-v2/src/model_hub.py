@@ -1,5 +1,3 @@
-"""Qwen3 权重注册、下载与冒烟测试辅助。"""
-
 from __future__ import annotations
 
 import os

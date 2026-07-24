@@ -35,9 +35,12 @@ class BlockManager:
         self.blocks = [Block() for _ in range(num_blocks)]
         self.free_ids: deque[int] = deque(range(num_blocks))
         self.used_ids: set[int] = set()
-        # LRU: oldest at front → evict first under pressure (vLLM free-queue idea).
+        # LRU: oldest at front → evict first under pressure (hash / fallback).
         self.cached_ids: OrderedDict[int, None] = OrderedDict()
         self.on_evict: Callable[[int], None] | None = None
+        # Optional: reclaim ``n`` cached pages (e.g. radix tree.evict). Returns
+        # page ids already removed from the index; caller must not notify again.
+        self.reclaim_fn: Callable[[int], list[int]] | None = None
 
     @property
     def num_free(self) -> int:
@@ -53,23 +56,42 @@ class BlockManager:
 
     def allocate_fresh(self) -> int:
         if not self.free_ids:
-            if not self.cached_ids:
-                raise RuntimeError("KV block pool exhausted")
-            bid, _ = self.cached_ids.popitem(last=False)  # oldest
-            self._evict_cached(bid)
+            self._ensure_free_page()
         bid = self.free_ids.popleft()
         block = self.blocks[bid]
         block.reset()
         self.used_ids.add(bid)
         return bid
 
-    def _evict_cached(self, bid: int) -> None:
-        if self.on_evict is not None:
+    def _ensure_free_page(self) -> None:
+        if self.free_ids:
+            return
+        # Prefer backend-specific reclaim (radix tree leaf LRU).
+        if self.reclaim_fn is not None and self.cached_ids:
+            for bid in self.reclaim_fn(1):
+                self._take_cached_to_free(bid, notify=False)
+            if self.free_ids:
+                return
+        # Hash (and radix fallback): page-pool LRU.
+        if not self.cached_ids:
+            raise RuntimeError("KV block pool exhausted")
+        # Peek oldest; ``_take_cached_to_free`` removes it from cached_ids.
+        bid = next(iter(self.cached_ids))
+        self._evict_cached(bid)
+
+    def _take_cached_to_free(self, bid: int, *, notify: bool) -> None:
+        """Move a cached page to free. ``notify`` runs on_evict (index cleanup)."""
+        if bid not in self.cached_ids:
+            return
+        if notify and self.on_evict is not None:
             self.on_evict(bid)
         self.cached_ids.pop(bid, None)
         self.blocks[bid].ref_count = 0
         self.blocks[bid].clear_meta()
         self.free_ids.append(bid)
+
+    def _evict_cached(self, bid: int) -> None:
+        self._take_cached_to_free(bid, notify=True)
 
     def reclaim_cached(self, bid: int) -> None:
         self.cached_ids.pop(bid, None)

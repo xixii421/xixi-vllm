@@ -115,3 +115,23 @@ class RadixPrefixIndex:
             self.tree.dec_ref(old)  # type: ignore[arg-type]
         self.tree.inc_ref(node)
         self._seq_node[seq.seq_id] = node
+
+    def reclaim_pages(self, num_pages: int, pool: BlockManager) -> list[int]:
+        """Tree leaf-LRU reclaim: drop cold zero-ref leaves, return cached page ids.
+
+        May return more than ``num_pages`` when a leaf holds multiple pages — the
+        whole leaf must move to free together (index already detached).
+        """
+        if num_pages <= 0:
+            return []
+        out: list[int] = []
+        guard = 0
+        while len(out) < num_pages and guard < 64:
+            guard += 1
+            freed = self.tree.evict(max(1, num_pages - len(out)))
+            if not freed:
+                break
+            for bid in freed:
+                if bid in pool.cached_ids:
+                    out.append(bid)
+        return out

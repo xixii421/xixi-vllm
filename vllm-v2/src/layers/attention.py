@@ -1,5 +1,3 @@
-"""GQA attention (compute plane): slot write → gather → SDPA."""
-
 from __future__ import annotations
 
 import torch
@@ -23,8 +21,6 @@ _SDPA_HAS_GQA = _sdpa_supports_gqa()
 
 
 class Attention(nn.Module):
-    """Input/output ``[B, S, H, D]``. Couples only to ``ForwardContext``."""
-
     def __init__(
         self,
         num_heads: int,
@@ -97,7 +93,6 @@ class Attention(nn.Module):
         return self._decode(q, ctx)
 
     def _prefill(self, q, k, v, ctx) -> torch.Tensor:
-        # Teaching path: Prefill batch size is always 1.
         cached = ctx.cached_lens[0] if ctx.cached_lens else 0
         ctx_len = ctx.context_lens[0]
         q_len = ctx.query_lens[0]

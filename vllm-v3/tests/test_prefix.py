@@ -119,6 +119,83 @@ class TestRadixPrefix:
         hit = idx.match(s2, pool)
         assert len(hit) == 2
 
+    def test_tree_reclaim_under_pressure(self):
+        """Radix prefers tree leaf LRU: cold branch dropped before hot."""
+        from src.memory.manager import KVManager
+
+        class C:
+            num_key_value_heads = 1
+            num_attention_heads = 1
+            hidden_size = 16
+            head_dim = 16
+            num_hidden_layers = 1
+
+        kv = KVManager(
+            C(),
+            num_blocks=4,
+            block_size=8,
+            device=torch.device("cpu"),
+            dtype=torch.float16,
+            prefix_backend="radix",
+        )
+        assert kv.blocks.reclaim_fn is not None
+
+        def publish_full(tokens: list[int]) -> None:
+            s = _seq(tokens, block_size=8)
+            kv.allocate(s)
+            kv.deallocate(s, publish=True)
+
+        hot = list(range(16))  # 2 pages
+        cold = list(range(100, 116))  # 2 pages
+        publish_full(cold)
+        publish_full(hot)
+        # Touch hot path so its access_time is newer.
+        hit_hot = kv.index.match(_seq(hot, block_size=8), kv.blocks)
+        assert len(hit_hot) == 2
+
+        # Pool full of cached pages; next fresh alloc must tree-evict cold.
+        assert kv.blocks.num_free == 0 and kv.blocks.num_cached == 4
+        kv.blocks.allocate_fresh()
+        # Hot prefix should still be fully matchable.
+        assert len(kv.index.match(_seq(hot, block_size=8), kv.blocks)) == 2
+        # Cold should be gone (or incomplete).
+        assert len(kv.index.match(_seq(cold, block_size=8), kv.blocks)) == 0
+
+
+class TestHashPageLRU:
+    def test_hash_uses_page_lru_not_tree(self):
+        from src.memory.manager import KVManager
+
+        class C:
+            num_key_value_heads = 1
+            num_attention_heads = 1
+            hidden_size = 16
+            head_dim = 16
+            num_hidden_layers = 1
+
+        kv = KVManager(
+            C(),
+            num_blocks=2,
+            block_size=8,
+            device=torch.device("cpu"),
+            dtype=torch.float16,
+            prefix_backend="hash",
+        )
+        assert kv.blocks.reclaim_fn is None
+
+        s1 = _seq(list(range(8)), block_size=8)
+        kv.allocate(s1)
+        kv.deallocate(s1, publish=True)
+        assert kv.blocks.num_cached == 1
+        # Second page fills pool; third alloc evicts cached via page LRU.
+        s2 = _seq(list(range(10, 18)), block_size=8)
+        kv.allocate(s2)
+        kv.deallocate(s2, publish=True)
+        # Force eviction of one cached page.
+        kv.blocks.allocate_fresh()
+        # Original s1 prefix must miss after LRU eviction.
+        assert kv.index.match(_seq(list(range(8)), block_size=8), kv.blocks) == []
+
 
 class TestChunkedPrefillPublish:
     """Full blocks appear mid-chunked-prefill after sync (v2 contract)."""

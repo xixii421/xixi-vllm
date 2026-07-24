@@ -1,5 +1,3 @@
-"""Per-request sampling parameters (data/control plane metadata)."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
