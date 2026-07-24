@@ -1,19 +1,19 @@
-"""Resource layer (v2 ``kv/`` role): KVManager + Sequence + Triton KV ops.
+"""Resource layer: KVManager + Sequence + prefix backends + Triton KV ops."""
 
-Naming stays under ``memory/`` for historical paths; APIs match v2's KVManager
-contract (can_allocate / allocate / sync_prefix / deallocate).
-"""
-
-from .block_manager import BlockManager
+from .block_manager import Block, BlockManager
 from .kv_ops import store_kvcache
 from .manager import KVManager
+from .prefix import PrefixBackend, make_prefix_index
 from .sequence import Sequence, SequenceStatus, slot_of, slots_for_range
 
 __all__ = [
+    "Block",
     "BlockManager",
     "KVManager",
+    "PrefixBackend",
     "Sequence",
     "SequenceStatus",
+    "make_prefix_index",
     "slot_of",
     "slots_for_range",
     "store_kvcache",

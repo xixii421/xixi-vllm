@@ -177,9 +177,9 @@ class Scheduler:
         finished: list[Sequence] = []
         for seq, token_id in zip(seqs, token_ids):
             if seq.num_scheduled_tokens > 0:
-                # hash_blocks uses (cached, scheduled) window — call before advancing.
-                self.kv.sync_prefix(seq)
+                # v2 contract: advance first, then publish full blocks.
                 seq.num_cached_tokens += seq.num_scheduled_tokens
+                self.kv.sync_prefix(seq)
             seq.num_scheduled_tokens = 0
 
             if is_prefill and seq.num_cached_tokens < seq.num_prompt_tokens:

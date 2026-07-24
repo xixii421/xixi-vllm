@@ -1,5 +1,3 @@
-"""Decode CUDA Graph + FlashInfer with host-side plan (no GPU sync)."""
-
 from __future__ import annotations
 
 import gc
@@ -42,7 +40,6 @@ class CUDAGraphRunner:
         max_blocks = (max_model_len + block_size - 1) // block_size
         self._max_blocks = max_blocks
 
-        # Dedicated workspace — never share with eager FlashInfer wrappers.
         self.workspace_buffer = torch.empty(
             workspace_bytes, dtype=torch.uint8, device=device
         )
@@ -75,6 +72,8 @@ class CUDAGraphRunner:
         self._metas: dict[int, AttentionMetadata] = {}
         self._captured = False
         self._sm_scale = head_dim**-0.5
+        self._use_tensor_cores = bool(getattr(backend.cfg, "use_tensor_cores", True))
+        self._non_blocking = bool(getattr(backend.cfg, "non_blocking", True))
 
     def capture(self) -> None:
         if self._captured:
@@ -82,7 +81,6 @@ class CUDAGraphRunner:
         torch.cuda.synchronize(self.device)
         torch.cuda.empty_cache()
 
-        # Never write into live KV during capture (store_kvcache skips slot==-1).
         self.slot_mapping.fill_(-1)
 
         graph_pool = None
@@ -115,7 +113,6 @@ class CUDAGraphRunner:
                 graph_pool = graph.pool()
             self.graphs[bs] = graph
 
-        # Clear any accidental KV writes from older code paths / failed skip.
         self.kv_cache_pool.zero_()
         torch.cuda.synchronize(self.device)
         self._captured = True
@@ -127,13 +124,12 @@ class CUDAGraphRunner:
         w = BatchDecodeWithPagedKVCacheWrapper(
             self.workspace_buffer,
             "NHD",
-            use_tensor_cores=False,
+            use_tensor_cores=self._use_tensor_cores,
             use_cuda_graph=True,
             paged_kv_indptr_buffer=bufs["indptr"],
             paged_kv_indices_buffer=bufs["indices"],
             paged_kv_last_page_len_buffer=bufs["last_page"],
         )
-        # Capture uses reserved dummy page for all padded slots.
         host["indptr"].copy_(torch.arange(0, bs + 1, dtype=torch.int32))
         host["last_page"].fill_(1)
         host["indices"][:bs].fill_(self.dummy_page_id)
@@ -149,7 +145,7 @@ class CUDAGraphRunner:
             sm_scale=self._sm_scale,
             q_data_type=c.dtype,
             kv_data_type=c.dtype,
-            non_blocking=False,
+            non_blocking=self._non_blocking,
         )
         return w
 
@@ -235,7 +231,7 @@ class CUDAGraphRunner:
             indptr_np[i + 1] = acc
             last_np[i] = 1
 
-        bufs["indices"][:acc].copy_(idx_h[:acc], non_blocking=False)
+        bufs["indices"][:acc].copy_(idx_h[:acc], non_blocking=self._non_blocking)
 
         self.cg_wrappers[pbs].plan(
             indptr=indptr_h,
@@ -248,7 +244,7 @@ class CUDAGraphRunner:
             sm_scale=self._sm_scale,
             q_data_type=c.dtype,
             kv_data_type=c.dtype,
-            non_blocking=False,
+            non_blocking=self._non_blocking,
         )
 
     def destroy(self) -> None:

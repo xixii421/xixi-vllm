@@ -28,6 +28,8 @@ class BackendConfig:
     dtype: torch.dtype
     device: torch.device
     workspace_bytes: int = 256 * 1024 * 1024
+    use_tensor_cores: bool = True
+    non_blocking: bool = True
 
 
 class FlashInferBackend:
@@ -45,7 +47,9 @@ class FlashInferBackend:
             self.prefill_workspace, kv_layout="NHD"
         )
         self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
-            self.decode_workspace, kv_layout="NHD", use_tensor_cores=False
+            self.decode_workspace,
+            kv_layout="NHD",
+            use_tensor_cores=cfg.use_tensor_cores,
         )
 
     def build_metadata(
@@ -79,6 +83,7 @@ class FlashInferBackend:
                 sm_scale=sm,
                 q_data_type=c.dtype,
                 kv_data_type=c.dtype,
+                non_blocking=c.non_blocking,
             )
             wrapper = self.prefill_wrapper
         else:
@@ -93,6 +98,7 @@ class FlashInferBackend:
                 sm_scale=sm,
                 q_data_type=c.dtype,
                 kv_data_type=c.dtype,
+                non_blocking=c.non_blocking,
             )
             wrapper = self.decode_wrapper
 

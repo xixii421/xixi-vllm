@@ -39,7 +39,6 @@ def store_kvcache(
     v_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> None:
-    """Scatter K/V tokens into flattened paged slots."""
     if not key.is_contiguous():
         key = key.contiguous()
     if not value.is_contiguous():

@@ -52,6 +52,8 @@ class ModelRunner:
                 block_size=self.block_size,
                 dtype=self.dtype,
                 device=self.device,
+                use_tensor_cores=self.config.flashinfer_use_tensor_cores,
+                non_blocking=self.config.flashinfer_non_blocking,
             )
         )
 
@@ -167,6 +169,15 @@ class ModelRunner:
             return self.sampler(
                 logits, temperatures, top_ps=top_ps, top_ks=top_ks, min_ps=min_ps
             ).tolist()
+
+        # Chunked-prefill optimization: skip LM-head/sample when no seq finishes prompt.
+        if is_prefill:
+            need = [
+                s.num_cached_tokens + s.num_scheduled_tokens >= s.num_prompt_tokens
+                for s in seqs
+            ]
+            if not any(need):
+                return [0] * len(seqs)
 
         if (
             not is_prefill

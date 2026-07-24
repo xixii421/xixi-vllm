@@ -1,24 +1,27 @@
 from __future__ import annotations
-from collections import deque
-import numpy as np
-from .sequence import Sequence
-import xxhash
 
+from collections import OrderedDict, deque
+from dataclasses import dataclass, field
+from typing import Callable
+
+
+@dataclass
 class Block:
-    def __init__(self, block_id: int) -> None:
-        self.block_id = block_id
-        self.ref_count = 0
-        self.hash = -1
-        self.token_ids: list[int] = []
+    ref_count: int = 0
+    hash: int = -1
+    token_ids: list[int] = field(default_factory=list)
 
     def update(self, h: int, token_ids: list[int]) -> None:
         self.hash = h
         self.token_ids = list(token_ids)
 
-    def reset(self) -> None:
-        self.ref_count = 1
+    def clear_meta(self) -> None:
         self.hash = -1
         self.token_ids = []
+
+    def reset(self) -> None:
+        self.ref_count = 1
+        self.clear_meta()
 
 
 class BlockManager:
@@ -29,130 +32,76 @@ class BlockManager:
             raise ValueError(f"block_size must be positive, got {block_size}")
         self.num_blocks = num_blocks
         self.block_size = block_size
-        self.blocks = [Block(i) for i in range(num_blocks)]
-        self.hash_to_block_id: dict[int, int] = {}
-        self.free_block_ids: deque[int] = deque(range(num_blocks))
-        self.used_block_ids: set[int] = set()
+        self.blocks = [Block() for _ in range(num_blocks)]
+        self.free_ids: deque[int] = deque(range(num_blocks))
+        self.used_ids: set[int] = set()
+        # LRU: oldest at front → evict first under pressure (vLLM free-queue idea).
+        self.cached_ids: OrderedDict[int, None] = OrderedDict()
+        self.on_evict: Callable[[int], None] | None = None
 
     @property
     def num_free(self) -> int:
-        return len(self.free_block_ids)
+        return len(self.free_ids)
 
     @property
-    def num_used(self) -> int:
-        return self.num_blocks - len(self.free_block_ids)
+    def num_cached(self) -> int:
+        return len(self.cached_ids)
 
-    def blocks_for_tokens(self, num_tokens: int) -> int:
-        if num_tokens <= 0:
-            return 0
-        return (num_tokens + self.block_size - 1) // self.block_size
+    @property
+    def available_slots(self) -> int:
+        return len(self.free_ids) + len(self.cached_ids)
 
-    @staticmethod
-    def compute_hash(token_ids: list[int], prefix: int = -1) -> int:
-        if xxhash is not None:
-            h = xxhash.xxh64()
-            if prefix != -1:
-                h.update(prefix.to_bytes(8, "little"))
-            h.update(np.asarray(token_ids, dtype=np.int32).tobytes())
-            return h.intdigest()
-        # Pure-Python fallback (slower, fine for teaching / tests).
-        seed = prefix if prefix != -1 else 0
-        data = np.asarray(token_ids, dtype=np.int32).tobytes()
-        return hash((seed, data)) & ((1 << 64) - 1)
-
-    def _allocate_block(self) -> int:
-        if not self.free_block_ids:
-            raise RuntimeError(
-                f"KV block pool exhausted: used={self.num_used}/{self.num_blocks}"
-            )
-        block_id = self.free_block_ids.popleft()
-        block = self.blocks[block_id]
-        assert block.ref_count == 0
-        if block.hash != -1 and self.hash_to_block_id.get(block.hash) == block_id:
-            del self.hash_to_block_id[block.hash]
+    def allocate_fresh(self) -> int:
+        if not self.free_ids:
+            if not self.cached_ids:
+                raise RuntimeError("KV block pool exhausted")
+            bid, _ = self.cached_ids.popitem(last=False)  # oldest
+            self._evict_cached(bid)
+        bid = self.free_ids.popleft()
+        block = self.blocks[bid]
         block.reset()
-        self.used_block_ids.add(block_id)
-        return block_id
+        self.used_ids.add(bid)
+        return bid
 
-    def _deallocate_block(self, block_id: int) -> None:
-        assert self.blocks[block_id].ref_count == 0
-        self.used_block_ids.discard(block_id)
-        self.free_block_ids.append(block_id)
+    def _evict_cached(self, bid: int) -> None:
+        if self.on_evict is not None:
+            self.on_evict(bid)
+        self.cached_ids.pop(bid, None)
+        self.blocks[bid].ref_count = 0
+        self.blocks[bid].clear_meta()
+        self.free_ids.append(bid)
 
-    def can_allocate(self, seq: Sequence) -> int:
+    def reclaim_cached(self, bid: int) -> None:
+        self.cached_ids.pop(bid, None)
+        try:
+            self.free_ids.remove(bid)
+        except ValueError:
+            pass
+        self.used_ids.add(bid)
+        self.blocks[bid].ref_count = 1
 
-        h = -1
-        num_cached_blocks = 0
-        num_new_blocks = seq.num_blocks
-        # Only full blocks can hit. Use floor division so an exact multiple of
-        # block_size (e.g. 256 with B=256) still matches the last published page.
-        for i in range(seq.num_tokens // self.block_size):
-            token_ids = seq.block_token_ids(i)
-            h = self.compute_hash(token_ids, h)
-            block_id = self.hash_to_block_id.get(h, -1)
-            if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
-                break
-            num_cached_blocks += 1
-            if block_id in self.used_block_ids:
-                num_new_blocks -= 1
-        if len(self.free_block_ids) < num_new_blocks:
-            return -1
-        return num_cached_blocks
+    def touch_cached(self, bid: int) -> None:
+        if bid in self.cached_ids:
+            self.cached_ids.move_to_end(bid)
 
-    def allocate(self, seq: Sequence, num_cached_blocks: int) -> None:
-        assert not seq.block_table
-        h = -1
-        for i in range(num_cached_blocks):
-            token_ids = seq.block_token_ids(i)
-            h = self.compute_hash(token_ids, h)
-            block_id = self.hash_to_block_id[h]
-            block = self.blocks[block_id]
-            if block_id in self.used_block_ids:
-                block.ref_count += 1
-            else:
-                block.ref_count = 1
-                self.free_block_ids.remove(block_id)
-                self.used_block_ids.add(block_id)
-            seq.block_table.append(block_id)
-        for _ in range(num_cached_blocks, seq.num_blocks):
-            seq.block_table.append(self._allocate_block())
-        seq.num_cached_tokens = num_cached_blocks * self.block_size
-
-    def deallocate(self, seq: Sequence) -> None:
-        for block_id in reversed(seq.block_table):
-            block = self.blocks[block_id]
-            block.ref_count -= 1
-            if block.ref_count == 0:
-                self._deallocate_block(block_id)
-        seq.num_cached_tokens = 0
-        seq.block_table.clear()
-
-    def can_append(self, seq: Sequence) -> bool:
-        # Need a new page when writing the first token of a fresh block.
-        need_new = len(seq) % self.block_size == 1
-        return (not need_new) or len(self.free_block_ids) >= 1
-
-    def may_append(self, seq: Sequence) -> None:
-        if len(seq) % self.block_size == 1:
-            seq.block_table.append(self._allocate_block())
-
-    def hash_blocks(self, seq: Sequence) -> None:
-        """Register newly completed full blocks into the hash table."""
-        start = seq.num_cached_tokens // self.block_size
-        end = (seq.num_cached_tokens + seq.num_scheduled_tokens) // self.block_size
-        if start == end:
+    def release_to_cached_or_free(self, bid: int, *, keep_cached: bool) -> None:
+        block = self.blocks[bid]
+        block.ref_count -= 1
+        if block.ref_count > 0:
             return
-        h = self.blocks[seq.block_table[start - 1]].hash if start > 0 else -1
-        for i in range(start, end):
-            block = self.blocks[seq.block_table[i]]
-            token_ids = seq.block_token_ids(i)
-            h = self.compute_hash(token_ids, h)
-            block.update(h, token_ids)
-            # Do not overwrite a different block on hash collision.
-            old = self.hash_to_block_id.get(h, -1)
-            if (
-                old == -1
-                or old == block.block_id
-                or self.blocks[old].token_ids == token_ids
-            ):
-                self.hash_to_block_id[h] = block.block_id
+        self.used_ids.discard(bid)
+        if keep_cached and block.hash != -1:
+            self.cached_ids[bid] = None
+            self.cached_ids.move_to_end(bid)
+        else:
+            block.clear_meta()
+            self.cached_ids.pop(bid, None)
+            self.free_ids.append(bid)
+
+    def can_append(self, seq) -> bool:
+        need_new = len(seq) % self.block_size == 1
+        return (not need_new) or self.available_slots >= 1
+
+    def may_append(self, seq) -> None:
+        if len(seq) % self.block_size == 1:
+            seq.block_table.append(self.allocate_fresh())

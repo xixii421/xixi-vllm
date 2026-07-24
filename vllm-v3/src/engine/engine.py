@@ -1,5 +1,3 @@
-"""Engine façade (v2-aligned): owns model + KVManager + Scheduler + ModelRunner."""
-
 from __future__ import annotations
 
 import warnings
@@ -70,6 +68,7 @@ class Engine:
             block_size=self.block_size,
             device=self.device,
             dtype=self.dtype,
+            prefix_backend=self.config.prefix_backend,  # type: ignore[arg-type]
             reserve_dummy_page=use_cg,
         )
         self.scheduler = Scheduler(
@@ -87,10 +86,14 @@ class Engine:
             device=self.device,
         )
 
-    def reset_kv(self) -> None:
+    def reset_kv(self, prefix_backend: str | None = None) -> None:
         destroy = getattr(self.model_runner, "destroy", None)
         if callable(destroy):
             destroy()
+        if prefix_backend is not None:
+            if prefix_backend not in ("none", "hash", "radix"):
+                raise ValueError(f"invalid prefix_backend: {prefix_backend!r}")
+            self.config.prefix_backend = prefix_backend
         self._init_kv()
         self.last_num_cached_tokens = 0
         torch.cuda.empty_cache()
@@ -157,6 +160,9 @@ class Engine:
             return [], 0
         self._idle_steps = 0
 
+        # Prefix-hit size from allocate() (not post-prefill num_cached).
+        self.last_num_cached_tokens = self.kv.last_num_cached_tokens
+
         prefill_toks = sum(s.num_scheduled_tokens for s in prefills)
         metric = prefill_toks + len(decodes)
 
@@ -171,10 +177,6 @@ class Engine:
             finished.extend(
                 self.scheduler.postprocess(prefills, p_ids, is_prefill=True)
             )
-            self.last_num_cached_tokens = max(
-                (s.num_cached_tokens for s in prefills), default=0
-            )
-
         outputs = [
             (seq.seq_id, seq.token_ids[seq.num_prompt_tokens :]) for seq in finished
         ]
