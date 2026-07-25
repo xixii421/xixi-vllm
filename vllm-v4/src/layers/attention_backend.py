@@ -89,19 +89,10 @@ class FlashInferBackend:
             )
             wrapper = self.decode_wrapper
 
-        n_kv = c.num_kv_heads
-        hd = c.head_dim
-        k_4d = kv_cache_pool[0, layer_id]
-        v_4d = kv_cache_pool[1, layer_id]
-        k_cache_view = k_4d.reshape(-1, n_kv, hd)
-        v_cache_view = v_4d.reshape(-1, n_kv, hd)
-
         return AttentionMetadata(
             wrapper=wrapper,
             kv_cache_pool=kv_cache_pool,
             slot_mapping=slot_mapping,
-            k_cache_view=k_cache_view,
-            v_cache_view=v_cache_view,
         )
 
 

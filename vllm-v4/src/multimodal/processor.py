@@ -1,12 +1,3 @@
-"""CPU-side multimodal preprocessing (HF AutoProcessor → ids + pixels + spans).
-
-Aligned with official vLLM:
-  - hash the *raw image* (not float pixel patches)
-  - LRU-cache HF processor outputs by (image hashes, text)
-"""
-
-from __future__ import annotations
-
 import hashlib
 import logging
 from collections import OrderedDict

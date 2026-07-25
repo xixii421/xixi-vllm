@@ -66,6 +66,52 @@ class TestHashPrefix:
         s2 = _seq(list(range(8)))
         assert idx.match(s2, pool) == []
 
+    def test_duplicate_equivalent_blocks_survive_invalidate(self):
+        """Two physical pages with the same tokens; killing one must keep the other."""
+        pool = _pool(n=4, bs=8)
+        idx = HashPrefixIndex()
+        toks = list(range(8))
+
+        s1 = _seq(toks)
+        s1.block_table.append(pool.allocate_fresh())
+        idx.publish(s1, 1, pool)
+        pool.release_to_cached_or_free(s1.block_table[0], keep_cached=True)
+        s1.block_table.clear()
+
+        # Second physical copy of the same prefix (no match — simulate concurrent miss).
+        s2 = _seq(toks)
+        s2.block_table.append(pool.allocate_fresh())
+        idx.publish(s2, 1, pool)
+        pool.release_to_cached_or_free(s2.block_table[0], keep_cached=True)
+        bid2 = s2.block_table[0]
+        s2.block_table.clear()
+
+        assert len(idx.match(_seq(toks), pool)) == 1
+        idx.invalidate(bid2, pool)
+        hit = idx.match(_seq(toks), pool)
+        assert len(hit) == 1
+        assert hit[0] != bid2
+        assert hit[0] in pool.cached_ids
+
+    def test_republish_clears_old_hash(self):
+        pool = _pool(n=2, bs=8)
+        idx = HashPrefixIndex()
+        b0 = pool.allocate_fresh()
+        s_old = _seq(list(range(8)))
+        s_old.block_table.append(b0)
+        idx.publish(s_old, 1, pool)
+        old_h = pool.blocks[b0].hash
+        assert old_h in idx._hash_to_blocks
+
+        # Reuse same physical page for different tokens without going through free.
+        s_new = _seq(list(range(100, 108)))
+        s_new.block_table.append(b0)
+        idx.publish(s_new, 1, pool)
+        assert old_h not in idx._hash_to_blocks
+        assert idx.match(s_old, pool) == []
+        pool.release_to_cached_or_free(b0, keep_cached=True)
+        assert len(idx.match(s_new, pool)) == 1
+
     def test_noop_always_miss(self):
         pool = _pool()
         idx = NoopPrefixIndex()
