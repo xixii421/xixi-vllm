@@ -1,5 +1,4 @@
 
-import hashlib
 import warnings
 from collections.abc import Iterator
 from typing import Optional
@@ -185,39 +184,56 @@ class Engine:
     ) -> tuple[list[MultiModalFeature], list[int]]:
         assert self.mm_processor is not None
         text = prompt if isinstance(prompt, str) else self.tokenizer.decode(prompt)
-        input_ids, pixel_values, mm_info = self.mm_processor.process(text, images)
+        input_ids, pixel_values, mm_info, img_uids = self.mm_processor.process(
+            text, images
+        )
         if pixel_values is None or not mm_info:
             return [], list(input_ids)
 
         features: list[MultiModalFeature] = []
         patch_offsets = [0]
         for info in mm_info:
-            g = info.get("grid_thw")
-            if g is None:
-                patch_offsets.append(patch_offsets[-1])
-                continue
-            n_patches = int(g.reshape(-1).prod().item())
+            g_tuple = info.get("grid_thw_tuple")
+            if g_tuple is None:
+                g = info.get("grid_thw")
+                if g is None:
+                    patch_offsets.append(patch_offsets[-1])
+                    continue
+                flat = g.detach().view(-1, 3)[0].tolist()
+                g_tuple = (int(flat[0]), int(flat[1]), int(flat[2]))
+            n_patches = int(g_tuple[0] * g_tuple[1] * g_tuple[2])
             patch_offsets.append(patch_offsets[-1] + n_patches)
 
         for i, info in enumerate(mm_info):
             g_thw = info.get("grid_thw")
+            g_tuple = info.get("grid_thw_tuple")
+            if g_tuple is None and g_thw is not None:
+                flat = g_thw.detach().view(-1, 3)[0].tolist()
+                g_tuple = (int(flat[0]), int(flat[1]), int(flat[2]))
             if g_thw is not None and g_thw.dim() == 1:
                 g_thw = g_thw.view(1, -1)
             start_p, end_p = patch_offsets[i], patch_offsets[i + 1]
-            pv = pixel_values[start_p:end_p].contiguous() if end_p > start_p else pixel_values
-            raw = pv.detach().float().cpu().numpy().tobytes()
-            uid = hashlib.sha1(
-                raw[:4096] + str(tuple(pv.shape)).encode() + f"_{i}".encode()
-            ).hexdigest()
+            pv = (
+                pixel_values[start_p:end_p].contiguous()
+                if end_p > start_p
+                else pixel_values
+            )
+            if not pv.is_pinned:
+                pv = pv.pin_memory()
+            # uid from raw image hash (cheap); index disambiguates multi-image.
+            uid = img_uids[i] if i < len(img_uids) else f"img-{i}"
+            if len(img_uids) > 1:
+                uid = f"{uid}_{i}"
             features.append(
                 MultiModalFeature(
                     modality="image",
-                    data=pv.cpu(),
+                    data=pv,
                     start=info["start"],
                     end=info["end"],
                     num_encoder_tokens=info["num_encoder_tokens"],
                     uid=uid,
                     grid_thw=g_thw.cpu() if g_thw is not None else None,
+                    grid_thw_tuple=g_tuple,
                 )
             )
         return features, list(input_ids)

@@ -22,12 +22,14 @@ class SequenceStatus(Enum):
 @dataclass
 class MultiModalFeature:
     modality: str  # "image" | "video"
-    data: "torch.Tensor"  # pixel_values on CPU
+    data: "torch.Tensor"  # pixel_values on CPU (preferably pin_memory)
     start: int
     end: int
     num_encoder_tokens: int
     uid: str
     grid_thw: Optional["torch.Tensor"] = None
+    # Plain (t,h,w) to avoid .cpu().tolist() on the encode hot path.
+    grid_thw_tuple: Optional[tuple[int, int, int]] = None
     # Cached DeepStack features [ndps][num_encoder_tokens, H] (GPU/CPU ok).
     deepstack: Optional[list["torch.Tensor"]] = None
     # Absolute MRoPE origin of this image (set on the chunk that starts it).

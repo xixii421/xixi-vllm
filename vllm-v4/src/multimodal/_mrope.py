@@ -20,9 +20,14 @@ def mrope_positions(
         chunk_end = chunk_start + seq.num_scheduled_tokens
 
         for mf in seq.mm_features:
-            g = getattr(mf, "grid_thw", None)
-            if g is None:
-                continue
+            g_tuple = getattr(mf, "grid_thw_tuple", None)
+            if g_tuple is None:
+                g = getattr(mf, "grid_thw", None)
+                if g is None:
+                    continue
+                flat = g[0].tolist() if g.ndim == 2 else g.tolist()
+                g_tuple = (int(flat[0]), int(flat[1]), int(flat[2]))
+            t, h, w = g_tuple
             img_start = mf.start
             img_end = mf.start + mf.num_encoder_tokens
             ov_start = max(img_start, chunk_start)
@@ -30,7 +35,6 @@ def mrope_positions(
             if ov_start >= ov_end:
                 continue
 
-            t, h, w = g[0].tolist() if g.ndim == 2 else g.tolist()
             gh, gw = h // merge_size, w // merge_size
             grid = np.indices((t, gh, gw), dtype=np.int64).reshape(3, -1)
             vis_off = ov_start - img_start

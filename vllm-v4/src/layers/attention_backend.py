@@ -1,7 +1,8 @@
+import numpy as np
+import torch
 from dataclasses import dataclass
 from typing import Optional
 
-import torch
 from flashinfer import (
     BatchDecodeWithPagedKVCacheWrapper,
     BatchPrefillWithPagedKVCacheWrapper,
@@ -26,14 +27,9 @@ class BackendConfig:
 class FlashInferBackend:
     def __init__(self, cfg: BackendConfig) -> None:
         self.cfg = cfg
-        self.prefill_workspace = torch.empty(
-            cfg.workspace_bytes, dtype=torch.uint8, device=cfg.device
-        )
-        self.decode_workspace = torch.empty(
-            cfg.workspace_bytes, dtype=torch.uint8, device=cfg.device
-        )
+        self.prefill_workspace = torch.empty(cfg.workspace_bytes, dtype=torch.uint8, device=cfg.device)
+        self.decode_workspace = torch.empty(cfg.workspace_bytes, dtype=torch.uint8, device=cfg.device)
 
-        self.workspace_buffer = self.decode_workspace
         self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
             self.prefill_workspace, kv_layout="NHD"
         )
@@ -42,6 +38,7 @@ class FlashInferBackend:
             kv_layout="NHD",
             use_tensor_cores=cfg.use_tensor_cores,
         )
+        self._sm_scale = cfg.head_dim ** -0.5
 
     def build_metadata(
         self,
@@ -53,11 +50,10 @@ class FlashInferBackend:
         is_prefill: bool,
         kv_cache_pool: torch.Tensor,
         cu_seqlen_q_cpu: Optional[torch.Tensor] = None,
+        layer_id: int = 0,
     ) -> "AttentionMetadata":
-        from .attention import AttentionMetadata
-
         c = self.cfg
-        sm = c.head_dim**-0.5
+        
         if is_prefill:
             assert cu_seqlen_q_cpu is not None
             self.prefill_wrapper.plan(
@@ -71,7 +67,7 @@ class FlashInferBackend:
                 head_dim_vo=c.head_dim,
                 page_size=c.block_size,
                 causal=True,
-                sm_scale=sm,
+                sm_scale=self._sm_scale,
                 q_data_type=c.dtype,
                 kv_data_type=c.dtype,
                 non_blocking=c.non_blocking,
@@ -86,17 +82,26 @@ class FlashInferBackend:
                 num_kv_heads=c.num_kv_heads,
                 head_dim=c.head_dim,
                 page_size=c.block_size,
-                sm_scale=sm,
+                sm_scale=self._sm_scale,
                 q_data_type=c.dtype,
                 kv_data_type=c.dtype,
                 non_blocking=c.non_blocking,
             )
             wrapper = self.decode_wrapper
 
+        n_kv = c.num_kv_heads
+        hd = c.head_dim
+        k_4d = kv_cache_pool[0, layer_id]
+        v_4d = kv_cache_pool[1, layer_id]
+        k_cache_view = k_4d.reshape(-1, n_kv, hd)
+        v_cache_view = v_4d.reshape(-1, n_kv, hd)
+
         return AttentionMetadata(
             wrapper=wrapper,
             kv_cache_pool=kv_cache_pool,
             slot_mapping=slot_mapping,
+            k_cache_view=k_cache_view,
+            v_cache_view=v_cache_view,
         )
 
 
@@ -106,25 +111,32 @@ def compute_paged_kv_metadata(
     block_size: int,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    n_blocks = [(s + block_size - 1) // block_size for s in seq_lens]
-    indptr = [0]
-    for nb in n_blocks:
-        indptr.append(indptr[-1] + nb)
-
-    indptr_cpu = torch.tensor(indptr, dtype=torch.int32, device="cpu")
-    last_page_len_cpu = torch.tensor(
-        [(s - 1) % block_size + 1 for s in seq_lens],
-        dtype=torch.int32,
-        device="cpu",
-    )
-
-    total = indptr[-1]
-    if total > 0 and block_tables is not None:
-        max_blocks = block_tables.shape[1]
-        flat_mask = torch.arange(max_blocks, device=device)
-        n_blocks_gpu = torch.tensor(n_blocks, dtype=torch.int32, device=device)
-        mask = flat_mask.unsqueeze(0) < n_blocks_gpu.unsqueeze(1)
-        indices_gpu = block_tables[mask]
+    bs = len(seq_lens)
+    
+    # 1. 计算每个 sequence 的 block 数量 
+    n_blocks = np.array([(s + block_size - 1) // block_size for s in seq_lens], dtype=np.int32)
+    
+    # 2. 计算 indptr
+    indptr_np = np.zeros(bs + 1, dtype=np.int32)
+    indptr_np[1:] = np.cumsum(n_blocks)
+    indptr_cpu = torch.from_numpy(indptr_np) # 零拷贝 (如果上游是 pinned memory) 或极快拷贝
+    
+    # 3. 计算 last_page_len
+    last_page_len_np = ((np.array(seq_lens, dtype=np.int32) - 1) % block_size) + 1
+    last_page_len_cpu = torch.from_numpy(last_page_len_np)
+    
+    # 4. 展平 block_tables
+    total_blocks = int(indptr_np[-1])
+    if total_blocks > 0:
+        # 确保在 CPU 端进行索引操作 
+        bt_np = block_tables.cpu().numpy() if block_tables.is_cuda else block_tables.numpy()
+        
+        # 使用列表推导式 + concatenate，这是 NumPy 中处理不规则行展平最快的方法
+        indices_list = [bt_np[i, :nb] for i, nb in enumerate(n_blocks)]
+        indices_np = np.concatenate(indices_list) if indices_list else np.array([], dtype=np.int32)
+        
+        # 异步传输到 GPU
+        indices_gpu = torch.from_numpy(indices_np).to(device, non_blocking=True)
     else:
         indices_gpu = torch.empty(0, dtype=torch.int32, device=device)
 

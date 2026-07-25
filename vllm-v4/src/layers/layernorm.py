@@ -63,9 +63,9 @@ class RMSNorm(nn.Module):
         if residual is None:
             _rms_norm_fused_kernel[grid](
                 x_2d,
-                None,
+                x_2d,
                 out_2d,
-                None,
+                out_2d,
                 self.weight,
                 x_2d.stride(0),
                 hidden_size,

@@ -1,3 +1,5 @@
+import contextvars
+from contextlib import contextmanager
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
@@ -7,7 +9,8 @@ import torch.nn as nn
 
 from ..memory.kv_ops import store_kvcache
 
-_ATTN_META: Optional["AttentionMetadata"] = None
+# 使用 ContextVar 确保多线程/多协程并发安全
+_ATTN_META: contextvars.ContextVar[Optional["AttentionMetadata"]] = contextvars.ContextVar("_ATTN_META", default=None)
 
 
 @dataclass
@@ -16,22 +19,24 @@ class AttentionMetadata:
     kv_cache_pool: torch.Tensor
     slot_mapping: torch.Tensor
     output_kv_indices: Optional[torch.Tensor] = None
+    # 预计算好 k_cache 和 v_cache 的 view，避免 forward 中重复 reshape
+    k_cache_view: Optional[torch.Tensor] = None
+    v_cache_view: Optional[torch.Tensor] = None
 
 
 @contextmanager
 def attention_context(meta: AttentionMetadata):
-    global _ATTN_META
-    prev = _ATTN_META
-    _ATTN_META = meta
+    token = _ATTN_META.set(meta)
     try:
         yield
     finally:
-        _ATTN_META = prev
+        _ATTN_META.reset(token)
 
 
 def _get_metadata() -> AttentionMetadata:
-    assert _ATTN_META is not None, "attention_context() not active"
-    return _ATTN_META
+    meta = _ATTN_META.get()
+    assert meta is not None, "attention_context() not active"
+    return meta
 
 
 class Attention(nn.Module):
@@ -52,22 +57,20 @@ class Attention(nn.Module):
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         meta = _get_metadata()
-        pool = meta.kv_cache_pool
-        n_kv = self.num_kv_heads
-        hd = self.head_dim
-        lid = self.layer_id
-
-        k_4d = pool[0, lid]
-        v_4d = pool[1, lid]
-
+        
+        # 写入 KV Cache
         store_kvcache(
             k,
             v,
-            k_4d.reshape(-1, n_kv, hd),
-            v_4d.reshape(-1, n_kv, hd),
+            meta.k_cache_view,
+            meta.v_cache_view,
             meta.slot_mapping,
         )
 
-        q = q.contiguous().view(-1, self.num_heads, hd)
-        o = meta.wrapper.run(q, (k_4d, v_4d))
-        return o.view(-1, self.num_heads * hd)
+        # q.contiguous() 可能会触发内存拷贝。
+        q_3d = q.contiguous().view(-1, self.num_heads, self.head_dim)
+        
+        # 调用 FlashInfer wrapper
+        o = meta.wrapper.run(q_3d, (meta.k_cache_view, meta.v_cache_view))
+        
+        return o.view(-1, self.num_heads * self.head_dim)

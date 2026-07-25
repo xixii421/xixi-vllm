@@ -1,5 +1,3 @@
-"""Reusable nn modules (Attention, norms, RoPE, activations)."""
-
 from .activation import SiluAndMul
 from .attention import Attention
 from .layernorm import RMSNorm

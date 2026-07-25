@@ -1,4 +1,4 @@
-"""Reusable nn modules (Attention, norms, RoPE, activations)."""
+"""Reusable model layers (pure nn; no Engine/Scheduler)."""
 
 from .activation import SiluAndMul
 from .attention import Attention
@@ -8,9 +8,9 @@ from .rotary import RotaryEmbedding
 
 __all__ = [
     "Attention",
+    "MRotaryEmbedding",
     "RMSNorm",
     "RotaryEmbedding",
-    "MRotaryEmbedding",
-    "get_mrope",
     "SiluAndMul",
+    "get_mrope",
 ]

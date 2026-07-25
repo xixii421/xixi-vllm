@@ -149,19 +149,17 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
     ap.add_argument("--image", default="cat.jpg")
-    ap.add_argument(
-        "--max-side",
-        type=int,
-        default=768,
-        help="resize image so max(H,W)<=this (0=keep original). Default 768 ≈400 VL tokens.",
-    )
+    ap.add_argument("--max-side", type=int, default=512)
     ap.add_argument("--max-new", type=int, default=32)
     ap.add_argument("--warmup", type=int, default=1)
     ap.add_argument("--iters", type=int, default=3)
-    ap.add_argument("--gpu-util", type=float, default=0.70)
-    ap.add_argument("--compile", action="store_true", help="enable Decode CUDA Graph")
-    ap.add_argument("--vit-cg", action="store_true", help="enable ViT CUDA Graph")
-    ap.add_argument("--context-len", type=int, default=16384)
+    ap.add_argument("--gpu-util", type=float, default=0.85)
+    ap.add_argument(
+        "--eager",
+        action="store_true",
+        help="disable Decode CUDA Graph (default: CG on for fair official compare)",
+    )
+    ap.add_argument("--context-len", type=int, default=8192)
     ap.add_argument("--out", default="bench/results/v4_mm.json")
     ap.add_argument("--prompt", default="Describe this image in one short sentence.")
     args = ap.parse_args()
@@ -181,11 +179,10 @@ def main() -> None:
         EngineConfig(
             model=args.model,
             dtype="float16",
-            enforce_eager=not args.compile,
-            enable_vit_cuda_graph=args.vit_cg,
+            enforce_eager=args.eager,
             gpu_memory_utilization=args.gpu_util,
-            max_num_seqs=4,
-            max_num_batched_tokens=16384,
+            max_num_seqs=1,
+            max_num_batched_tokens=8192,
             context_len=args.context_len,
             mix_prefill_decode=True,
             prefix_backend="hash",
@@ -193,7 +190,7 @@ def main() -> None:
     )
     print(
         f"[v4] ready is_mm={eng.config.is_multimodal} "
-        f"eager={eng.config.enforce_eager} vit_cg={args.vit_cg}"
+        f"eager={eng.config.enforce_eager}"
     )
 
     cases = {
@@ -207,8 +204,7 @@ def main() -> None:
         "model": args.model,
         "image": str(img_path),
         "max_new": args.max_new,
-        "compile": args.compile,
-        "vit_cg": args.vit_cg,
+        "compile": not args.eager,
         "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
         "cases": {},
     }

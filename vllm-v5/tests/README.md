@@ -1,24 +1,24 @@
-# vllm-v4 tests
+# Tests
 
-Functional tests for each core module. Run from `vllm-v4/`:
-
-```bash
-source .venv/bin/activate   # or: .venv/bin/python -m pytest ...
-python -m pytest tests/ -q
+```text
+tests/
+  helpers/       cfg / paths / parallel / moe_tiny
+  unit/          CPU 快测（调度、execute、采样…）
+  gpu/           单卡 e2e / CG / layers / VL / MoE
+  distributed/   ≥2 GPU：text TP/PP、PP transport、MoE EP
 ```
 
-## Layout
+```bash
+export CUDA_DEVICE_ORDER=PCI_BUS_ID PYTHONPATH=.
 
-| File | Covers |
-|------|--------|
-| `test_sampler.py` | greedy / mixed temp / top-k / top-p / min-p |
-| `test_sequence.py` | Sequence lengths, slot helpers, SamplingParams |
-| `test_block_manager.py` | alloc/free, prefix cache, append, hash collision |
-| `test_scheduler.py` | prefill/decode, chunk, EOS, max_tokens=0, preempt, promote |
-| `test_input_builder.py` | prefill/decode tensors & slot_mapping |
-| `test_kv_ops.py` | Triton `store_kvcache` vs PyTorch |
-| `test_layers.py` | SiluAndMul, RMSNorm, RoPE |
-| `test_attention_backend.py` | paged KV metadata, separate FlashInfer workspaces |
-| `test_engine_e2e.py` | eager/CG batch, clamp, dummy page, stream (needs `~/huggingface/Qwen3-0.6B`) |
+pytest tests/unit -q
+pytest tests/gpu -q
+pytest tests/distributed -q --tb=short
+```
 
-GPU tests skip automatically when CUDA (or the model) is unavailable.
+性能对比不在 tests 里，见：
+
+```bash
+PYTHONPATH=. python -m bench.run --suite e2e,ttft
+PYTHONPATH=. python scripts/bench_vs_vllm_full.py --mode cg --suite text
+```

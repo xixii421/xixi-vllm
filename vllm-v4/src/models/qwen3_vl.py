@@ -182,7 +182,7 @@ class Qwen3VLForCausalLM(nn.Module):
         """Prefill: ViT encode (window + cache) → scatter embeds → MRoPE positions."""
         text = self.vl_model.embed_tokens(input_ids)
         vis = self._encode_visual(seqs, device)
-        embeds = text.clone()
+        embeds = text  # scatter in-place below; embed_tokens already returns a new tensor
         off = vi = 0
         for seq in seqs:
             cs, ce = seq.num_cached_tokens, seq.num_cached_tokens + seq.num_scheduled_tokens
@@ -191,9 +191,10 @@ class Qwen3VLForCausalLM(nn.Module):
                 s, e = max(a, cs), min(b, ce)
                 if s < e:
                     local = off + (s - cs)
-                    embeds[local : local + (e - s)] = vis[vi][s - a : e - a].to(
-                        dtype=embeds.dtype, device=device
-                    )
+                    src = vis[vi][s - a : e - a]
+                    if src.dtype != embeds.dtype or src.device != embeds.device:
+                        src = src.to(dtype=embeds.dtype, device=device, non_blocking=True)
+                    embeds[local : local + (e - s)].copy_(src)
                 vi += 1
             off += seq.num_scheduled_tokens
         positions = mrope_positions(input_ids, seqs, self.vision_tower.merge_size, device)
@@ -215,9 +216,12 @@ class Qwen3VLForCausalLM(nn.Module):
             hit = self._encoder_cache.get(mf.uid)
             if hit is not None:
                 emb, ds = hit
-                out[i] = emb.to(device=device, non_blocking=True)
+                out[i] = emb if emb.device == device else emb.to(device=device, non_blocking=True)
                 if ds is not None:
-                    mf.deepstack = [t.to(device=device, non_blocking=True) for t in ds]
+                    mf.deepstack = [
+                        t if t.device == device else t.to(device=device, non_blocking=True)
+                        for t in ds
+                    ]
                 continue
             miss_i.append(i)
             miss_mf.append(mf)
@@ -226,16 +230,27 @@ class Qwen3VLForCausalLM(nn.Module):
             return out
 
         m = self.vision_tower.merge_size
-        pv = torch.cat([mf.data for mf in miss_mf], 0).to(device)
+        pv = torch.cat(
+            [
+                mf.data if mf.data.device.type == "cpu" else mf.data.cpu()
+                for mf in miss_mf
+            ],
+            0,
+        )
+        if not pv.is_pinned:
+            pv = pv.pin_memory()
+        pv = pv.to(device=device, non_blocking=True)
         grids, sizes = [], []
         for mf in miss_mf:
-            if mf.grid_thw is None:
-                grids.append(torch.tensor([[1, m * 2, m * 2]], device=device))
-                sizes.append(mf.num_encoder_tokens)
+            if mf.grid_thw_tuple is not None:
+                t, h, w = mf.grid_thw_tuple
+            elif mf.grid_thw is None:
+                t, h, w = 1, m * 2, m * 2
             else:
-                t, h, w = (int(x) for x in mf.grid_thw.detach().cpu().view(-1, 3)[0].tolist())
-                grids.append(torch.tensor([[t, h, w]], device=device, dtype=torch.int64))
-                sizes.append((t * h * w) // (m * m))
+                flat = mf.grid_thw.detach().view(-1, 3)[0].tolist()
+                t, h, w = int(flat[0]), int(flat[1]), int(flat[2])
+            grids.append(torch.tensor([[t, h, w]], device=device, dtype=torch.int64))
+            sizes.append((t * h * w) // (m * m))
         grid = torch.cat(grids, 0)
         result = self.vision_tower(pv, grid_thw=grid)
         flat = torch.cat(list(result), 0) if isinstance(result, tuple) else result
@@ -271,8 +286,9 @@ class Qwen3VLForCausalLM(nn.Module):
                     continue
                 local = off + (s - cs)
                 for li in range(self._ndps):
-                    bufs[li][local : local + (e - s)].copy_(
-                        cached[li][s - a : e - a].to(device=device, dtype=dtype)
-                    )
+                    src = cached[li][s - a : e - a]
+                    if src.device != device or src.dtype != dtype:
+                        src = src.to(device=device, dtype=dtype, non_blocking=True)
+                    bufs[li][local : local + (e - s)].copy_(src)
             off += seq.num_scheduled_tokens
         return bufs

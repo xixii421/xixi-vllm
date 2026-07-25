@@ -57,7 +57,14 @@ class MRotaryEmbedding(RotaryEmbedding):
             return fn(self, pos, query, key)
         cos, sin = self._cos_sin(positions)
         if query.is_cuda:
-            return _rope_cuda(query, key, cos.squeeze(1), sin.squeeze(1), self.head_size, self.rotary_dim)
+            return _rope_cuda(
+                query,
+                key,
+                cos.squeeze(1).contiguous(),
+                sin.squeeze(1).contiguous(),
+                self.head_size,
+                self.rotary_dim,
+            )
         return apply_rotary_emb(query, cos, sin), apply_rotary_emb(key, cos, sin)
 
 

@@ -43,7 +43,9 @@ class BenchConfig:
         path = Path(self.model).expanduser()
         if path.exists():
             return path
-        return Path.home() / "huggingface" / self.model
+        from src.utils.paths import resolve_hf_home
+
+        return resolve_hf_home() / self.model
 
     def iters_for_seq_len(self, seq_len: int) -> int:
         """Use fewer timed iterations on very long sequences to keep runtime reasonable."""

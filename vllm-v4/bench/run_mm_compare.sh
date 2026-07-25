@@ -1,70 +1,76 @@
 #!/usr/bin/env bash
-# Run multimodal stage compare without nvidia-smi / sudo.
-# Usage (from repo root or vllm-v4):
-#   bash bench/run_mm_compare.sh
-# Optional:
-#   MODEL=... IMAGE=... MAX_NEW=32 bash bench/run_mm_compare.sh
-
+# Fair multimodal compare: vllm-v4 vs official vLLM (same GPU / image / max_new).
+#
+# Usage:
+#   cd vllm-v4
+#   bash bench/run_mm_compare.sh [GPU_ID]
+#
+# Requires:
+#   ../.venv          + ../.env.cuda.sh     for v4
+#   ../.venv-vllm     + ../.env.vllm.sh     for official
+#
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-REPO="$(cd "$ROOT/.." && pwd)"
-cd "$ROOT"
-
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"   # vllm-vx
+V4="$(cd "$(dirname "$0")/.." && pwd)"        # vllm-v4
+GPU="${1:-3}"
 MODEL="${MODEL:-/mnt/nfs/zhangli/huggingface/Qwen3-VL-8B-Instruct}"
-IMAGE="${IMAGE:-$ROOT/cat.jpg}"
+IMAGE="${IMAGE:-cat.jpg}"
+MAX_SIDE="${MAX_SIDE:-512}"
 MAX_NEW="${MAX_NEW:-32}"
 WARMUP="${WARMUP:-1}"
 ITERS="${ITERS:-3}"
-MAX_SIDE="${MAX_SIDE:-768}"
-MAX_SIDE="${MAX_SIDE:-768}"
-OUT_DIR="${OUT_DIR:-$ROOT/bench/results}"
+OUT_DIR="${V4}/bench/results"
 mkdir -p "$OUT_DIR"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-# NVML is broken on this host; torch CUDA still works.
-export VLLM_DISABLE_NVML="${VLLM_DISABLE_NVML:-1}"
+echo "=== GPU $GPU check ==="
+nvidia-smi -i "$GPU" --query-gpu=name,memory.free,utilization.gpu,temperature.gpu --format=csv
 
-echo "==== methodology ===="
-echo "No sudo / no nvidia-smi needed."
-echo "Timing: torch.cuda.synchronize + perf_counter"
-echo "Model: $MODEL"
-echo "Image: $IMAGE (max_side=$MAX_SIDE)"
-echo "Envs: .venv (v4) then .venv-vllm (official $("$REPO/.venv-vllm/bin/python" -c 'import vllm;print(vllm.__version__)' 2>/dev/null || echo '?'))"
-echo
-
-echo "==== host CUDA smoke (no nvidia-smi needed) ===="
-"$REPO/.venv/bin/python" - <<'PY'
-import torch
-assert torch.cuda.is_available(), "CUDA not available"
-print(f"device={torch.cuda.get_device_name(0)} mem_gb={torch.cuda.get_device_properties(0).total_memory/1024**3:.1f}")
-x = torch.randn(256, 256, device="cuda"); y = x @ x; torch.cuda.synchronize()
-print("matmul_ok")
-PY
-
-echo "==== [1/2] vllm-v4 (.venv) ===="
-source "$REPO/.venv/bin/activate"
+echo ""
+echo "=== [1/3] vllm-v4 ==="
 # shellcheck disable=SC1091
-source "$REPO/.env.cuda.sh" || true
-PYTHONPATH="$ROOT" python "$ROOT/bench/mm_compare_v4.py" \
-  --model "$MODEL" --image "$IMAGE" --max-new "$MAX_NEW" \
+source "$ROOT/.venv/bin/activate"
+# shellcheck disable=SC1091
+source "$ROOT/.env.cuda.sh"
+export CUDA_VISIBLE_DEVICES="$GPU"
+cd "$V4"
+PYTHONPATH=. python bench/mm_compare_v4.py \
+  --model "$MODEL" \
+  --image "$IMAGE" \
   --max-side "$MAX_SIDE" \
-  --warmup "$WARMUP" --iters "$ITERS" \
+  --max-new "$MAX_NEW" \
+  --warmup "$WARMUP" \
+  --iters "$ITERS" \
+  --gpu-util 0.85 \
   --out "$OUT_DIR/v4_mm.json"
+deactivate || true
 
-echo "==== [2/2] official vLLM (.venv-vllm) ===="
-source "$REPO/.venv-vllm/bin/activate"
+echo ""
+echo "=== [2/3] official vLLM ==="
 # shellcheck disable=SC1091
-source "$REPO/.env.vllm.sh" || true
-python "$ROOT/bench/mm_compare_official.py" \
-  --model "$MODEL" --image "$IMAGE" --max-new "$MAX_NEW" \
+source "$ROOT/.venv-vllm/bin/activate"
+# shellcheck disable=SC1091
+source "$ROOT/.env.vllm.sh"
+export CUDA_VISIBLE_DEVICES="$GPU"
+cd "$V4"
+python bench/mm_compare_official.py \
+  --model "$MODEL" \
+  --image "$IMAGE" \
   --max-side "$MAX_SIDE" \
-  --warmup "$WARMUP" --iters "$ITERS" \
+  --max-new "$MAX_NEW" \
+  --warmup "$WARMUP" \
+  --iters "$ITERS" \
+  --gpu-util 0.85 \
+  --max-model-len 8192 \
   --out "$OUT_DIR/official_mm.json"
+deactivate || true
 
-echo "==== merge + report ===="
-"$REPO/.venv/bin/python" "$ROOT/bench/mm_compare_report.py" \
+echo ""
+echo "=== [3/3] merge report ==="
+# shellcheck disable=SC1091
+source "$ROOT/.venv/bin/activate"
+cd "$V4"
+python bench/mm_compare_report.py \
   --v4 "$OUT_DIR/v4_mm.json" \
   --official "$OUT_DIR/official_mm.json" \
   --out "$OUT_DIR/mm_compare_report.md"
-
-echo "Done. Report: $OUT_DIR/mm_compare_report.md"
+echo "Report: $OUT_DIR/mm_compare_report.md"

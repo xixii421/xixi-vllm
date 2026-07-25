@@ -21,7 +21,8 @@ class EncoderCache:
         return v
 
     def put(self, key: str, embeds: torch.Tensor, deepstack=None):
-        ds = [t.detach().cpu() for t in deepstack] if deepstack is not None else None
+        # Keep encoder outputs on GPU (official EncoderCacheManager semantics).
+        ds = [t.detach() for t in deepstack] if deepstack is not None else None
         self._cache[key] = (embeds.detach(), ds)
         self._cache.move_to_end(key)
         while len(self._cache) > self.max_size:

@@ -1,5 +1,22 @@
-"""Shared forward metadata and small helpers."""
+"""Cross-cutting helpers with no Engine dependency.
 
-from .context import ForwardContext, forward_context, get_context, reset_context
+  paths.py      model / HF cache resolution
+  profiler.py   optional full-stack timers (``VLLM_V7_SYS_PROF``)
+  cuda_env.py   FlashInfer arch pinning for mixed-GPU hosts
+"""
 
-__all__ = ["ForwardContext", "forward_context", "get_context", "reset_context"]
+from .cuda_env import apply_flashinfer_arch_list
+from .paths import resolve_hf_home, resolve_model_path
+from .profiler import CudaTimer, Timer, enabled, reset, rollup, summary
+
+__all__ = [
+    "CudaTimer",
+    "Timer",
+    "apply_flashinfer_arch_list",
+    "enabled",
+    "reset",
+    "resolve_hf_home",
+    "resolve_model_path",
+    "rollup",
+    "summary",
+]
