@@ -1,9 +1,8 @@
-from __future__ import annotations
 
 import hashlib
 import warnings
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import torch
 from transformers import AutoTokenizer
@@ -17,8 +16,7 @@ from .model_runner import ModelRunner
 from .sampler import Sampler
 from .scheduler import Scheduler
 
-if TYPE_CHECKING:
-    from PIL import Image
+from PIL import Image
 
 
 class Engine:

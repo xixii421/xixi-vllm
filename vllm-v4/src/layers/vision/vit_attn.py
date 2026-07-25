@@ -1,18 +1,8 @@
-"""ViT attention via flash-attn varlen (supports Qwen3-VL head_dim=72).
-
-LM paged decode/prefill stays on FlashInfer (block tables + Decode CUDA Graph);
-flash-attn does not replace that path without a full KV rewrite.
-"""
-
-from __future__ import annotations
-
 import torch
 from flash_attn import flash_attn_varlen_func
 
 
 class ViTAttentionBackend:
-    """Packed ragged self-attention: q/k/v ``[N, H, D]`` + ``cu_seqlens``."""
-
     def __init__(
         self,
         num_heads: int,
@@ -30,7 +20,6 @@ class ViTAttentionBackend:
         self._max_seqlen = 0
 
     def plan(self, cu_seqlens_cpu: torch.Tensor, seqlens: list[int] | None = None) -> None:
-        # flash-attn wants int32 cu_seqlens on the same device as q.
         self._cu = cu_seqlens_cpu.to(dtype=torch.int32, device=self.device, non_blocking=True)
         if seqlens:
             self._max_seqlen = max(seqlens) if seqlens else 0

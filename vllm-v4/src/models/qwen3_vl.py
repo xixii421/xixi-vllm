@@ -1,9 +1,4 @@
-"""Qwen3-VL: vision tower + language model + encode/merge for prefill."""
-
-from __future__ import annotations
-
 import glob
-import hashlib
 import os
 
 import torch
@@ -102,7 +97,6 @@ class Qwen3VLForCausalLM(nn.Module):
         self._tie = bool(getattr(self._tcfg, "tie_word_embeddings", False))
         self._ndps = len(getattr(config.vision_config, "deepstack_visual_indexes", []) or [])
         self._encoder_cache = EncoderCache(256)
-        self._vit_cg = None
 
     def forward(self, input_ids=None, positions=None, inputs_embeds=None, deepstack_input_embeds=None):
         return self.vl_model(
@@ -243,16 +237,9 @@ class Qwen3VLForCausalLM(nn.Module):
                 grids.append(torch.tensor([[t, h, w]], device=device, dtype=torch.int64))
                 sizes.append((t * h * w) // (m * m))
         grid = torch.cat(grids, 0)
-
-        cg = self._vit_cg
-        if cg is not None and cg.can_use(grid):
-            flat, dps = cg.replay(pv, grid)
-            if dps is not None and self.vision_tower.vit is not None:
-                self.vision_tower.vit._deepstack = dps
-        else:
-            result = self.vision_tower(pv, grid_thw=grid)
-            flat = torch.cat(list(result), 0) if isinstance(result, tuple) else result
-            dps = self.vision_tower.deepstack_features
+        result = self.vision_tower(pv, grid_thw=grid)
+        flat = torch.cat(list(result), 0) if isinstance(result, tuple) else result
+        dps = self.vision_tower.deepstack_features
 
         cur = 0
         for idx, mf, sz in zip(miss_i, miss_mf, sizes):
@@ -264,29 +251,6 @@ class Qwen3VLForCausalLM(nn.Module):
             self._encoder_cache.put(mf.uid, emb, ds)
             cur += sz
         return out
-
-    def vit_forward_cg(self, pv, grid, metadata, out_merged, out_deepstack) -> None:
-        self.vision_tower(
-            pv, grid_thw=grid, metadata=metadata, out_merged=out_merged,
-            out_deepstack=out_deepstack or None,
-        )
-
-    def get_vit_cg_config(self):
-        from ..core.vit_cuda_graph import ViTCGConfig
-
-        vc = self.config.vision_config
-        patch = getattr(vc, "patch_size", 16)
-        temporal = getattr(vc, "temporal_patch_size", 2)
-        in_ch = getattr(vc, "in_channels", 3)
-        return ViTCGConfig(
-            min_budget=64,
-            max_budget=256,
-            out_hidden_size=int(getattr(vc, "out_hidden_size", self._tcfg.hidden_size)),
-            merge_size=int(getattr(vc, "spatial_merge_size", 2)),
-            patch_dim=in_ch * temporal * patch * patch,
-            base_grid=(1, 16, 16),
-            num_deepstack=self._ndps,
-        )
 
     def _build_deepstack(self, seqs, n, h, device, dtype):
         if not self._ndps:
@@ -312,8 +276,3 @@ class Qwen3VLForCausalLM(nn.Module):
                     )
             off += seq.num_scheduled_tokens
         return bufs
-
-
-def make_mm_uid(pixel_values: torch.Tensor) -> str:
-    raw = pixel_values.detach().float().cpu().numpy().tobytes()
-    return hashlib.sha1(raw[:4096] + str(tuple(pixel_values.shape)).encode()).hexdigest()

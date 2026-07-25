@@ -1,11 +1,3 @@
-"""Qwen3-VL Vision Transformer: patch embed → blocks → merger (+ DeepStack).
-
-Attention uses flash-attn varlen (supports head_dim=72). Under CUDA-graph
-capture we fall back to SDPA so metadata stays capture-safe.
-"""
-
-from __future__ import annotations
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -83,23 +75,6 @@ def _rotate_half(x):
     return torch.cat((-x[..., d:], x[..., :d]), dim=-1)
 
 
-def _sdpa(q, k, v, seqlens, offsets, scale):
-    """CG-safe fallback: q/k/v ``[H, N, D]``."""
-    outs = []
-    for slen, off in zip(seqlens, offsets):
-        if slen == 0:
-            continue
-        outs.append(
-            F.scaled_dot_product_attention(
-                q[:, off : off + slen].unsqueeze(0),
-                k[:, off : off + slen].unsqueeze(0),
-                v[:, off : off + slen].unsqueeze(0),
-                scale=scale,
-            ).squeeze(0)
-        )
-    return torch.cat(outs, dim=1)
-
-
 class Qwen3VisionPatchEmbed(nn.Module):
     def __init__(self, in_channels=3, hidden_size=1152, patch_size=14, temporal_patch_size=2):
         super().__init__()
@@ -134,7 +109,7 @@ class Qwen3VisionAttention(nn.Module):
         self.qkv = nn.Linear(hidden_size, hidden_size * 3)
         self.proj = nn.Linear(hidden_size, hidden_size)
 
-    def forward(self, x, rotary_cos, rotary_sin, seqlens, offsets, attn: ViTAttentionBackend | None):
+    def forward(self, x, rotary_cos, rotary_sin, seqlens, offsets, attn: ViTAttentionBackend):
         if x.dim() == 3:
             x = x.squeeze(1)
         n = x.shape[0]
@@ -144,12 +119,7 @@ class Qwen3VisionAttention(nn.Module):
         qf, kf = q.float(), k.float()
         q = (qf * cos + _rotate_half(qf) * sin).to(q.dtype)
         k = (kf * cos + _rotate_half(kf) * sin).to(k.dtype)
-        if attn is not None:
-            out = attn.run(q.contiguous(), k.contiguous(), v.contiguous())
-        else:
-            out = _sdpa(
-                q.transpose(0, 1), k.transpose(0, 1), v.transpose(0, 1), seqlens, offsets, self.scale
-            ).transpose(0, 1)
+        out = attn.run(q.contiguous(), k.contiguous(), v.contiguous())
         return self.proj(out.reshape(n, -1)).unsqueeze(1)
 
 
@@ -317,20 +287,15 @@ class Qwen3VisionTransformer(nn.Module):
             "sizes": (g.prod(-1) // self.spatial_merge_size**2).tolist(),
         }
 
-    def forward(
-        self, pixel_values, grid_thw=None, metadata=None, out_merged=None, out_deepstack=None
-    ):
+    def forward(self, pixel_values, grid_thw=None, metadata=None):
         dtype = self.pos_embed.weight.dtype
         device = self.pos_embed.weight.device
         md = metadata or self.prepare_metadata(grid_thw)
         hidden = self.patch_embed(pixel_values.to(device=device, dtype=dtype))
         hidden = (hidden + md["pos_embeds"]).reshape(hidden.shape[0], 1, -1)
 
-        # flash-attn: plan once per forward. Skip under CUDA-graph capture.
-        attn = None
-        if out_merged is None and not torch.cuda.is_current_stream_capturing():
-            attn = self._backend(dtype)
-            attn.plan(md["cu_seqlens_cpu"], seqlens=md["seqlens"])
+        attn = self._backend(dtype)
+        attn.plan(md["cu_seqlens_cpu"], seqlens=md["seqlens"])
 
         deepstack = []
         ds_set = set(self.deepstack_indexes)
@@ -340,14 +305,6 @@ class Qwen3VisionTransformer(nn.Module):
                 deepstack.append(self.deepstack_merger_list[self.deepstack_indexes.index(i)](hidden))
 
         merged = self.merger(hidden)
-        if out_merged is not None:
-            out_merged.copy_(merged)
-            if out_deepstack is not None:
-                for i, feat in enumerate(deepstack):
-                    out_deepstack[i].copy_(feat)
-            self._deepstack = list(out_deepstack) if out_deepstack is not None else None
-            return (out_merged,)
-
         self._deepstack = deepstack or None
         if grid_thw is not None:
             return tuple(merged.split(md["sizes"]))

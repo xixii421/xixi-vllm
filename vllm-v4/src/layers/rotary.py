@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 import torch
+from torch import nn
 import triton
 import triton.language as tl
-from torch import nn
 
 
 def apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:

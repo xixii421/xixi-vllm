@@ -92,6 +92,67 @@ def profile_vit_attn(iters: int) -> dict:
     }
 
 
+def _run_e2e(eng, prompt: str, sp, images=None) -> dict:
+    vit_ms = 0.0
+    orig = eng.model.encode_and_merge
+
+    def timed_encode(*a, **kw):
+        nonlocal vit_ms
+        _sync()
+        t0 = time.perf_counter()
+        out = orig(*a, **kw)
+        _sync()
+        vit_ms += (time.perf_counter() - t0) * 1000
+        return out
+
+    eng.model.encode_and_merge = timed_encode  # type: ignore[method-assign]
+    seq = eng.add_request(prompt, sp, images=images)
+    decode_ms = prefill_ms = 0.0
+    n_prefill = n_decode = 0
+    _sync()
+    t_all = time.perf_counter()
+    while not eng.scheduler.is_finished():
+        prefills, decodes = eng.scheduler.schedule()
+        _sync()
+        t0 = time.perf_counter()
+        p_ids, d_ids = eng.model_runner.run(prefills, decodes)
+        _sync()
+        dt = (time.perf_counter() - t0) * 1000
+        if prefills and not decodes:
+            prefill_ms += dt
+            n_prefill += 1
+            eng.scheduler.postprocess(prefills, p_ids, is_prefill=True)
+        elif decodes and not prefills:
+            decode_ms += dt
+            n_decode += 1
+            eng.scheduler.postprocess(decodes, d_ids, is_prefill=False)
+        else:
+            # Mixed step (decode-first + one prefill): split wall time by phase via nested timing.
+            if decodes:
+                n_decode += 1
+                eng.scheduler.postprocess(decodes, d_ids, is_prefill=False)
+                decode_ms += dt * 0.5
+            if prefills:
+                n_prefill += 1
+                eng.scheduler.postprocess(prefills, p_ids, is_prefill=True)
+                prefill_ms += dt * 0.5
+    total_ms = (time.perf_counter() - t_all) * 1000
+    text = eng.tokenizer.decode(seq.token_ids[seq.num_prompt_tokens :], skip_special_tokens=True)
+    eng.model.encode_and_merge = orig  # type: ignore[method-assign]
+    return {
+        "vit_encode_ms": round(vit_ms, 2),
+        "prefill_step_ms": round(prefill_ms, 2),
+        "decode_ms": round(decode_ms, 2),
+        "n_prefill_steps": n_prefill,
+        "n_decode_steps": n_decode,
+        "decode_tok_s": round(n_decode / max(decode_ms / 1000.0, 1e-9), 1) if n_decode else 0.0,
+        "total_ms": round(total_ms, 2),
+        "prompt_tokens": seq.num_prompt_tokens,
+        "output": text[:200],
+        "peak_mem_gb": round(torch.cuda.max_memory_allocated() / 1024**3, 3),
+    }
+
+
 def profile_e2e_modules(model: str, image: str, max_side: int, max_new: int) -> dict:
     from PIL import Image
 
@@ -116,50 +177,11 @@ def profile_e2e_modules(model: str, image: str, max_side: int, max_new: int) -> 
         )
     )
     sp = SamplingParams(max_tokens=max_new, temperature=0.0)
-    vit_ms = 0.0
-    orig = eng.model.encode_and_merge
-
-    def timed_encode(*a, **kw):
-        nonlocal vit_ms
-        _sync()
-        t0 = time.perf_counter()
-        out = orig(*a, **kw)
-        _sync()
-        vit_ms += (time.perf_counter() - t0) * 1000
-        return out
-
-    eng.model.encode_and_merge = timed_encode  # type: ignore[method-assign]
-    seq = eng.add_request("Describe briefly.", sp, images=[im])
-    decode_ms = 0.0
-    prefill_ms = 0.0
-    _sync()
-    t_all = time.perf_counter()
-    while not eng.scheduler.is_finished():
-        prefills, decodes = eng.scheduler.schedule()
-        if prefills:
-            _sync()
-            t0 = time.perf_counter()
-            toks = eng.model_runner.run(prefills, is_prefill=True)
-            _sync()
-            prefill_ms += (time.perf_counter() - t0) * 1000
-            eng.scheduler.postprocess(prefills, toks, is_prefill=True)
-        if decodes:
-            _sync()
-            t0 = time.perf_counter()
-            toks = eng.model_runner.run(decodes, is_prefill=False)
-            _sync()
-            decode_ms += (time.perf_counter() - t0) * 1000
-            eng.scheduler.postprocess(decodes, toks, is_prefill=False)
-    total_ms = (time.perf_counter() - t_all) * 1000
-    text = eng.tokenizer.decode(seq.token_ids[seq.num_prompt_tokens :], skip_special_tokens=True)
-    return {
-        "vit_encode_ms": round(vit_ms, 2),
-        "prefill_step_ms": round(prefill_ms, 2),
-        "decode_ms": round(decode_ms, 2),
-        "total_ms": round(total_ms, 2),
-        "output": text[:200],
-        "peak_mem_gb": round(torch.cuda.max_memory_allocated() / 1024**3, 3),
-    }
+    torch.cuda.reset_peak_memory_stats()
+    text_only = _run_e2e(eng, "Say hello in one short sentence.", sp, images=None)
+    torch.cuda.reset_peak_memory_stats()
+    image_text = _run_e2e(eng, "Describe briefly.", sp, images=[im])
+    return {"text_only": text_only, "image_text": image_text}
 
 
 def main() -> None:

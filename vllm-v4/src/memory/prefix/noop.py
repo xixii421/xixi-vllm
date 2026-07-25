@@ -1,12 +1,5 @@
-"""No-op prefix index (always miss)."""
-
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from ..block_manager import BlockManager
-    from ..sequence import Sequence
+from ..block_manager import BlockManager
+from ..sequence import Sequence
 
 
 class NoopPrefixIndex:

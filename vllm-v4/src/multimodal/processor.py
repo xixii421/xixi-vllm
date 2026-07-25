@@ -1,7 +1,3 @@
-"""CPU-side multimodal preprocessing (HF AutoProcessor → ids + pixels + spans)."""
-
-from __future__ import annotations
-
 import logging
 from typing import Optional
 

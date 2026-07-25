@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import torch
 from torch import nn
 
@@ -9,7 +7,7 @@ def _apply_top_k(logits: torch.Tensor, top_k: torch.Tensor) -> torch.Tensor:
     k = top_k.to(dtype=torch.long, device=logits.device).clamp(max=vocab)
     if bool((k <= 0).all()):
         return logits
-    # Cap at vocab; disabled rows use full vocab (no filter).
+
     k_eff = torch.where(k <= 0, torch.full_like(k, vocab), k)
     max_k = int(k_eff.max().item())
     topk_vals, _ = torch.topk(logits, max_k, dim=-1)

@@ -1,15 +1,6 @@
-"""Hash-map prefix index (v2-compatible API, xxhash keys)."""
-
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
 from .hash_util import compute_block_hash
-
-if TYPE_CHECKING:
-    from ..block_manager import BlockManager
-    from ..sequence import Sequence
-
+from ..block_manager import BlockManager
+from ..sequence import Sequence
 
 class HashPrefixIndex:
     def __init__(self) -> None:

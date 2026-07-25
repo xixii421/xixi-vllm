@@ -1,7 +1,4 @@
-from __future__ import annotations
-
 import torch
-
 from ..memory import Sequence
 
 

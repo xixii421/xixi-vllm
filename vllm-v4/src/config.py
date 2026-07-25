@@ -35,7 +35,7 @@ class EngineConfig:
     flashinfer_use_tensor_cores: bool = True
     # FlashInfer plan + CG indices H2D: async when True (hides copy behind compute).
     flashinfer_non_blocking: bool = True
-    # Multimodal (v4): capture budget-based ViT CUDA Graphs (orthogonal to decode CG).
+    # Deprecated no-ops: ViT path uses flash-attn; budget CG was removed.
     enable_vit_cuda_graph: bool = False
     vit_cg_min_budget: int = 64
     vit_cg_max_budget: int = 256

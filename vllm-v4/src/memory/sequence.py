@@ -4,12 +4,11 @@ from copy import copy
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from itertools import count
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 from ..sampling_params import SamplingParams
 
-if TYPE_CHECKING:
-    import torch
+import torch
 
 _SEQ_IDS = count(1)
 
@@ -22,13 +21,6 @@ class SequenceStatus(Enum):
 
 @dataclass
 class MultiModalFeature:
-    """One image/video placeholder span in a sequence (CPU-resident pixels).
-
-    ``start``/``end`` are token offsets of the placeholder run inside
-    ``Sequence.token_ids``; ``num_encoder_tokens`` == number of merged vision
-    embeddings that replace those placeholders (``end - start``).
-    """
-
     modality: str  # "image" | "video"
     data: "torch.Tensor"  # pixel_values on CPU
     start: int

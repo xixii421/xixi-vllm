@@ -1,13 +1,9 @@
-from __future__ import annotations
-
 import torch
 
 from .rotary import RotaryEmbedding, _rope_cuda, apply_rotary_emb
 
 
 class MRotaryEmbedding(RotaryEmbedding):
-    """Interleaved / sectioned MRoPE on top of a shared cos/sin table."""
-
     def __init__(
         self,
         head_size: int,

@@ -1,7 +1,5 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import torch
 from flashinfer import (
@@ -9,8 +7,7 @@ from flashinfer import (
     BatchPrefillWithPagedKVCacheWrapper,
 )
 
-if TYPE_CHECKING:
-    from .attention import AttentionMetadata
+from .attention import AttentionMetadata
 
 
 @dataclass

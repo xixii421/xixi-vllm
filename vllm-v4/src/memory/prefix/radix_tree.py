@@ -1,9 +1,3 @@
-"""Compressed radix tree over chained block-hash keys.
-
-Completes v2 teaching tree with: leaf LRU eviction, detach-by-block invalidate,
-and reverse block→node index (aligned with v7 / production APC needs).
-"""
-
 from __future__ import annotations
 
 import heapq

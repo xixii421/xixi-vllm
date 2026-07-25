@@ -1,14 +1,3 @@
-"""MRoPE 3-axis position builder for the language model (prepare-once per step).
-
-Given the merged token stream and each sequence's image spans, produce a
-``[3, N]`` (t/h/w) position tensor: text tokens advance all three axes equally,
-image tokens use the ``(t, h//merge, w//merge)`` grid offset from the image's
-absolute origin. Also records, per sequence, the next absolute cursor
-(``mrope_next``) and ``rope_delta`` so decode positions continue correctly.
-"""
-
-from __future__ import annotations
-
 import numpy as np
 import torch
 

@@ -1,15 +1,8 @@
-"""Radix-tree prefix index — complete beyond v2 (evict / invalidate / dedup publish)."""
-
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
 from .hash_util import compute_block_hash
 from .radix_tree import RadixTree
 
-if TYPE_CHECKING:
-    from ..block_manager import BlockManager
-    from ..sequence import Sequence
+from ..block_manager import BlockManager
+from ..sequence import Sequence
 
 
 class RadixPrefixIndex:

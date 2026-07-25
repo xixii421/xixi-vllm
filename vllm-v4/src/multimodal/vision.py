@@ -1,7 +1,3 @@
-"""Vision tower + LRU EncoderCache (mm_hash → merged embeds + DeepStack)."""
-
-from __future__ import annotations
-
 import logging
 from collections import OrderedDict
 
@@ -68,12 +64,6 @@ class Qwen3VisionTower(nn.Module):
         assert self.vit is not None
         return self.vit.prepare_metadata(grid_thw)
 
-    def forward(self, pixel_values, grid_thw=None, metadata=None, out_merged=None, out_deepstack=None):
+    def forward(self, pixel_values, grid_thw=None, metadata=None):
         assert self.vit is not None
-        return self.vit(
-            pixel_values,
-            grid_thw=grid_thw,
-            metadata=metadata,
-            out_merged=out_merged,
-            out_deepstack=out_deepstack,
-        )
+        return self.vit(pixel_values, grid_thw=grid_thw, metadata=metadata)

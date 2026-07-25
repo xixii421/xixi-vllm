@@ -102,10 +102,3 @@ def test_mrope_with_image_advances_cursor():
     assert getattr(pos, "max_pos", None) == int(pos.max().item())
 
 
-def test_align_head_dim():
-    from src.layers.vision.vit_attn import _align_head_dim
-
-    assert _align_head_dim(64) == 64
-    assert _align_head_dim(128) == 128
-    assert _align_head_dim(72) == 128  # Qwen3-VL → FlashInfer-supported width
-    assert _align_head_dim(80) == 128

@@ -1,19 +1,6 @@
-"""Chained block hashing (xxhash — faster than blake2b for teaching hot path).
-
-Semantics match v2: ``h_i = H(tokens_i | h_{i-1})`` with ``h_{-1} = -1``.
-"""
-
-from __future__ import annotations
-
 import struct
-
 import numpy as np
-
-try:
-    import xxhash
-except ImportError:  # pragma: no cover
-    xxhash = None  # type: ignore
-
+import xxhash
 
 def compute_block_hash(token_ids: list[int] | np.ndarray, prefix: int = -1) -> int:
     if xxhash is not None:

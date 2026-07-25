@@ -1,7 +1,3 @@
-from __future__ import annotations
-
-from typing import Literal
-
 import torch
 from transformers import PretrainedConfig
 

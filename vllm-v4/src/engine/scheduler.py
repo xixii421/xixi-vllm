@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from collections import deque
 
 from ..memory import KVManager, Sequence, SequenceStatus
@@ -122,10 +120,11 @@ class Scheduler:
         return tokens_used + chunk
 
     def _clamp_chunk_for_encoder_budget(self, seq: Sequence, chunk: int) -> int:
-        """Shorten chunk so overlapping uncached vision tokens fit the budget.
+        """Shorten chunk so overlapping vision tokens fit the encoder budget.
 
-        If the next overlapping image alone exceeds the budget, still schedule
-        tokens up to (but not including) that image so text prefix can proceed.
+        If the next image alone exceeds the budget but the cursor is already at
+        that image, still schedule the image (official all-or-nothing exception)
+        so the request cannot stall forever.
         """
         if not seq.has_multimodal or chunk <= 0:
             return chunk
@@ -140,9 +139,12 @@ class Scheduler:
                 continue
             if img_start >= end:
                 break
-            # Truncate before this image if it would blow the remaining budget.
             if used + mf.num_encoder_tokens > budget:
-                return max(0, img_start - start)
+                # Truncate before the image when text prefix remains.
+                if img_start > start:
+                    return img_start - start
+                # Already at the oversized image → schedule it alone.
+                return min(chunk, img_end - start)
             used += mf.num_encoder_tokens
         return chunk
 

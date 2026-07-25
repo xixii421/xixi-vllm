@@ -1,7 +1,3 @@
-"""Forward context for LM head / CUDA Graph (from dzyy_vllm/utils/context.py)."""
-
-from __future__ import annotations
-
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Optional

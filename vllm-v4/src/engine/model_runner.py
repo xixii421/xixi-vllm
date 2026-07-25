@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import torch
 
 from ..config import EngineConfig
@@ -39,11 +37,8 @@ class ModelRunner:
 
         self._warmup()
         self.cuda_graph_runner: CUDAGraphRunner | None = None
-        self.vit_cg_runner = None
         if not config.enforce_eager:
             self.cuda_graph_runner = self._capture_cg()
-        if self.is_multimodal and config.enable_vit_cuda_graph:
-            self.vit_cg_runner = self._capture_vit_cg()
 
     def _make_backend(self) -> FlashInferBackend:
         cfg = self.config.text_config
@@ -105,24 +100,6 @@ class ModelRunner:
 
         self.kv_cache.zero_()
         torch.cuda.empty_cache()
-
-    def _capture_vit_cg(self):
-        from ..core.vit_cuda_graph import ViTCUDAGraphRunner
-
-        cfg = self.model.get_vit_cg_config()
-        cfg.min_budget = self.config.vit_cg_min_budget
-        cfg.max_budget = self.config.vit_cg_max_budget
-        runner = ViTCUDAGraphRunner(
-            vit_forward=self.model.vit_forward_cg,
-            metadata_fn=self.model.vision_tower.prepare_metadata,
-            config=cfg,
-            device=self.device,
-            dtype=self.dtype,
-        )
-        runner.capture()
-        self.model._vit_cg = runner
-        print(f"ViT CUDA Graph captured (budgets={cfg.min_budget}..{cfg.max_budget})")
-        return runner
 
     def _capture_cg(self) -> CUDAGraphRunner:
         cfg = self.config.text_config
@@ -192,18 +169,16 @@ class ModelRunner:
                 logits, temperatures, top_ps=top_ps, top_ks=top_ks, min_ps=min_ps
             ).tolist()
 
-        # Chunked-prefill optimization: skip LM-head/sample when no seq finishes prompt.
+        # Intermediate chunked-prefill tokens still need ViT+LM to write KV /
+        # advance MRoPE; only skip LM-head/sample when no prompt finishes.
+        need_sample = True
         if is_prefill:
-            need = [
+            need_sample = any(
                 s.num_cached_tokens + s.num_scheduled_tokens >= s.num_prompt_tokens
                 for s in seqs
-            ]
-            if not any(need):
-                return [0] * len(seqs)
+            )
 
-        # Multimodal prefill: run ViT (+EncoderCache/ViT CG), scatter vision
-        # embeds into the text stream, and build 3-axis MRoPE positions. The LM
-        # then consumes merged embeds (input_ids is dropped for this forward).
+        # Multimodal prefill: ViT (+EncoderCache), scatter embeds, 3-axis MRoPE.
         inputs_embeds = None
         deepstack = None
         if is_prefill and self.is_multimodal and any(s.has_multimodal for s in seqs):
@@ -214,7 +189,6 @@ class ModelRunner:
             inputs.deepstack_input_embeds = deepstack
             inputs.positions = positions3d
         elif self.is_multimodal:
-            # Decode / text-only prefill: grow MRoPE table from CPU max (no .item()).
             rope_fn = getattr(self.model, "_mrope_module", None)
             if callable(rope_fn):
                 host_max = 0
@@ -289,6 +263,8 @@ class ModelRunner:
                     deepstack_input_embeds=deepstack,
                 )
 
+        if not need_sample:
+            return [0] * len(seqs)
         return _sample(self._logits_for_sample(h, inputs))
 
     def _logits_for_sample(self, hidden: torch.Tensor, inputs: ModelInputs) -> torch.Tensor:
@@ -300,10 +276,6 @@ class ModelRunner:
     def destroy(self) -> None:
         if self.cuda_graph_runner is not None:
             self.cuda_graph_runner.destroy()
-        if self.vit_cg_runner is not None:
-            self.vit_cg_runner.destroy()
-            if getattr(self.model, "_vit_cg", None) is not None:
-                self.model._vit_cg = None
 
 
 def _cu_q(seqs: list[Sequence]) -> list[int]:
