@@ -73,4 +73,8 @@ def mrope_positions(
             seq.rope_delta = seq.mrope_next - 1 - token_idx
 
         off += seq.num_scheduled_tokens
-    return torch.from_numpy(pos).to(device)
+    # CPU max — callers use this to grow MRoPE cache without GPU .item() sync.
+    max_pos = int(pos.max()) if n > 0 else 0
+    out = torch.from_numpy(pos).to(device)
+    out.max_pos = max_pos  # type: ignore[attr-defined]
+    return out

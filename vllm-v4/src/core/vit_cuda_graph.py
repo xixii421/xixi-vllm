@@ -38,7 +38,7 @@ class ViTCUDAGraphRunner:
         device: torch.device,
         dtype: torch.dtype = torch.float16,
     ) -> None:
-        self._forward = vit_forward  # (pv, grid, meta, out, dps) → None
+        self._forward = vit_forward
         self._metadata_fn = metadata_fn
         self._cfg = config
         self._device = device

@@ -14,12 +14,16 @@ class Scheduler:
         max_num_batched_tokens: int,
         eos_token_id: int,
         mix_prefill_decode: bool = True,
+        encoder_compute_budget: int = 0,
     ) -> None:
         self.kv = kv
         self.max_num_seqs = max_num_seqs
         self.max_num_batched_tokens = max_num_batched_tokens
         self.eos = eos_token_id
         self.mix_prefill_decode = mix_prefill_decode
+        self.encoder_compute_budget = (
+            encoder_compute_budget if encoder_compute_budget > 0 else max_num_batched_tokens
+        )
         self.block_size = kv.block_size
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
@@ -105,6 +109,9 @@ class Scheduler:
             return tokens_used
 
         chunk = min(need, remaining)
+        chunk = self._clamp_chunk_for_encoder_budget(seq, chunk)
+        if chunk <= 0:
+            return tokens_used
         seq.num_scheduled_tokens = chunk
         seq.is_prefill = True
         prefills.append(seq)
@@ -113,6 +120,31 @@ class Scheduler:
             self.waiting.popleft()
             self.running.append(seq)
         return tokens_used + chunk
+
+    def _clamp_chunk_for_encoder_budget(self, seq: Sequence, chunk: int) -> int:
+        """Shorten chunk so overlapping uncached vision tokens fit the budget.
+
+        If the next overlapping image alone exceeds the budget, still schedule
+        tokens up to (but not including) that image so text prefix can proceed.
+        """
+        if not seq.has_multimodal or chunk <= 0:
+            return chunk
+        budget = self.encoder_compute_budget
+        start = seq.num_cached_tokens
+        end = start + chunk
+        used = 0
+        for mf in seq.mm_features:
+            img_start = mf.start
+            img_end = mf.start + mf.num_encoder_tokens
+            if img_end <= start:
+                continue
+            if img_start >= end:
+                break
+            # Truncate before this image if it would blow the remaining budget.
+            if used + mf.num_encoder_tokens > budget:
+                return max(0, img_start - start)
+            used += mf.num_encoder_tokens
+        return chunk
 
     def _schedule_prefill_first(self) -> tuple[list[Sequence], list[Sequence]]:
         prefills: list[Sequence] = []
@@ -134,6 +166,9 @@ class Scheduler:
                 break
 
             chunk = min(need, remaining)
+            chunk = self._clamp_chunk_for_encoder_budget(seq, chunk)
+            if chunk <= 0:
+                break
             seq.num_scheduled_tokens = chunk
             seq.is_prefill = True
             tokens_used += chunk

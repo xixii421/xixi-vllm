@@ -15,12 +15,22 @@ IMAGE="${IMAGE:-$ROOT/cat.jpg}"
 MAX_NEW="${MAX_NEW:-32}"
 WARMUP="${WARMUP:-1}"
 ITERS="${ITERS:-3}"
+MAX_SIDE="${MAX_SIDE:-768}"
+MAX_SIDE="${MAX_SIDE:-768}"
 OUT_DIR="${OUT_DIR:-$ROOT/bench/results}"
 mkdir -p "$OUT_DIR"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-# NVML is broken on this host; torch CUDA still works. Silence the warning noise.
+# NVML is broken on this host; torch CUDA still works.
 export VLLM_DISABLE_NVML="${VLLM_DISABLE_NVML:-1}"
+
+echo "==== methodology ===="
+echo "No sudo / no nvidia-smi needed."
+echo "Timing: torch.cuda.synchronize + perf_counter"
+echo "Model: $MODEL"
+echo "Image: $IMAGE (max_side=$MAX_SIDE)"
+echo "Envs: .venv (v4) then .venv-vllm (official $("$REPO/.venv-vllm/bin/python" -c 'import vllm;print(vllm.__version__)' 2>/dev/null || echo '?'))"
+echo
 
 echo "==== host CUDA smoke (no nvidia-smi needed) ===="
 "$REPO/.venv/bin/python" - <<'PY'
@@ -37,6 +47,7 @@ source "$REPO/.venv/bin/activate"
 source "$REPO/.env.cuda.sh" || true
 PYTHONPATH="$ROOT" python "$ROOT/bench/mm_compare_v4.py" \
   --model "$MODEL" --image "$IMAGE" --max-new "$MAX_NEW" \
+  --max-side "$MAX_SIDE" \
   --warmup "$WARMUP" --iters "$ITERS" \
   --out "$OUT_DIR/v4_mm.json"
 
@@ -46,6 +57,7 @@ source "$REPO/.venv-vllm/bin/activate"
 source "$REPO/.env.vllm.sh" || true
 python "$ROOT/bench/mm_compare_official.py" \
   --model "$MODEL" --image "$IMAGE" --max-new "$MAX_NEW" \
+  --max-side "$MAX_SIDE" \
   --warmup "$WARMUP" --iters "$ITERS" \
   --out "$OUT_DIR/official_mm.json"
 

@@ -18,16 +18,55 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
+# NVML driver/library mismatch on this host breaks vLLM's CUDA platform
+# autodetect (returns UnspecifiedPlatform → empty device_type). Force CUDA
+# when torch can see a GPU — no sudo / reboot required.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVICES", "0"))
+
 import torch
+
+torch.cuda.init()
+assert torch.cuda.is_available(), "CUDA required for official vLLM bench"
+
+
+def _force_cuda_platform_when_nvml_broken() -> None:
+    import vllm.platforms as vplat
+
+    _orig = vplat.cuda_platform_plugin
+
+    def _cuda_plugin():
+        r = _orig()
+        if r is not None:
+            return r
+        if torch.cuda.is_available():
+            return "vllm.platforms.cuda.CudaPlatform"
+        return None
+
+    vplat.cuda_platform_plugin = _cuda_plugin
+    vplat.builtin_platform_plugins["cuda"] = _cuda_plugin
+    vplat._current_platform = None
+
+
+_force_cuda_platform_when_nvml_broken()
+
 from PIL import Image
 
 
 def _sync() -> None:
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+
+
+def _load_image(path: str, max_side: int) -> Image.Image:
+    im = Image.open(path).convert("RGB")
+    if max_side > 0 and max(im.size) > max_side:
+        im = im.copy()
+        im.thumbnail((max_side, max_side))
+    return im
 
 
 def _peak_mem_gb() -> float:
@@ -127,10 +166,17 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
     ap.add_argument("--image", default="cat.jpg")
+    ap.add_argument(
+        "--max-side",
+        type=int,
+        default=768,
+        help="resize image so max(H,W)<=this (0=keep original).",
+    )
     ap.add_argument("--max-new", type=int, default=32)
     ap.add_argument("--warmup", type=int, default=1)
     ap.add_argument("--iters", type=int, default=3)
     ap.add_argument("--gpu-util", type=float, default=0.70)
+    ap.add_argument("--max-model-len", type=int, default=16384)
     ap.add_argument("--out", default="bench/results/official_mm.json")
     ap.add_argument("--prompt", default="Describe this image in one short sentence.")
     args = ap.parse_args()
@@ -140,7 +186,8 @@ def main() -> None:
     img_path = Path(args.image)
     if not img_path.is_file():
         raise SystemExit(f"image not found: {img_path}")
-    image = Image.open(img_path).convert("RGB")
+    image = _load_image(str(img_path), args.max_side)
+    print(f"[official] image {img_path} -> size={image.size} max_side={args.max_side}")
 
     print(f"[official] loading {args.model} ...")
     torch.cuda.reset_peak_memory_stats()
@@ -149,7 +196,7 @@ def main() -> None:
         dtype="float16",
         trust_remote_code=True,
         gpu_memory_utilization=args.gpu_util,
-        max_model_len=8192,
+        max_model_len=args.max_model_len,
         limit_mm_per_prompt={"image": 1},
         enforce_eager=False,
     )

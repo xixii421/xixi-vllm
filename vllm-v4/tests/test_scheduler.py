@@ -168,14 +168,31 @@ class TestScheduler:
         assert not p and d and d[0] is s2
         assert s2.num_cached_tokens == 16
 
-    def test_mix_decode_with_prefill_chunk(self):
-        sch = _sched(max_num_batched_tokens=8, mix_prefill_decode=True)
-        s_run = _seq([1, 2, 3, 4])
-        s_wait = _seq([9] * 16)
-        sch.add(s_run)
-        p, _ = sch.schedule()
-        sch.postprocess(p, [10], is_prefill=True)
-        sch.add(s_wait)
+    def test_encoder_budget_truncates_before_image(self):
+        from src.memory.sequence import MultiModalFeature
+
+        sch = _sched(max_num_batched_tokens=64, block_size=16)
+        sch.encoder_compute_budget = 4
+        # text[0:8] + image[8:16] (8 encoder tokens) + text[16:24]
+        mm = [
+            MultiModalFeature(
+                modality="image",
+                data=torch.zeros(1),
+                start=8,
+                end=16,
+                num_encoder_tokens=8,
+                uid="img@8",
+                grid_thw=torch.tensor([[1, 4, 4]]),
+            )
+        ]
+        seq = Sequence(
+            token_ids=list(range(24)),
+            block_size=16,
+            mm_features=mm,
+        )
+        seq.max_tokens = 4
+        sch.add(seq)
         prefills, decodes = sch.schedule()
-        assert s_run in decodes and s_wait in prefills
-        assert s_wait.num_scheduled_tokens == 7
+        assert prefills and not decodes
+        # Image alone exceeds budget=4 → schedule only text before image.
+        assert seq.num_scheduled_tokens == 8

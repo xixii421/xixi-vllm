@@ -1,10 +1,9 @@
-"""Vision tower wrapper + LRU EncoderCache (mm_hash → merged embeds + DeepStack)."""
+"""Vision tower + LRU EncoderCache (mm_hash → merged embeds + DeepStack)."""
 
 from __future__ import annotations
 
 import logging
 from collections import OrderedDict
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -15,17 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 class EncoderCache:
-    """Content-addressed cache of vision embeddings, keyed by pixel ``mm_hash``.
-
-    Merged embeds are kept on their original device; DeepStack features are
-    parked on CPU (they are only re-uploaded on a hit, and are much larger).
-    """
-
     def __init__(self, max_size: int = 256):
         self.max_size = max_size
-        self._cache: OrderedDict[
-            str, tuple[torch.Tensor, Optional[list[torch.Tensor]]]
-        ] = OrderedDict()
+        self._cache: OrderedDict[str, tuple[torch.Tensor, list[torch.Tensor] | None]] = OrderedDict()
 
     def get(self, key: str):
         v = self._cache.get(key)
@@ -34,17 +25,11 @@ class EncoderCache:
         return v
 
     def put(self, key: str, embeds: torch.Tensor, deepstack=None):
-        ds = None
-        if deepstack is not None:
-            ds = [t.detach().to("cpu") for t in deepstack]
-        payload = (embeds.detach(), ds)
-        if key in self._cache:
-            self._cache.move_to_end(key)
-            self._cache[key] = payload
-        else:
-            if len(self._cache) >= self.max_size:
-                self._cache.popitem(last=False)
-            self._cache[key] = payload
+        ds = [t.detach().cpu() for t in deepstack] if deepstack is not None else None
+        self._cache[key] = (embeds.detach(), ds)
+        self._cache.move_to_end(key)
+        while len(self._cache) > self.max_size:
+            self._cache.popitem(last=False)
 
     def clear(self):
         self._cache.clear()
@@ -60,7 +45,7 @@ class Qwen3VisionTower(nn.Module):
     def __init__(self, vision_config) -> None:
         super().__init__()
         self._cfg = vision_config
-        self.vit: Optional[Qwen3VisionTransformer] = None
+        self.vit: Qwen3VisionTransformer | None = None
 
     @property
     def merge_size(self) -> int:
@@ -71,13 +56,11 @@ class Qwen3VisionTower(nn.Module):
         return getattr(self._cfg, "out_hidden_size", self._cfg.hidden_size)
 
     @property
-    def deepstack_features(self) -> Optional[list[torch.Tensor]]:
+    def deepstack_features(self):
         return self.vit.deepstack_features if self.vit else None
 
     def load_weights(self, state_dict: dict[str, torch.Tensor], vision_config) -> None:
-        self.vit = Qwen3VisionTransformer(vision_config).to(
-            device=next(iter(state_dict.values())).device
-        )
+        self.vit = Qwen3VisionTransformer(vision_config).to(next(iter(state_dict.values())).device)
         n = self.vit.load_weights(state_dict)
         logger.info("Native ViT loaded: %d params", n)
 
@@ -85,14 +68,7 @@ class Qwen3VisionTower(nn.Module):
         assert self.vit is not None
         return self.vit.prepare_metadata(grid_thw)
 
-    def forward(
-        self,
-        pixel_values: torch.Tensor,
-        grid_thw: Optional[torch.Tensor] = None,
-        metadata: Optional[dict] = None,
-        out_merged: Optional[torch.Tensor] = None,
-        out_deepstack: Optional[list[torch.Tensor]] = None,
-    ) -> tuple:
+    def forward(self, pixel_values, grid_thw=None, metadata=None, out_merged=None, out_deepstack=None):
         assert self.vit is not None
         return self.vit(
             pixel_values,

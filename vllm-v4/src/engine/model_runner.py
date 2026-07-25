@@ -213,6 +213,19 @@ class ModelRunner:
             inputs.inputs_embeds = inputs_embeds
             inputs.deepstack_input_embeds = deepstack
             inputs.positions = positions3d
+        elif self.is_multimodal:
+            # Decode / text-only prefill: grow MRoPE table from CPU max (no .item()).
+            rope_fn = getattr(self.model, "_mrope_module", None)
+            if callable(rope_fn):
+                host_max = 0
+                for s in seqs:
+                    if is_prefill:
+                        host_max = max(
+                            host_max, s.num_cached_tokens + s.num_scheduled_tokens
+                        )
+                    else:
+                        host_max = max(host_max, len(s) + int(s.rope_delta))
+                rope_fn().ensure_cache_size(host_max + 1)
 
         if (
             not is_prefill

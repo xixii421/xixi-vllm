@@ -14,10 +14,11 @@ v4 = v3（FlashInfer + Triton + Decode CG + hash/radix + PD mix）
 
 ## 性能要点（相较 v5/v7）
 
-- **ViT Attention 用 FlashInfer ragged**（`layers/vision/vit_attn.py`）：每次 ViT
-  forward 只 `plan()` 一次（所有 block 的 ragged 布局一致），随后每层 `run()`；
-  q/k/v 直接以 `[N, H, D]`(NHD) 送入，免转置、免 padding、免 per-image kernel 循环。
-  只有在 ViT CUDA Graph capture 期间（`plan` 不可用）才回退到 SDPA。
+- **ViT Attention**（`layers/vision/vit_attn.py`）：**flash-attn varlen**（原生支持
+  Qwen3-VL `head_dim=72`）。LM 侧仍用 **FlashInfer paged**（连续批 + Decode CG /
+  block table；flash-attn 无法直接替换该路径）。
+  CUDA Graph capture 期间 ViT 回退 SDPA。环境变量只通过 `source .env.cuda.sh` 注入，
+  **代码不耦合 CUDA/FlashInfer arch 环境**。
 - **Decode 仍走 v3 的 FlashInfer paged + Decode CUDA Graph**，MRoPE 用 1-D 位置
   （`len-1 + rope_delta`）与文本共用同一条快路径、同一 Triton RoPE kernel。
 - **EncoderCache** 命中直接复用视觉 embedding，跳过整座 ViT。
@@ -34,7 +35,7 @@ src/
     vision/vit_attn.py          # ★ FlashInfer ragged ViT attention 后端
   multimodal/
     processor.py                # HF AutoProcessor → ids + pixels + spans
-    vit.py                      # Qwen3 ViT + merger + DeepStack（FI/SDPA 双路）
+    vit.py                      # Qwen3 ViT + merger + DeepStack（FlashInfer）
     vision.py                   # Qwen3VisionTower + LRU EncoderCache
     _mrope.py                   # LM 侧 3 轴 MRoPE 位置（prepare-once）
   models/

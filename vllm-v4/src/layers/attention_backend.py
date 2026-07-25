@@ -4,19 +4,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import torch
+from flashinfer import (
+    BatchDecodeWithPagedKVCacheWrapper,
+    BatchPrefillWithPagedKVCacheWrapper,
+)
 
 if TYPE_CHECKING:
     from .attention import AttentionMetadata
-
-try:
-    from flashinfer import (
-        BatchDecodeWithPagedKVCacheWrapper,
-        BatchPrefillWithPagedKVCacheWrapper,
-    )
-except ImportError as exc:  # pragma: no cover
-    raise ImportError(
-        "vllm-v3 requires flashinfer. Install via vllm-v3/setup_env.sh"
-    ) from exc
 
 
 @dataclass

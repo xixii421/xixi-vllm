@@ -22,7 +22,8 @@ class EngineConfig:
     max_num_seqs: int = 256
     max_num_batched_tokens: int = 8192
     gpu_memory_utilization: float = 0.9
-    enforce_eager: bool = True  # False → Decode CUDA Graph (--compile / bench --v3-compile)
+    # None → text defaults to eager; VL defaults to Decode CUDA Graph on.
+    enforce_eager: bool | None = None
     dtype: str = "auto"
     # Prefix cache backend (v2-compatible). radix is completed beyond v2 (evict/invalidate/dedup).
     prefix_backend: str = "hash"
@@ -38,6 +39,8 @@ class EngineConfig:
     enable_vit_cuda_graph: bool = False
     vit_cg_min_budget: int = 64
     vit_cg_max_budget: int = 256
+    # Max merged vision tokens to encode in one step (0 = same as max_num_batched_tokens).
+    encoder_compute_budget: int = 0
 
     hf_config: PretrainedConfig = field(init=False)
     is_multimodal: bool = field(init=False, default=False)
@@ -57,6 +60,11 @@ class EngineConfig:
             )
         self.hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
         self.is_multimodal = _is_vl_config(self.hf_config)
+        if self.enforce_eager is None:
+            # VL: decode CG on by default; text stays eager unless --compile.
+            self.enforce_eager = not self.is_multimodal
+        if self.encoder_compute_budget <= 0:
+            self.encoder_compute_budget = self.max_num_batched_tokens
         # For VL, lengths / heads live on text_config.
         max_pos = getattr(self.text_config, "max_position_embeddings", self.context_len)
         self.context_len = min(self.context_len, max_pos)

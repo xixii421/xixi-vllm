@@ -32,6 +32,19 @@ def _sync() -> None:
         torch.cuda.synchronize()
 
 
+def _load_image(path: str, max_side: int) -> Image.Image:
+    """Resize so VL token count fits a teaching context window.
+
+    Raw phone/camera photos can explode to 10k+ vision tokens; both backends
+    must use the same resized image for a fair compare.
+    """
+    im = Image.open(path).convert("RGB")
+    if max_side > 0 and max(im.size) > max_side:
+        im = im.copy()
+        im.thumbnail((max_side, max_side))
+    return im
+
+
 def _peak_mem_gb() -> float:
     if not torch.cuda.is_available():
         return 0.0
@@ -136,12 +149,19 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
     ap.add_argument("--image", default="cat.jpg")
+    ap.add_argument(
+        "--max-side",
+        type=int,
+        default=768,
+        help="resize image so max(H,W)<=this (0=keep original). Default 768 ≈400 VL tokens.",
+    )
     ap.add_argument("--max-new", type=int, default=32)
     ap.add_argument("--warmup", type=int, default=1)
     ap.add_argument("--iters", type=int, default=3)
     ap.add_argument("--gpu-util", type=float, default=0.70)
     ap.add_argument("--compile", action="store_true", help="enable Decode CUDA Graph")
     ap.add_argument("--vit-cg", action="store_true", help="enable ViT CUDA Graph")
+    ap.add_argument("--context-len", type=int, default=16384)
     ap.add_argument("--out", default="bench/results/v4_mm.json")
     ap.add_argument("--prompt", default="Describe this image in one short sentence.")
     args = ap.parse_args()
@@ -152,7 +172,8 @@ def main() -> None:
     img_path = Path(args.image)
     if not img_path.is_file():
         raise SystemExit(f"image not found: {img_path}")
-    image = Image.open(img_path).convert("RGB")
+    image = _load_image(str(img_path), args.max_side)
+    print(f"[v4] image {img_path} -> size={image.size} max_side={args.max_side}")
 
     print(f"[v4] loading {args.model} ...")
     torch.cuda.reset_peak_memory_stats()
@@ -165,7 +186,7 @@ def main() -> None:
             gpu_memory_utilization=args.gpu_util,
             max_num_seqs=4,
             max_num_batched_tokens=16384,
-            context_len=8192,
+            context_len=args.context_len,
             mix_prefill_decode=True,
             prefix_backend="hash",
         )

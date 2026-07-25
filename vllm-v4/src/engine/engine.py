@@ -97,6 +97,7 @@ class Engine:
             max_num_batched_tokens=self.config.max_num_batched_tokens,
             eos_token_id=self.eos_token_id,
             mix_prefill_decode=self.config.mix_prefill_decode,
+            encoder_compute_budget=self.config.encoder_compute_budget,
         )
         self.model_runner = ModelRunner(
             self.model,

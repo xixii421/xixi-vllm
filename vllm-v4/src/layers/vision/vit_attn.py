@@ -1,56 +1,54 @@
+"""ViT attention via flash-attn varlen (supports Qwen3-VL head_dim=72).
+
+LM paged decode/prefill stays on FlashInfer (block tables + Decode CUDA Graph);
+flash-attn does not replace that path without a full KV rewrite.
+"""
+
 from __future__ import annotations
 
 import torch
-
-try:
-    from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
-
-    HAS_VIT_FLASHINFER = True
-except Exception:  # pragma: no cover - optional dependency
-    HAS_VIT_FLASHINFER = False
+from flash_attn import flash_attn_varlen_func
 
 
 class ViTAttentionBackend:
+    """Packed ragged self-attention: q/k/v ``[N, H, D]`` + ``cu_seqlens``."""
+
     def __init__(
         self,
         num_heads: int,
         head_dim: int,
         device: torch.device,
         dtype: torch.dtype,
-        *,
-        workspace_bytes: int = 128 * 1024 * 1024,
+        **_kwargs,
     ) -> None:
-        if not HAS_VIT_FLASHINFER:
-            raise RuntimeError("FlashInfer not available for ViT attention")
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.device = device
         self.dtype = dtype
         self.scale = head_dim**-0.5
-        self._workspace = torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
-        self.wrapper = BatchPrefillWithRaggedKVCacheWrapper(
-            self._workspace, kv_layout="NHD"
-        )
-        self._planned = False
+        self._cu: torch.Tensor | None = None
+        self._max_seqlen = 0
 
-    def plan(self, cu_seqlens_cpu: torch.Tensor) -> None:
-        indptr = cu_seqlens_cpu.to(dtype=torch.int32, device="cpu")
-        self.wrapper.plan(
-            qo_indptr=indptr,
-            kv_indptr=indptr,
-            num_qo_heads=self.num_heads,
-            num_kv_heads=self.num_heads,
-            head_dim_qk=self.head_dim,
-            head_dim_vo=self.head_dim,
+    def plan(self, cu_seqlens_cpu: torch.Tensor, seqlens: list[int] | None = None) -> None:
+        # flash-attn wants int32 cu_seqlens on the same device as q.
+        self._cu = cu_seqlens_cpu.to(dtype=torch.int32, device=self.device, non_blocking=True)
+        if seqlens:
+            self._max_seqlen = max(seqlens) if seqlens else 0
+        else:
+            diffs = cu_seqlens_cpu[1:] - cu_seqlens_cpu[:-1]
+            self._max_seqlen = int(diffs.max().item()) if diffs.numel() else 0
+
+    def run(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        assert self._cu is not None, "plan() before run()"
+        return flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q=self._cu,
+            cu_seqlens_k=self._cu,
+            max_seqlen_q=self._max_seqlen,
+            max_seqlen_k=self._max_seqlen,
+            dropout_p=0.0,
+            softmax_scale=self.scale,
             causal=False,
-            sm_scale=self.scale,
-            q_data_type=self.dtype,
-            kv_data_type=self.dtype,
         )
-        self._planned = True
-
-    def run(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
-    ) -> torch.Tensor:
-        assert self._planned, "ViTAttentionBackend.run() before plan()"
-        return self.wrapper.run(q, k, v)
