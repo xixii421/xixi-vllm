@@ -1,8 +1,18 @@
+"""vllm-v3 统一入口 — FlashInfer + CUDA Graph + Continuous Batching。
+
+用法:
+    python run.py                                    # 单条推理（使用 config.yaml）
+    python run.py --compile                          # 启用 Decode CUDA Graph
+    python run.py --batch                            # 批量推理演示
+"""
+
 from __future__ import annotations
 
 import argparse
 import time
 from pathlib import Path
+
+import yaml
 
 from src import Engine, EngineConfig, SamplingParams
 from src.models.hub import (
@@ -14,65 +24,117 @@ from src.models.hub import (
     verify_models,
 )
 
+# ---------------------------------------------------------------------------
+# 配置加载
+# ---------------------------------------------------------------------------
 
-def _resolve_model_path(name: str) -> Path:
+HERE = Path(__file__).resolve().parent
+
+DEFAULTS = {
+    "model": "Qwen3-0.6B",
+    "prompt": "Hello, my name is",
+    "max_new_tokens": 200,
+    "temperature": 0.9,
+    "top_p": 0.95,
+    "top_k": 20,
+    "enforce_eager": True,
+    "dtype": "auto",
+    "context_len": 4096,
+    "max_num_seqs": 256,
+    "max_num_batched_tokens": 8192,
+    "mix_prefill_decode": True,
+    "kvcache_block_size": 256,
+    "prefix_backend": "hash",
+    "gpu_memory_utilization": 0.9,
+    "num_kvcache_blocks": 0,
+    "flashinfer_use_tensor_cores": True,
+    "flashinfer_non_blocking": True,
+}
+
+
+def load_config(path: Path) -> dict:
+    if path.is_file():
+        with open(path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    else:
+        cfg = {}
+    return {k: cfg.get(k, v) for k, v in DEFAULTS.items()}
+
+
+# ---------------------------------------------------------------------------
+# 核心逻辑
+# ---------------------------------------------------------------------------
+
+
+def _resolve_model(name: str) -> Path:
     path = Path(name).expanduser()
-    if path.exists():
-        return path
-    return DEFAULT_CACHE_DIR / name
+    return path if path.exists() else DEFAULT_CACHE_DIR / name
 
 
-def run_inference(
-    model: str,
-    *,
-    prompt: str = "Hello, my name is",
-    max_new_tokens: int = 200,
-    temperature: float = 0.9,
-    top_p: float = 0.95,
-    top_k: int = 20,
-    enforce_eager: bool = False,
-) -> None:
-    model_path = _resolve_model_path(model)
+def run_single(cfg: dict) -> None:
+    model_path = _resolve_model(cfg["model"])
     print(f"Loading {model_path} ...")
     engine = Engine(
-        EngineConfig(model=str(model_path), enforce_eager=enforce_eager, max_num_seqs=8)
+        EngineConfig(
+            model=str(model_path),
+            enforce_eager=cfg["enforce_eager"],
+            dtype=cfg["dtype"],
+            context_len=cfg["context_len"],
+            max_num_seqs=cfg["max_num_seqs"],
+            max_num_batched_tokens=cfg["max_num_batched_tokens"],
+            mix_prefill_decode=cfg["mix_prefill_decode"],
+            kvcache_block_size=cfg["kvcache_block_size"],
+            prefix_backend=cfg["prefix_backend"],
+            gpu_memory_utilization=cfg["gpu_memory_utilization"],
+            num_kvcache_blocks=cfg["num_kvcache_blocks"],
+            flashinfer_use_tensor_cores=cfg["flashinfer_use_tensor_cores"],
+            flashinfer_non_blocking=cfg["flashinfer_non_blocking"],
+        )
     )
 
+    prompt = cfg["prompt"]
     print(f"Prompt: {prompt}\n{prompt}", end="", flush=True)
     start = time.perf_counter()
     n = 0
     for tok in engine.generate(
         prompt,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
+        max_new_tokens=cfg["max_new_tokens"],
+        temperature=cfg["temperature"],
+        top_p=cfg["top_p"],
+        top_k=cfg["top_k"],
     ):
         print(tok, end="", flush=True)
         n += 1
-
     elapsed = time.perf_counter() - start
     print(f"\n\n{n} tokens in {elapsed:.2f}s ({n / elapsed:.1f} tok/s)")
 
 
-def run_batch(
-    model: str,
-    *,
-    max_new_tokens: int = 32,
-    enforce_eager: bool = False,
-) -> None:
-    model_path = _resolve_model_path(model)
+def run_batch(cfg: dict) -> None:
+    model_path = _resolve_model(cfg["model"])
     print(f"Loading {model_path} for continuous batching ...")
     engine = Engine(
-        EngineConfig(model=str(model_path), enforce_eager=enforce_eager, max_num_seqs=8)
+        EngineConfig(
+            model=str(model_path),
+            enforce_eager=cfg["enforce_eager"],
+            max_num_seqs=cfg["max_num_seqs"],
+            max_num_batched_tokens=cfg["max_num_batched_tokens"],
+            mix_prefill_decode=cfg["mix_prefill_decode"],
+            kvcache_block_size=cfg["kvcache_block_size"],
+            prefix_backend=cfg["prefix_backend"],
+            gpu_memory_utilization=cfg["gpu_memory_utilization"],
+            num_kvcache_blocks=cfg["num_kvcache_blocks"],
+            flashinfer_use_tensor_cores=cfg["flashinfer_use_tensor_cores"],
+            flashinfer_non_blocking=cfg["flashinfer_non_blocking"],
+        )
     )
+
     prompts = [
         "Hello, my name is",
         "Once upon a time",
         "The capital of France is",
         "In machine learning,",
     ]
-    sp = SamplingParams(temperature=0.0, max_tokens=max_new_tokens)
+    sp = SamplingParams(temperature=0.0, max_tokens=cfg["max_new_tokens"])
     start = time.perf_counter()
     outs = engine.generate_batch(prompts, sp)
     elapsed = time.perf_counter() - start
@@ -82,72 +144,62 @@ def run_batch(
     print(f"\nBatch: {len(prompts)} reqs, ~{total_tok} toks in {elapsed:.2f}s")
 
 
-def main() -> None:
-    names = ", ".join(s.local_name for s in QWEN3_REGISTRY)
-    parser = argparse.ArgumentParser(
-        description="vllm-v3 Qwen3 inference (FlashInfer + CUDA Graph + Continuous Batching)"
-    )
-    parser.add_argument(
-        "--model",
-        default="Qwen3-0.6B",
-        help=f"local dir under {DEFAULT_CACHE_DIR} or absolute path",
-    )
-    parser.add_argument("--prompt", default="Hello, my name is")
-    parser.add_argument("--max-new-tokens", type=int, default=200)
-    parser.add_argument("--temperature", type=float, default=0.9)
-    parser.add_argument("--top-p", type=float, default=0.95)
-    parser.add_argument("--top-k", type=int, default=20)
-    parser.add_argument(
-        "--compile",
-        action="store_true",
-        help="disable enforce_eager to enable Decode CUDA Graph",
-    )
-    parser.add_argument(
-        "--batch",
-        action="store_true",
-        help="run a small continuous-batching demo on 4 prompts",
-    )
-    parser.add_argument("--download", action="store_true")
-    parser.add_argument("--verify-all", action="store_true")
-    parser.add_argument("--list", action="store_true")
-    args = parser.parse_args()
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
+
+def main() -> None:
+    p = argparse.ArgumentParser(
+        description="vllm-v3 FlashInfer + CUDA Graph + Continuous Batching"
+    )
+    p.add_argument("--config", default=None, help="YAML 配置文件路径")
+    p.add_argument("--model", default=None)
+    p.add_argument("--prompt", default=None)
+    p.add_argument("--max-new-tokens", type=int, default=None)
+    p.add_argument("--temperature", type=float, default=None)
+    p.add_argument("--top-p", type=float, default=None)
+    p.add_argument("--top-k", type=int, default=None)
+    p.add_argument("--compile", action="store_true", help="启用 Decode CUDA Graph")
+    p.add_argument("--prefix-backend", choices=("none", "hash", "radix"), default=None)
+    p.add_argument("--max-num-seqs", type=int, default=None)
+    p.add_argument("--batch", action="store_true", help="运行批量推理演示")
+    p.add_argument("--download", action="store_true")
+    p.add_argument("--verify-all", action="store_true")
+    p.add_argument("--list", action="store_true")
+    args = p.parse_args()
+
+    # 管理命令
     if args.list:
         vram = gpu_memory_gb() or 24.0
         selected = select_models_for_vram(vram_gb=vram)
-        print(f"Cache dir: {DEFAULT_CACHE_DIR}")
-        print(f"GPU VRAM:  {vram:.1f} GB")
-        print(f"Registry:  {names}")
-        print(f"Selected for verify-all: {', '.join(s.local_name for s in selected)}")
+        print(f"Cache: {DEFAULT_CACHE_DIR}")
+        print(f"VRAM:  {vram:.1f} GB")
+        print(f"All:   {', '.join(s.local_name for s in QWEN3_REGISTRY)}")
+        print(f"Fit:   {', '.join(s.local_name for s in selected)}")
         return
-
     if args.verify_all:
         verify_models(download=True)
         return
-
     if args.download:
         print(f"Downloading to {DEFAULT_CACHE_DIR} ...")
         download_models(list(QWEN3_REGISTRY))
         print("Done.")
         return
 
-    if args.batch:
-        run_batch(
-            args.model,
-            max_new_tokens=min(args.max_new_tokens, 64),
-            enforce_eager=not args.compile,
-        )
-        return
+    config_path = Path(args.config) if args.config else HERE / "config.yaml"
+    cfg = load_config(config_path)
+    for key in ("model", "prompt", "max_new_tokens", "temperature", "top_p", "top_k",
+                "prefix_backend", "max_num_seqs"):
+        if (v := getattr(args, key)) is not None:
+            cfg[key] = v
+    if args.compile:
+        cfg["enforce_eager"] = False
 
-    run_inference(
-        args.model,
-        prompt=args.prompt,
-        max_new_tokens=args.max_new_tokens,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-        enforce_eager=not args.compile,
-    )
+    if args.batch:
+        run_batch(cfg)
+    else:
+        run_single(cfg)
 
 
 if __name__ == "__main__":

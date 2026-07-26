@@ -1,49 +1,61 @@
 # vllm-v2 — Continuous Batching
 
-在 **v1**（分页 KV + PagedAttention 契约 + hash/radix 前缀）之上加入多请求调度。
+> 在 v1（KV Cache + 前缀）之上加入多请求调度，引入"控制面 / 数据面 / 计算面"三面分离架构。
 
-**设计说明（推荐阅读）**：[docs/00-V2版本设计解释.md](docs/00-V2版本设计解释.md)（CB 动机） · [docs/02-代码架构与三面分离.md](docs/02-代码架构与三面分离.md)（源码怎么拆） · [docs/01-相比v1的增改.md](docs/01-相比v1的增改.md)
+---
 
-| 平面 | 职责 | 路径 |
-| --- | --- | --- |
-| **控制面** | waiting/running、chunked prefill、PD 混跑、preempt | `src/engine/scheduler.py` |
-| **数据面** | 组 batch、绑 `ForwardContext`、跑模型、采样 | `src/engine/model_runner.py` |
-| **计算面** | Attention / PagedStore / Qwen3 / Sampler | `src/layers/` · `src/pagedattention/` · `src/model*.py` |
+## 相对 v1 新增
 
-`Engine` 只做组装：`step = schedule → run → postprocess`。
+| 新增能力 | 对应模块 | 说明 |
+|---------|---------|------|
+| Continuous Batching | `src/engine/scheduler.py` | waiting/running 队列，每步 schedule → run → postprocess |
+| Chunked Prefill | 同上 | 长 prompt 切块，与 decode 混合调度 |
+| PD 混跑 | 同上 | `mix_prefill_decode`：decode 优先 + 剩余 budget 给 prefill |
+| SamplingParams | `src/sampling_params.py` | 独立采样参数类（temperature / max_tokens / top_p） |
+| `generate_batch()` | `src/engine/engine.py` | 批量请求并行生成 |
+| 三面分离 | `scheduler.py` / `model_runner.py` / `layers/` | 控制面 / 数据面 / 计算面解耦 |
+| 序列管理 | `src/kv/sequence.py` | 多请求 Sequence 生命周期 |
+
+---
 
 ## 快速开始
 
 ```bash
 cd vllm-v2
-source ../.venv/bin/activate   
 
-python run.py --model Qwen3-0.6B --temperature 0 --max-new-tokens 32
-python run.py --model Qwen3-0.6B --batch --max-new-tokens 16
+# 单条推理
+python run.py --model Qwen3-0.6B
 
+# 批量推理
+python run.py --batch
+
+# 性能对比（v0/v1/v2）
 python -m bench.compare --model Qwen3-0.6B
-python -m bench.compare --model Qwen3-0.6B --batch-size 4 --max-new 32,64 --skip-prefix
 
-# Chunked P+D 混跑：看的是公平性（dec@P / short_P），不是总吞吐
+# Chunked P+D 混跑公平性测试
 python -m bench.compare_chunked --model Qwen3-0.6B --budget 32 --long-prompt 512 --conc 2,4
-python -m bench.compare_chunked --model Qwen3-0.6B --skip-uniform --budget 32 --long-prompt 512
 ```
 
-## 布局
+---
 
-```text
-src/
-  config.py / sampling_params.py
-  kv/                 # 块池 + 前缀（与 v1 对齐命名）+ 多请求 Sequence
-  pagedattention/     # slots + PagedStore（公开: slots_tensor / PagedStore）
-  layers/             # Attention 支持 Decode 多请求
-  model*.py sampler   # 计算面
-  engine/
-    scheduler.py      # 控制面
-    model_runner.py   # 数据面
-    engine.py         # 门面（含 reset_kv）
-bench/                # v0/v1/v2 对比
-```
+## 核心源码
 
+| 文件 | v1→v2 |
+|------|-------|
+| `src/engine/scheduler.py` | **新增** — 控制面：waiting/running、chunked prefill、PD 混跑 |
+| `src/engine/model_runner.py` | **新增** — 数据面：组 batch、绑 context、跑模型、采样 |
+| `src/engine/engine.py` | **改写** — step = schedule → run → postprocess，新增 `generate_batch()` |
+| `src/kv/sequence.py` | **新增** — 多请求 Sequence |
+| `src/kv/block_manager.py` | **新增** — 多请求 block 分配/释放 |
+| `src/sampling_params.py` | **新增** — 采样参数 dataclass |
+| `src/config.py` | **扩展** — `max_num_seqs` / `max_num_batched_tokens` |
 
+---
 
+## 文档
+
+| 文档 | 说明 |
+|------|------|
+| [00-V2版本设计解释.md](docs/00-V2版本设计解释.md) | Continuous Batching 动机 |
+| [01-相比v1的增改.md](docs/01-相比v1的增改.md) | v1 → v2 逐个差异文件清单 |
+| [02-代码架构与三面分离.md](docs/02-代码架构与三面分离.md) | 控制面 / 数据面 / 计算面架构详解 |

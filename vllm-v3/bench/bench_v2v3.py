@@ -39,8 +39,8 @@ SINGLE_OUT_LENS = [("TTFT_1tok", 1), ("short_32tok", 32), ("med_128tok", 128), (
 BATCH_SIZES = [1, 2, 4, 8]
 
 # Warmup / measurement rounds
-WARMUP = 4
-ITERS = 8
+WARMUP = 2
+ITERS = 5
 
 
 def sync():
@@ -212,10 +212,10 @@ def main():
 
         # Create engine
         factory_map = {
-            "v2": make_v2,
-            "v2-compile": make_v2_compile,
-            "v3": make_v3,
-            "v3-cudagraph": make_v3_cudagraph,
+            "v2_eager": make_v2,
+            "v2_compile": make_v2_compile,
+            "v3_eager": make_v3,
+            "v3_cudagraph": make_v3_cudagraph,
         }
         fn = factory_map[args.version]
 

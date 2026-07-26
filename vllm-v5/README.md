@@ -1,42 +1,66 @@
-# vllm-v7
+# vllm-v5 — 生产级推理引擎架构
 
-教学向连续批处理引擎：控制面（Engine / Scheduler）与计算面（ModelRunner / layers）分离。
+> 面向生产环境的完整推理引擎：多 GPU 分布式、模块化 runtime、FP8/FP4 量化、MLA/DeepSeek 支持。
 
-## 文档
+---
 
-- 架构：[`docs/README.md`](docs/README.md)（控制/计算、调度流、计算流）
-- 设计约定：[`DESIGN.md`](DESIGN.md)
+## 相对 v4 新增
 
-## 入口
+| 新增能力 | 对应模块 | 说明 |
+|---------|---------|------|
+| 多 GPU 分布式 | `src/distributed/` | tensor/pipeline/expert parallelism |
+| 模块化 runtime | `src/runtime/` | runner / input / execute / vision 分层 |
+| 配置系统 | `src/config/` | 多文件配置（model / engine / server / parallel） |
+| MoE 支持 | `src/layers/moe/` | expert routing + load balancing |
+| FP8/FP4 量化 | 各层量化 kernel | 低精度 GEMM + attention |
+| MLA (Multi-Latent Attention) | `src/layers/` | DeepSeek-V2/V3 风格注意力 |
+| Benchmark 框架 | `bench/lib/` + `bench/suites/` | 完整的微基准 + 端到端对比套件 |
+| 调度层 | `src/scheduling/` | 更精细的 scheduler，prefix 独立模块 |
+
+---
+
+## 快速开始
 
 ```bash
+cd vllm-v5
+
 # 公共 API
 from src import Engine, EngineConfig, SamplingParams
 
-# 微基准（bench/lib）
+# 微基准
 PYTHONPATH=. python -m bench.run --suite e2e,ttft,decode
 
-# vs 官方 vLLM（CG 矩阵）
-PYTHONPATH=. python scripts/bench_vs_vllm_full.py --mode cg --suite text
-
-# 模型下载辅助
-PYTHONPATH=. python scripts/hub.py --help
+# 单元测试
+pytest tests/unit -q
+pytest tests/gpu -q
+pytest tests/distributed -q
 ```
 
-## 测试
-
-```bash
-pytest tests/unit -q          # CPU 快测
-pytest tests/gpu -q           # 单卡
-pytest tests/distributed -q   # 多卡
-```
+---
 
 ## 目录
 
 ```text
-src/           引擎核心
-docs/          架构讲义
-bench/lib/     微基准核心库
-scripts/       少量 CLI（对比 / hub / 分片）
-tests/         精简 unit / gpu / distributed
+src/
+  config/          配置系统（model / engine / server / parallel）
+  scheduling/      调度 + prefix 管理
+  runtime/         模块化推理运行时
+    runner/        ModelRunner 实现
+    input/         输入处理
+    execute/       forward 执行
+    vision/        多模态处理
+  layers/          算子层（attention / norm / activation / moe）
+  models/          模型实现
+  cuda_graph/      CUDA Graph 管理
+  distributed/     分布式通信
+  sampling/        采样
+  utils/           工具函数
 ```
+
+---
+
+## 文档
+
+| 文档 | 说明 |
+|------|------|
+| [docs/README.md](docs/README.md) | 架构总览（控制/计算分离、调度流、计算流） |

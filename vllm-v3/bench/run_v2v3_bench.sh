@@ -11,29 +11,20 @@ OUT_DIR="/tmp/v2v3_bench"
 
 mkdir -p "$OUT_DIR"
 
-# ── Configurations to test ──
-# Format: version_label  pythonpath_suffix  model_dir  engine_arg
-CONFIGS=(
-  "v2_eager      vllm-v2  Qwen3-0.6B  ''"
-  "v2_compile    vllm-v2  Qwen3-0.6B  '--compile'"
-  "v3_eager      vllm-v3  Qwen3-0.6B  ''"
-)
 MODELS=("Qwen3-0.6B" "Qwen3-1.7B" "Qwen3-4B")
 
 # ── Functions ──
 
 clean_gpu() {
-    # Kill any leftover compile workers and reclaim GPU memory
     pkill -f "compile_worker" 2>/dev/null || true
     source "$VENV"
-    python -c "import torch; torch.cuda.empty_cache(); torch.cuda.synchronize()"
+    python -c "import torch; torch.cuda.empty_cache(); torch.cuda.synchronize()" 2>/dev/null
 }
 
 bench_config() {
     local label="$1"
     local pypath="$2"
     local model="$3"
-    local extra="$4"
     local model_path="$MODEL_DIR/$model"
     local out="$OUT_DIR/${label}_${model}.json"
 
@@ -42,6 +33,7 @@ bench_config() {
         return
     fi
 
+    echo ""
     echo ">>> BENCH: $label  model=$model"
     clean_gpu
 
@@ -53,41 +45,27 @@ bench_config() {
         2>&1
 
     echo "<<< DONE: $label $model"
-    echo ""
 }
 
-# ── Run all configurations (0.6B first, then 1.7B, then 4B) ──
+# ── Run benchmarks ──
 
 for model in "${MODELS[@]}"; do
     echo ""
     echo "========================================"
     echo "  MODEL: $model"
     echo "========================================"
-    echo ""
 
-    case "$model" in
-        Qwen3-0.6B)
-            # All configs for 0.6B
-            bench_config "v2_eager"    "vllm-v2" "$model" ""
-            bench_config "v2_compile"  "vllm-v2" "$model" ""
-            bench_config "v3_eager"    "vllm-v3" "$model" ""
-            bench_config "v3_cudagraph" "vllm-v3" "$model" ""
-            ;;
-        Qwen3-1.7B)
-            # All configs for 1.7B
-            bench_config "v2_eager"    "vllm-v2" "$model" ""
-            bench_config "v2_compile"  "vllm-v2" "$model" ""
-            bench_config "v3_eager"    "vllm-v3" "$model" ""
-            bench_config "v3_cudagraph" "vllm-v3" "$model" ""
-            ;;
-        Qwen3-4B)
-            # All configs for 4B
-            bench_config "v2_eager"    "vllm-v2" "$model" ""
-            bench_config "v2_compile"  "vllm-v2" "$model" ""
-            bench_config "v3_eager"    "vllm-v3" "$model" ""
-            bench_config "v3_cudagraph" "vllm-v3" "$model" ""
-            ;;
-    esac
+    # v2 eager
+    bench_config "v2_eager" "vllm-v2" "$model"
+
+    # v2 compile
+    bench_config "v2_compile" "vllm-v2" "$model"
+
+    # v3 eager
+    bench_config "v3_eager" "vllm-v3" "$model"
+
+    # v3 cudagraph
+    bench_config "v3_cudagraph" "vllm-v3" "$model"
 done
 
 echo ""

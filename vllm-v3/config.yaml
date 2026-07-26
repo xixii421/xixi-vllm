@@ -1,0 +1,34 @@
+# ============================================================
+# vllm 统一配置文件（v3 — FlashInfer + CUDA Graph）
+# 命令行参数会覆盖此处的默认值
+# ============================================================
+
+# --- 模型 ---
+model: "Qwen3-0.6B"
+
+# --- 推理参数 ---
+prompt: "Hello, my name is"
+max_new_tokens: 200
+temperature: 0.9
+top_p: 0.95
+top_k: 20
+
+# --- 引擎 ---
+enforce_eager: false  # false=启用 Decode CUDA Graph
+dtype: "auto"
+context_len: 4096
+
+# --- 调度器 ---
+max_num_seqs: 256
+max_num_batched_tokens: 8192
+mix_prefill_decode: true
+
+# --- KV Cache ---
+kvcache_block_size: 256  # FlashInfer 要求 256 的倍数
+prefix_backend: "hash"   # none / hash / radix
+gpu_memory_utilization: 0.9
+num_kvcache_blocks: 0    # 0=自动计算
+
+# --- FlashInfer 算子 ---
+flashinfer_use_tensor_cores: true
+flashinfer_non_blocking: true

@@ -1,58 +1,66 @@
-# vllm-v0
+# vllm-v0 — 最小自回归推理
 
-最小可运行的 Qwen3 自回归推理：单请求、全序列重算、SDPA Attention、可选采样策略。
+> 从零实现 Qwen3 单请求自回归推理：完整模型骨架、SDPA Attention、可选采样策略。
 
-## 上手
+---
+
+## 相对于无（起点）
+
+| 能力 | 说明 |
+|------|------|
+| Qwen3 模型骨架 | RMSNorm → QKV proj → RoPE → Attention → SwiGLU FFN |
+| 权重加载 | safetensors 流式读取 + HuggingFace config |
+| SDPA Attention | `F.scaled_dot_product_attention`，因果 mask |
+| 采样策略 | temperature / top-k / top-p / min-p |
+| 流式输出 | `generate()` 逐 token yield |
+
+**限制：** 无 KV Cache，每步重算全部历史 token。
+
+---
+
+## 快速开始
 
 ```bash
 cd vllm-v0
-# 列出缓存与当前显存能装下的模型
-python run.py --list
 
-# 下载注册表中的公开权重（默认缓存见 src/model_hub.py）
-# 一定要在src/model_hub.py中修改权重存储路径！！！！！
+# 下载模型（需先修改 src/model_hub.py 中的缓存路径）
 python run.py --download
 
-# 推理
+# 推理（默认从 config.yaml 读取参数）
 python run.py --model Qwen3-0.6B --prompt "Hello, my name is"
+
+# 列出可用模型
+python run.py --list
 ```
 
-## 目录结构
+---
 
-```
-vllm-v0/
-├── README.md                 ← 本页
-├── run.py                    命令行入口
-├── docs/                     讲义
-└── src/
-    ├── config.py             引擎配置
-    ├── engine.py             加载模型 + generate 循环
-    ├── model.py              Qwen3 骨架与权重装载
-    ├── model_loader.py       safetensors 流式读取
-    ├── model_hub.py          下载 / 校验辅助
-    ├── sampler.py            logits → token id
-    └── layers/
-        ├── layernorm.py      RMSNorm（可融合残差）
-        ├── rotary.py         RoPE
-        ├── attention.py      GQA + SDPA
-        └── activation.py     SiluAndMul（SwiGLU）
-```
+## 核心源码
 
-## 推荐阅读顺序
+| 文件 | 内容 |
+|------|------|
+| `src/engine.py` | Engine：`encode → forward → sample → yield` |
+| `src/model.py` | Qwen3 骨架 + 层堆叠 + `forward()` |
+| `src/model_loader.py` | safetensors 权重装载 |
+| `src/sampler.py` | logits → token（temperature / top-k / top-p） |
+| `src/config.py` | EngineConfig（model / dtype / enforce_eager） |
+| `src/layers/layernorm.py` | RMSNorm |
+| `src/layers/rotary.py` | RoPE 位置编码 |
+| `src/layers/attention.py` | GQA + SDPA |
+| `src/layers/activation.py` | SiluAndMul（SwiGLU） |
 
-讲义在 `docs/`，源码路径写在各篇开头。建议按这条路径读，和代码依赖方向一致。
+---
 
-| 顺序 | 文档 | 对应源码 | 这一步弄清什么 |
-| :---: | :--- | :--- | :--- |
-| 1 | [architecture.md](./docs/architecture.md) | 全局 | 为什么需要推理编排；本目录怎么自回归循环 |
-| 2 | [layers/rmsnorm.md](./docs/layers/rmsnorm.md) | `src/layers/layernorm.py` | Pre-Norm 与 fused residual |
-| 3 | [layers/rotary.md](./docs/layers/rotary.md) | `src/layers/rotary.py` | 位置如何旋进 Q/K |
-| 4 | [layers/attention.md](./docs/layers/attention.md) | `src/layers/attention.py` | GQA + 因果 SDPA |
-| 5 | [layers/activation.md](./docs/layers/activation.md) | `src/layers/activation.py` | SwiGLU 的 SiLU× 门控 |
-| 6 | [layers.md](./docs/layers.md) | `src/layers/*` + 模型侧装配 | Attention / MLP / Decoder 数据流总览 |
-| 7 | [model.md](./docs/model.md) | `src/model.py`、`model_loader.py` | 层如何堆成 Qwen3；权重如何灌进骨架 |
-| 8 | [sampler.md](./docs/sampler.md) | `src/sampler.py` | temperature / top-k / top-p / min-p |
-| 9 | [engine.md](./docs/engine.md) | `src/engine.py`、`run.py` | 编排：encode → forward → sample → yield |
+## 文档
 
-
-
+| 顺序 | 文档 | 弄清什么 |
+|:--:|------|---------|
+| 1 | [architecture.md](docs/architecture.md) | 自回归循环全貌 |
+| 2 | [layers.md](docs/layers.md) | Attention / MLP / Decoder 数据流 |
+| 3 | [layers/rmsnorm.md](docs/layers/rmsnorm.md) | Pre-Norm + fused residual |
+| 4 | [layers/rotary.md](docs/layers/rotary.md) | 位置如何旋进 Q/K |
+| 5 | [layers/attention.md](docs/layers/attention.md) | GQA + 因果 SDPA |
+| 6 | [layers/activation.md](docs/layers/activation.md) | SwiGLU 的 SiLU 门控 |
+| 7 | [model.md](docs/model.md) | 层堆叠 + 权重装载 |
+| 8 | [sampler.md](docs/sampler.md) | 采样策略实现 |
+| 9 | [engine.md](docs/engine.md) | encode → forward → sample 编排 |

@@ -1,0 +1,41 @@
+# ============================================================
+# vllm 统一配置文件（v4 — FlashInfer + CUDA Graph + 多模态）
+# 命令行参数会覆盖此处的默认值
+# ============================================================
+
+# --- 模型 ---
+model: "Qwen3-0.6B"
+
+# --- 推理参数 ---
+prompt: "Hello, my name is"
+max_new_tokens: 200
+temperature: 0.9
+top_p: 0.95
+top_k: 20
+
+# --- 引擎 ---
+enforce_eager: null    # null=auto（VL 默认开 CG，text 默认 eager）；true=强制 eager；false=强制 CG
+compile_prefill: null  # null=auto（CG 开启时自动 compile prefill）
+dtype: "auto"
+context_len: 4096
+
+# --- 调度器 ---
+max_num_seqs: 256
+max_num_batched_tokens: 8192
+mix_prefill_decode: true
+
+# --- KV Cache ---
+kvcache_block_size: 256
+prefix_backend: "hash"
+gpu_memory_utilization: 0.9
+num_kvcache_blocks: 0  # 0=自动计算
+
+# --- FlashInfer ---
+flashinfer_use_tensor_cores: true
+flashinfer_non_blocking: true
+
+# --- 多模态 (v4 新增, 仅 VL 模型生效) ---
+enable_vit_cuda_graph: null  # null=auto（VL + CG 开启时自动启用）
+vit_cg_token_budgets: [64, 128, 256, 512, 1024]
+vit_cg_max_batch_size: 1
+encoder_compute_budget: 0    # 0=与 max_num_batched_tokens 相同
