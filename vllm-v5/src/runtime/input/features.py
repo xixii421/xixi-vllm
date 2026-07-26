@@ -52,6 +52,12 @@ def build_mm_features(
             pv = pixel_values[offset : offset + n_patches].contiguous()
             offset += n_patches
         uid = hash_image_pixels(pv)
+        g_tuple = None
+        g_cpu = None
+        if isinstance(g, torch.Tensor):
+            g_cpu = g.cpu()
+            flat = g_cpu.view(-1, 3)[0].tolist()
+            g_tuple = (int(flat[0]), int(flat[1]), int(flat[2]))
         features.append(
             MultiModalFeature(
                 modality="image",
@@ -60,7 +66,8 @@ def build_mm_features(
                 end=span.end,
                 num_encoder_tokens=span.num_encoder_tokens,
                 uid=uid,
-                grid_thw=g.cpu() if isinstance(g, torch.Tensor) else g,
+                grid_thw=g_cpu,
+                grid_thw_tuple=g_tuple,
             )
         )
     return features

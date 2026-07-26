@@ -96,7 +96,9 @@ class Qwen3VLForCausalLM(nn.Module):
         self.lm_head = nn.Linear(self._tcfg.hidden_size, self._tcfg.vocab_size, bias=False)
         self._tie = bool(getattr(self._tcfg, "tie_word_embeddings", False))
         self._ndps = len(getattr(config.vision_config, "deepstack_visual_indexes", []) or [])
-        self._encoder_cache = EncoderCache(256)
+        # Token budget (not entry count) — aligns with official EncoderCacheManager.
+        self._encoder_cache = EncoderCache(max_tokens=16384)
+        self._encoder_cg_ready = False
 
     def forward(self, input_ids=None, positions=None, inputs_embeds=None, deepstack_input_embeds=None):
         return self.vl_model(
@@ -112,7 +114,16 @@ class Qwen3VLForCausalLM(nn.Module):
     def _mrope_module(self):
         return self.vl_model.layers[0].self_attn.rotary_emb
 
-    def load_weights(self, model_path: str, device: torch.device, dtype: torch.dtype) -> None:
+    def load_weights(
+        self,
+        model_path: str,
+        device: torch.device,
+        dtype: torch.dtype,
+        *,
+        warm_vit_cg: bool = False,
+        vit_cg_token_budgets: tuple[int, ...] | list[int] | None = None,
+        vit_cg_max_batch_size: int = 1,
+    ) -> None:
         hf_sd = {}
         for f in sorted(glob.glob(os.path.join(model_path, "model*.safetensors"))):
             from safetensors import safe_open
@@ -121,6 +132,8 @@ class Qwen3VLForCausalLM(nn.Module):
                 hf_sd.update({k: s.get_tensor(k) for k in s.keys() if k.startswith("model.visual.")})
         vc = AutoConfig.from_pretrained(model_path, trust_remote_code=True).vision_config
         self.vision_tower.load_weights(hf_sd, vc)
+        if self.vision_tower.vit is not None:
+            self.vision_tower.vit = self.vision_tower.vit.to(device=device, dtype=dtype)
 
         params = dict(self.named_parameters())
         attn0 = self.vl_model.layers[0].self_attn
@@ -177,6 +190,22 @@ class Qwen3VLForCausalLM(nn.Module):
             setattr(mod, leaf, buf.to(device=device, dtype=dtype if buf.is_floating_point() else buf.dtype))
         if self._tie:
             self.lm_head.weight.data = self.vl_model.embed_tokens.weight.data
+
+        self._encoder_cg_ready = False
+        if warm_vit_cg:
+            try:
+                budgets = list(vit_cg_token_budgets or (64, 128, 256, 512, 1024))
+                self.vision_tower.warm_cudagraph(
+                    token_budgets=budgets,
+                    max_batch_size=max(1, int(vit_cg_max_batch_size)),
+                )
+                self._encoder_cg_ready = True
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "Vision encoder CUDA Graph capture skipped: %s", e
+                )
 
     def encode_and_merge(self, input_ids, seqs, device):
         """Prefill: ViT encode (window + cache) → scatter embeds → MRoPE positions."""
@@ -252,9 +281,9 @@ class Qwen3VLForCausalLM(nn.Module):
             grids.append(torch.tensor([[t, h, w]], device=device, dtype=torch.int64))
             sizes.append((t * h * w) // (m * m))
         grid = torch.cat(grids, 0)
-        result = self.vision_tower(pv, grid_thw=grid)
-        flat = torch.cat(list(result), 0) if isinstance(result, tuple) else result
-        dps = self.vision_tower.deepstack_features
+        encoded = self.vision_tower.encode(pv, grid_thw=grid)
+        flat = encoded.embeds
+        dps = encoded.deepstack
 
         cur = 0
         for idx, mf, sz in zip(miss_i, miss_mf, sizes):
@@ -264,6 +293,7 @@ class Qwen3VLForCausalLM(nn.Module):
                 mf.deepstack = ds
             out[idx] = emb
             self._encoder_cache.put(mf.uid, emb, ds)
+            self._encoder_cache.retain(mf.uid, getattr(mf, "request_id", mf.uid))
             cur += sz
         return out
 

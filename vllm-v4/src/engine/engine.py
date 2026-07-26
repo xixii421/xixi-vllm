@@ -40,15 +40,38 @@ class Engine:
             from ..models.qwen3_vl import Qwen3VLForCausalLM
 
             self.model = Qwen3VLForCausalLM(config.hf_config)
-            self.model.load_weights(config.model, self.device, self.dtype)
+            self.model.load_weights(
+                config.model,
+                self.device,
+                self.dtype,
+                warm_vit_cg=False,  # after decode CG capture (avoids InferenceMode clash)
+            )
             self.model = self.model.eval()
+            self._pending_vit_cg = bool(config.enable_vit_cuda_graph)
         else:
             self.model = Qwen3ForCausalLM(config.hf_config)
             load_model(self.model, config.model)
             self.model = self.model.to(dtype=self.dtype, device=self.device).eval()
+            self._pending_vit_cg = False
 
         self.sampler = Sampler()
         self._init_kv()
+        if getattr(self, "_pending_vit_cg", False):
+            try:
+                self.model.vision_tower.warm_cudagraph(
+                    token_budgets=list(config.vit_cg_token_budgets),
+                    max_batch_size=config.vit_cg_max_batch_size,
+                )
+                self.model._encoder_cg_ready = True
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).warning("Vision CG capture skipped: %s", e)
+                self.model._encoder_cg_ready = False
+            print(
+                f"Vision CG: enable={config.enable_vit_cuda_graph} "
+                f"ready={getattr(self.model, '_encoder_cg_ready', False)}"
+            )
         self.last_num_cached_tokens = 0
         self._idle_steps = 0
         self._max_idle_steps = 1024
@@ -184,59 +207,45 @@ class Engine:
     ) -> tuple[list[MultiModalFeature], list[int]]:
         assert self.mm_processor is not None
         text = prompt if isinstance(prompt, str) else self.tokenizer.decode(prompt)
-        input_ids, pixel_values, mm_info, img_uids = self.mm_processor.process(
-            text, images
-        )
-        if pixel_values is None or not mm_info:
-            return [], list(input_ids)
+        mm = self.mm_processor.process(text, images)
+        pixel_values = mm.pixel_values
+        grid = mm.image_grid_thw
+        if pixel_values is None or not mm.mm_placeholders:
+            return [], list(mm.prompt_token_ids)
+
+        if grid is not None and grid.dim() == 1:
+            grid = grid.view(1, -1)
 
         features: list[MultiModalFeature] = []
-        patch_offsets = [0]
-        for info in mm_info:
-            g_tuple = info.get("grid_thw_tuple")
-            if g_tuple is None:
-                g = info.get("grid_thw")
-                if g is None:
-                    patch_offsets.append(patch_offsets[-1])
-                    continue
-                flat = g.detach().view(-1, 3)[0].tolist()
-                g_tuple = (int(flat[0]), int(flat[1]), int(flat[2]))
-            n_patches = int(g_tuple[0] * g_tuple[1] * g_tuple[2])
-            patch_offsets.append(patch_offsets[-1] + n_patches)
-
-        for i, info in enumerate(mm_info):
-            g_thw = info.get("grid_thw")
-            g_tuple = info.get("grid_thw_tuple")
-            if g_tuple is None and g_thw is not None:
-                flat = g_thw.detach().view(-1, 3)[0].tolist()
-                g_tuple = (int(flat[0]), int(flat[1]), int(flat[2]))
-            if g_thw is not None and g_thw.dim() == 1:
-                g_thw = g_thw.view(1, -1)
-            start_p, end_p = patch_offsets[i], patch_offsets[i + 1]
-            pv = (
-                pixel_values[start_p:end_p].contiguous()
-                if end_p > start_p
-                else pixel_values
-            )
-            if not pv.is_pinned:
+        patch_off = 0
+        for i, ph in enumerate(mm.mm_placeholders):
+            if grid is None or i >= grid.shape[0]:
+                continue
+            g_row = grid[i]
+            g_tuple = (int(g_row[0]), int(g_row[1]), int(g_row[2]))
+            n_patches = g_tuple[0] * g_tuple[1] * g_tuple[2]
+            pv = pixel_values[patch_off : patch_off + n_patches].contiguous()
+            patch_off += n_patches
+            # Pin at the engine boundary (not inside the processor cache).
+            is_pinned = pv.is_pinned
+            if not (is_pinned() if callable(is_pinned) else is_pinned):
                 pv = pv.pin_memory()
-            # uid from raw image hash (cheap); index disambiguates multi-image.
-            uid = img_uids[i] if i < len(img_uids) else f"img-{i}"
-            if len(img_uids) > 1:
+            uid = ph.mm_hash
+            if len(mm.mm_hashes) > 1:
                 uid = f"{uid}_{i}"
             features.append(
                 MultiModalFeature(
                     modality="image",
                     data=pv,
-                    start=info["start"],
-                    end=info["end"],
-                    num_encoder_tokens=info["num_encoder_tokens"],
+                    start=ph.offset,
+                    end=ph.offset + ph.length,
+                    num_encoder_tokens=ph.length,
                     uid=uid,
-                    grid_thw=g_thw.cpu() if g_thw is not None else None,
+                    grid_thw=g_row.view(1, -1).cpu(),
                     grid_thw_tuple=g_tuple,
                 )
             )
-        return features, list(input_ids)
+        return features, list(mm.prompt_token_ids)
 
     @staticmethod
     def _truncate_left(

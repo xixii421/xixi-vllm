@@ -36,6 +36,7 @@ class MultiModalFeature:
         "num_encoder_tokens",
         "uid",
         "grid_thw",
+        "grid_thw_tuple",
         "mrope_origin",
     )
 
@@ -48,6 +49,7 @@ class MultiModalFeature:
         num_encoder_tokens: int,
         uid: str,
         grid_thw: torch.Tensor | None = None,
+        grid_thw_tuple: tuple[int, int, int] | None = None,
         mrope_origin: int | None = None,
     ) -> None:
         self.modality = modality
@@ -57,6 +59,13 @@ class MultiModalFeature:
         self.num_encoder_tokens = num_encoder_tokens
         self.uid = uid
         self.grid_thw = grid_thw
+        if grid_thw_tuple is not None:
+            self.grid_thw_tuple = grid_thw_tuple
+        elif grid_thw is not None:
+            flat = grid_thw[0].tolist() if grid_thw.ndim == 2 else grid_thw.tolist()
+            self.grid_thw_tuple = (int(flat[0]), int(flat[1]), int(flat[2]))
+        else:
+            self.grid_thw_tuple = None
         self.mrope_origin = mrope_origin
 
     @property
@@ -73,6 +82,7 @@ class MultiModalFeature:
             num_encoder_tokens=self.num_encoder_tokens,
             uid=self.uid,
             grid_thw=self.grid_thw,
+            grid_thw_tuple=self.grid_thw_tuple,
             mrope_origin=self.mrope_origin,
         )
 

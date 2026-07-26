@@ -1,73 +1,53 @@
+import functools
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import triton
-import triton.language as tl
 
 from ..layers.vision import ViTAttentionBackend
 
 
-@triton.jit
-def _bilinear_pos_embed_kernel(
-    embed_ptr,
-    output_ptr,
-    H,
-    W,
-    h_scale,
-    w_scale,
-    NUM_GRID: tl.constexpr,
-    M_SIZE: tl.constexpr,
-    HIDDEN_DIM: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    spatial_idx = pid % (H * W)
-    num_blocks_w = W // M_SIZE
-    block_idx = spatial_idx // (M_SIZE * M_SIZE)
-    local_idx = spatial_idx % (M_SIZE * M_SIZE)
-    row = (block_idx // num_blocks_w) * M_SIZE + local_idx // M_SIZE
-    col = (block_idx % num_blocks_w) * M_SIZE + local_idx % M_SIZE
-    h_frac = row.to(tl.float32) * h_scale
-    w_frac = col.to(tl.float32) * w_scale
-    hf = tl.math.floor(h_frac).to(tl.int32)
-    wf = tl.math.floor(w_frac).to(tl.int32)
-    hc = tl.minimum(hf + 1, NUM_GRID - 1)
-    wc = tl.minimum(wf + 1, NUM_GRID - 1)
-    dh = h_frac - hf.to(tl.float32)
-    dw = w_frac - wf.to(tl.float32)
-    w11, w10, w01 = dh * dw, dh - dh * dw, dw - dh * dw
-    w00 = 1.0 - dh - w01
-    odt = output_ptr.dtype.element_ty
-    for d in tl.range(0, HIDDEN_DIM, BLOCK_D):
-        cols = d + tl.arange(0, BLOCK_D)
-        mask = cols < HIDDEN_DIM
-        val = (
-            w00.to(odt) * tl.load(embed_ptr + (hf * NUM_GRID + wf) * HIDDEN_DIM + cols, mask=mask)
-            + w01.to(odt) * tl.load(embed_ptr + (hf * NUM_GRID + wc) * HIDDEN_DIM + cols, mask=mask)
-            + w10.to(odt) * tl.load(embed_ptr + (hc * NUM_GRID + wf) * HIDDEN_DIM + cols, mask=mask)
-            + w11.to(odt) * tl.load(embed_ptr + (hc * NUM_GRID + wc) * HIDDEN_DIM + cols, mask=mask)
-        )
-        tl.store(output_ptr + pid * HIDDEN_DIM + cols, val, mask=mask)
-
-
 def _bilinear(embed_weight, t, h, w, num_grid, m_size, dtype):
     assert h % m_size == 0 and w % m_size == 0
-    hidden = embed_weight.shape[1]
-    out = torch.empty(t * h * w, hidden, device=embed_weight.device, dtype=dtype)
-    _bilinear_pos_embed_kernel[(t * h * w,)](
-        embed_weight,
-        out,
-        h,
-        w,
-        float(num_grid - 1) / float(h - 1) if h > 1 else 0.0,
-        float(num_grid - 1) / float(w - 1) if w > 1 else 0.0,
-        num_grid,
-        m_size,
-        hidden,
-        triton.next_power_of_2(hidden),
-    )
-    return out
+    device = embed_weight.device
+    side = num_grid
+
+    h_grid = torch.linspace(0, side - 1, h, device=device)
+    w_grid = torch.linspace(0, side - 1, w, device=device)
+    h_floor = h_grid.int()
+    w_floor = w_grid.int()
+    h_ceil = (h_floor + 1).clamp(max=side - 1)
+    w_ceil = (w_floor + 1).clamp(max=side - 1)
+    h_frac = h_grid - h_floor
+    w_frac = w_grid - w_floor
+    h_floor_offset = h_floor * side
+    h_ceil_offset = h_ceil * side
+
+    corner_indices = [
+        (h_floor_offset[:, None] + w_floor[None, :]).flatten(),
+        (h_floor_offset[:, None] + w_ceil[None, :]).flatten(),
+        (h_ceil_offset[:, None] + w_floor[None, :]).flatten(),
+        (h_ceil_offset[:, None] + w_ceil[None, :]).flatten(),
+    ]
+    corner_weights = [
+        ((1 - h_frac)[:, None] * (1 - w_frac)[None, :]).flatten(),
+        ((1 - h_frac)[:, None] * w_frac[None, :]).flatten(),
+        (h_frac[:, None] * (1 - w_frac)[None, :]).flatten(),
+        (h_frac[:, None] * w_frac[None, :]).flatten(),
+    ]
+
+    h_idx = torch.arange(h, device=device).view(h // m_size, m_size)
+    w_idx = torch.arange(w, device=device).view(w // m_size, m_size)
+    reorder = (h_idx[:, :, None, None] * w + w_idx[None, None, :, :]).transpose(1, 2).flatten()
+    if t > 1:
+        reorder = reorder.repeat(t)
+
+    indices = torch.stack([c[reorder] for c in corner_indices])  # [4, t*h*w]
+    weights = torch.stack([c[reorder] for c in corner_weights])  # [4, t*h*w]
+    # Match HF: bf16 embed * float weights → float accumulate → cast.
+    out = (embed_weight[indices].float() * weights.float().unsqueeze(-1)).sum(0)
+    return out.to(dtype=dtype)
 
 
 def _rotate_half(x):
@@ -75,8 +55,19 @@ def _rotate_half(x):
     return torch.cat((-x[..., d:], x[..., :d]), dim=-1)
 
 
+def _normalize_grids(grid_thw):
+    if isinstance(grid_thw, torch.Tensor):
+        if grid_thw.dim() == 1:
+            grid_thw = grid_thw.view(1, 3)
+        return grid_thw.tolist()
+    grids = list(grid_thw)
+    if grids and isinstance(grids[0], (int, float)):
+        grids = [grids]
+    return grids
+
+
 class Qwen3VisionPatchEmbed(nn.Module):
-    def __init__(self, in_channels=3, hidden_size=1152, patch_size=14, temporal_patch_size=2):
+    def __init__(self, in_channels=3, hidden_size=1152, patch_size=16, temporal_patch_size=2):
         super().__init__()
         self.in_channels = in_channels
         self.temporal_patch_size = temporal_patch_size
@@ -91,13 +82,15 @@ class Qwen3VisionPatchEmbed(nn.Module):
 
 
 class Qwen3VisionMLP(nn.Module):
-    def __init__(self, hidden_size, intermediate_size):
+    def __init__(self, hidden_size, intermediate_size, hidden_act: str = "gelu_pytorch_tanh"):
         super().__init__()
         self.fc1 = nn.Linear(hidden_size, intermediate_size)
         self.fc2 = nn.Linear(intermediate_size, hidden_size)
+        # Qwen3-VL vision_config.hidden_act == gelu_pytorch_tanh
+        self._approx = "tanh" if "tanh" in (hidden_act or "") else "none"
 
     def forward(self, x):
-        return self.fc2(F.gelu(self.fc1(x), approximate="tanh"))
+        return self.fc2(F.gelu(self.fc1(x), approximate=self._approx))
 
 
 class Qwen3VisionAttention(nn.Module):
@@ -124,12 +117,12 @@ class Qwen3VisionAttention(nn.Module):
 
 
 class Qwen3VisionBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads, intermediate_size):
+    def __init__(self, hidden_size, num_heads, intermediate_size, hidden_act: str = "gelu_pytorch_tanh"):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, eps=1e-6)
         self.norm2 = nn.LayerNorm(hidden_size, eps=1e-6)
         self.attn = Qwen3VisionAttention(hidden_size, num_heads)
-        self.mlp = Qwen3VisionMLP(hidden_size, intermediate_size)
+        self.mlp = Qwen3VisionMLP(hidden_size, intermediate_size, hidden_act)
 
     def forward(self, x, cos, sin, seqlens, offsets, attn):
         x = x + self.attn(self.norm1(x), cos, sin, seqlens, offsets, attn)
@@ -144,13 +137,15 @@ class Qwen3VisionPatchMerger(nn.Module):
         self.norm = nn.LayerNorm(merge if use_postshuffle_norm else hidden_size, eps=1e-6)
         self.fc1 = nn.Linear(merge, merge)
         self.fc2 = nn.Linear(merge, out_hidden_size)
+        # Official merger uses nn.GELU() (exact), not tanh approx.
+        self.act = nn.GELU()
 
     def forward(self, x):
         if self.use_postshuffle_norm:
             x = self.norm(x.view(-1, self.fc1.in_features))
         else:
             x = self.norm(x).view(-1, self.fc1.in_features)
-        return self.fc2(F.gelu(self.fc1(x)))
+        return self.fc2(self.act(self.fc1(x)))
 
 
 class Qwen3VisionTransformer(nn.Module):
@@ -159,7 +154,8 @@ class Qwen3VisionTransformer(nn.Module):
         c = vision_config
         self.hidden_size = c.hidden_size
         self.num_heads = c.num_heads
-        self.patch_size = getattr(c, "patch_size", 14)
+        # Qwen3-VL default patch_size is 16 (not Qwen2-VL's 14).
+        self.patch_size = getattr(c, "patch_size", 16)
         self.temporal_patch_size = getattr(c, "temporal_patch_size", 2)
         self.spatial_merge_size = getattr(c, "spatial_merge_size", 2)
         self.num_position_embeddings = getattr(c, "num_position_embeddings", 2304)
@@ -167,6 +163,7 @@ class Qwen3VisionTransformer(nn.Module):
         self.out_hidden_size = getattr(c, "out_hidden_size", c.hidden_size)
         self.deepstack_indexes = list(getattr(c, "deepstack_visual_indexes", []) or [])
         self.rotary_head_dim = self.hidden_size // self.num_heads // 2
+        hidden_act = getattr(c, "hidden_act", "gelu_pytorch_tanh")
 
         self.patch_embed = Qwen3VisionPatchEmbed(
             getattr(c, "in_channels", 3),
@@ -178,7 +175,7 @@ class Qwen3VisionTransformer(nn.Module):
         mid = getattr(c, "intermediate_size", 4304)
         self.blocks = nn.ModuleList(
             [
-                Qwen3VisionBlock(self.hidden_size, self.num_heads, mid)
+                Qwen3VisionBlock(self.hidden_size, self.num_heads, mid, hidden_act)
                 for _ in range(getattr(c, "depth", 24))
             ]
         )
@@ -193,6 +190,10 @@ class Qwen3VisionTransformer(nn.Module):
                 for _ in self.deepstack_indexes
             ]
         )
+        self.deepstack_index_to_module = {
+            idx: module
+            for idx, module in zip(self.deepstack_indexes, self.deepstack_merger_list)
+        }
         self._deepstack = None
         self._attn: ViTAttentionBackend | None = None
 
@@ -209,25 +210,61 @@ class Qwen3VisionTransformer(nn.Module):
         return self._attn
 
     def load_weights(self, state_dict: dict[str, torch.Tensor]) -> int:
+        """Load HF / fused / split-QKV vision weights into this module."""
         pfx = next(
             (p for p in ("model.visual.", "visual.", "") if any(k.startswith(p) for k in state_dict)),
             "",
         )
         params = dict(self.named_parameters())
         loaded = 0
+        hs = self.hidden_size
+
+        def _copy_slice(target_key: str, src: torch.Tensor, start: int, end: int) -> bool:
+            if target_key not in params:
+                return False
+            dst = params[target_key]
+            params[target_key].data[start:end].copy_(src.to(dtype=dst.dtype))
+            return True
+
         for hk, v in state_dict.items():
             if not hk.startswith(pfx):
                 continue
             nk = hk[len(pfx) :].replace("linear_fc1", "fc1").replace("linear_fc2", "fc2")
-            for a, b in (("attn.q.", "attn.qkv."), ("attn.k.", "attn.qkv."), ("attn.v.", "attn.qkv.")):
-                nk = nk.replace(a, b)
+
+            # Split Q/K/V → fused qkv (shard copy). Check before generic path.
+            if nk.endswith("attn.q.weight"):
+                t = nk.replace("attn.q.weight", "attn.qkv.weight")
+                loaded += int(_copy_slice(t, v, 0, hs))
+                continue
+            if nk.endswith("attn.k.weight"):
+                t = nk.replace("attn.k.weight", "attn.qkv.weight")
+                loaded += int(_copy_slice(t, v, hs, 2 * hs))
+                continue
+            if nk.endswith("attn.v.weight"):
+                t = nk.replace("attn.v.weight", "attn.qkv.weight")
+                loaded += int(_copy_slice(t, v, 2 * hs, 3 * hs))
+                continue
+            if nk.endswith("attn.q.bias"):
+                t = nk.replace("attn.q.bias", "attn.qkv.bias")
+                loaded += int(_copy_slice(t, v, 0, hs))
+                continue
+            if nk.endswith("attn.k.bias"):
+                t = nk.replace("attn.k.bias", "attn.qkv.bias")
+                loaded += int(_copy_slice(t, v, hs, 2 * hs))
+                continue
+            if nk.endswith("attn.v.bias"):
+                t = nk.replace("attn.v.bias", "attn.qkv.bias")
+                loaded += int(_copy_slice(t, v, 2 * hs, 3 * hs))
+                continue
+
             if nk in params:
                 params[nk].data.copy_(v.to(dtype=params[nk].dtype))
                 loaded += 1
         return loaded
 
     @staticmethod
-    def _rot_pos_ids(h, w, m):
+    @functools.lru_cache(maxsize=1024)
+    def _rot_pos_ids(h: int, w: int, m: int):
         hpos = np.broadcast_to(np.arange(h)[:, None], (h, w))
         wpos = np.broadcast_to(np.arange(w)[None, :], (h, w))
         hdiv, wdiv = h // m, w // m
@@ -240,7 +277,7 @@ class Qwen3VisionTransformer(nn.Module):
         for t, h, w in grid_list:
             p = self._rot_pos_ids(h, w, self.spatial_merge_size)
             ids.append(p.repeat(t, 1) if t > 1 else p)
-        pos = torch.cat(ids, 0).to(self.pos_embed.weight.device)
+        pos = torch.cat(ids, 0).to(self.pos_embed.weight.device, non_blocking=True)
         inv = 1.0 / (
             10000
             ** (
@@ -249,12 +286,28 @@ class Qwen3VisionTransformer(nn.Module):
             )
         )
         emb = torch.cat([(pos.unsqueeze(-1).float() * inv).flatten(1)] * 2, dim=-1)
-        dt = self.pos_embed.weight.dtype
-        return emb.cos().to(dt), emb.sin().to(dt)
+        # Keep cos/sin in float32 — matches HF VisionAttention (casts to float before apply).
+        return emb.cos(), emb.sin()
 
-    def prepare_metadata(self, grid_thw):
-        grids = grid_thw.tolist() if grid_thw.dim() == 2 else grid_thw
+    def prepare_metadata(
+        self,
+        grid_thw,
+        *,
+        max_num_seqs: int | None = None,
+        max_seqlen_override: int | None = None,
+        max_patches: int | None = None,
+    ):
+        """Build encoder metadata.
+
+        ``max_num_seqs`` / ``max_seqlen_override`` / ``max_patches`` mirror
+        official vLLM ``prepare_encoder_metadata`` padding for CUDA Graph:
+        cu_seqlens is padded with zero-length seqs; max_seqlen is baked at
+        capture; patch buffers may be larger than ``cu_seqlens[-1]`` (FA
+        ignores tokens beyond the last offset).
+        """
+        grids = _normalize_grids(grid_thw)
         device = self.pos_embed.weight.device
+        dtype = self.pos_embed.weight.dtype
         pos = torch.cat(
             [
                 _bilinear(
@@ -264,7 +317,7 @@ class Qwen3VisionTransformer(nn.Module):
                     w,
                     self.num_grid_per_side,
                     self.spatial_merge_size,
-                    self.pos_embed.weight.dtype,
+                    dtype,
                 )
                 for t, h, w in grids
             ],
@@ -276,36 +329,105 @@ class Qwen3VisionTransformer(nn.Module):
         cu = np.concatenate(
             [np.zeros(1, dtype=np.int32), np.repeat(patches, g[:, 0]).cumsum(dtype=np.int32)]
         )
+        if max_num_seqs is not None and (len(cu) - 1) < max_num_seqs:
+            cu = np.concatenate(
+                [cu, np.full(max_num_seqs - (len(cu) - 1), cu[-1], dtype=np.int32)]
+            )
         seqlens = (cu[1:] - cu[:-1]).tolist()
+        max_seqlen = (
+            int(max_seqlen_override)
+            if max_seqlen_override is not None
+            else (max(seqlens) if seqlens else 0)
+        )
+        # Optional pad of pos/rope to max_patches for static CG buffers.
+        if max_patches is not None and pos.shape[0] < max_patches:
+            pad_n = max_patches - pos.shape[0]
+            pos = torch.cat([pos, pos.new_zeros(pad_n, pos.shape[1])], 0)
+            cos = torch.cat([cos, cos.new_zeros(pad_n, cos.shape[1])], 0)
+            sin = torch.cat([sin, sin.new_zeros(pad_n, sin.shape[1])], 0)
         return {
-            "pos_embeds": pos.to(device),
-            "rotary_cos": cos.to(device),
-            "rotary_sin": sin.to(device),
-            "cu_seqlens_cpu": torch.from_numpy(cu),
+            "pos_embeds": pos.to(device, non_blocking=True),
+            "rotary_cos": cos.to(device, non_blocking=True),
+            "rotary_sin": sin.to(device, non_blocking=True),
+            "cu_seqlens_cpu": torch.from_numpy(cu.copy()),
+            "cu_seqlens": torch.from_numpy(cu.copy()).to(
+                device=device, dtype=torch.int32, non_blocking=True
+            ),
             "seqlens": seqlens,
             "offsets": cu[:-1].tolist(),
             "sizes": (g.prod(-1) // self.spatial_merge_size**2).tolist(),
+            "max_seqlen": max_seqlen,
+            "num_patches": int((g[:, 0] * g[:, 1] * g[:, 2]).sum()),
         }
 
-    def forward(self, pixel_values, grid_thw=None, metadata=None):
+    def forward(
+        self,
+        pixel_values,
+        grid_thw=None,
+        metadata=None,
+        *,
+        concat_deepstack: bool = False,
+        plan_attn: bool = True,
+        split_images: bool = True,
+    ):
+        """ViT forward.
+
+        Args:
+            concat_deepstack: If True, return ``[N, out_dim * (1 + n_deepstack)]``
+                like official vLLM encoder CUDA Graph output.
+            plan_attn: If False, attention must already be ``bind``-ed to the
+                static ``metadata['cu_seqlens']`` GPU buffer (CG path).
+            split_images: If True and sizes known, return per-image tuple of
+                merged embeds (eager API). Ignored when ``concat_deepstack``.
+        """
         dtype = self.pos_embed.weight.dtype
         device = self.pos_embed.weight.device
-        md = metadata or self.prepare_metadata(grid_thw)
-        hidden = self.patch_embed(pixel_values.to(device=device, dtype=dtype))
-        hidden = (hidden + md["pos_embeds"]).reshape(hidden.shape[0], 1, -1)
+        if metadata is None:
+            if grid_thw is None:
+                raise ValueError("forward requires grid_thw or metadata")
+            md = self.prepare_metadata(grid_thw)
+        else:
+            md = metadata
+
+        pv = pixel_values
+        if pv.device != device or pv.dtype != dtype:
+            pv = pv.to(device=device, dtype=dtype, non_blocking=True)
+        # CG buffers may be longer than the active prefix; FA uses cu_seqlens.
+        hidden = self.patch_embed(pv)
+        n = hidden.shape[0]
+        pos = md["pos_embeds"]
+        cos, sin = md["rotary_cos"], md["rotary_sin"]
+        # Static CG buffers are sized to max_patches; active prefix may be
+        # shorter in metadata tensors before pad — align to hidden length.
+        if pos.shape[0] < n:
+            raise RuntimeError(
+                f"pos_embeds length {pos.shape[0]} < patches {n}; "
+                "pass max_patches= when building CG metadata"
+            )
+        if pos.shape[0] > n:
+            pos, cos, sin = pos[:n], cos[:n], sin[:n]
+        hidden = (hidden + pos).reshape(n, 1, -1)
 
         attn = self._backend(dtype)
-        attn.plan(md["cu_seqlens_cpu"], seqlens=md["seqlens"])
+        if plan_attn:
+            attn.plan(md["cu_seqlens_cpu"], seqlens=md["seqlens"])
+        # else: caller already attn.bind()'d a static cu_seqlens buffer (CG path).
 
         deepstack = []
-        ds_set = set(self.deepstack_indexes)
         for i, blk in enumerate(self.blocks):
-            hidden = blk(hidden, md["rotary_cos"], md["rotary_sin"], md["seqlens"], md["offsets"], attn)
-            if i in ds_set:
-                deepstack.append(self.deepstack_merger_list[self.deepstack_indexes.index(i)](hidden))
+            hidden = blk(hidden, cos, sin, md["seqlens"], md["offsets"], attn)
+            merger = self.deepstack_index_to_module.get(i)
+            if merger is not None:
+                deepstack.append(merger(hidden))
 
         merged = self.merger(hidden)
         self._deepstack = deepstack or None
-        if grid_thw is not None:
+
+        if concat_deepstack:
+            if deepstack:
+                return torch.cat([merged] + deepstack, dim=1)
+            return merged
+
+        if split_images and (grid_thw is not None or "sizes" in md):
             return tuple(merged.split(md["sizes"]))
         return (merged,)

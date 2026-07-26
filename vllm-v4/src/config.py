@@ -35,10 +35,10 @@ class EngineConfig:
     flashinfer_use_tensor_cores: bool = True
     # FlashInfer plan + CG indices H2D: async when True (hides copy behind compute).
     flashinfer_non_blocking: bool = True
-    # Deprecated no-ops: ViT path uses flash-attn; budget CG was removed.
-    enable_vit_cuda_graph: bool = False
-    vit_cg_min_budget: int = 64
-    vit_cg_max_budget: int = 256
+    # Vision encoder CUDA Graph (budget replay). Default on for VL when not eager.
+    enable_vit_cuda_graph: bool | None = None
+    vit_cg_token_budgets: tuple[int, ...] = (64, 128, 256, 512, 1024)
+    vit_cg_max_batch_size: int = 1
     # Max merged vision tokens to encode in one step (0 = same as max_num_batched_tokens).
     encoder_compute_budget: int = 0
 
@@ -63,6 +63,8 @@ class EngineConfig:
         if self.enforce_eager is None:
             # VL: decode CG on by default; text stays eager unless --compile.
             self.enforce_eager = not self.is_multimodal
+        if self.enable_vit_cuda_graph is None:
+            self.enable_vit_cuda_graph = self.is_multimodal and not self.enforce_eager
         if self.encoder_compute_budget <= 0:
             self.encoder_compute_budget = self.max_num_batched_tokens
         # For VL, lengths / heads live on text_config.
