@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
 
 from ..memory import Sequence
+from .input_builder import prepare_decode, prepare_prefill
 
 
 @dataclass
@@ -19,7 +22,6 @@ class ModelInputs:
     slot_mapping: Optional[torch.Tensor] = None
     block_tables: Optional[torch.Tensor] = None
     seqs: list["Sequence"] = field(default_factory=list)
-    # Multimodal (v4): merged text+vision embeds + DeepStack for the LM forward.
     inputs_embeds: Optional[torch.Tensor] = None
     deepstack_input_embeds: Optional[list[torch.Tensor]] = None
 
@@ -30,8 +32,6 @@ def build_model_inputs(
     block_size: int,
     device: torch.device,
 ) -> ModelInputs:
-    from .input_builder import prepare_decode, prepare_prefill
-
     if is_prefill:
         input_ids, positions, ctx = prepare_prefill(seqs, block_size, device)
     else:

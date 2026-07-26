@@ -1,5 +1,3 @@
-"""Decode-path CUDA Graph runner for text / PP stages."""
-
 from __future__ import annotations
 
 import gc

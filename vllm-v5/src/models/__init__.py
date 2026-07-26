@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from .loader import default_weight_loader, load_model, load_model_hf
 from .sharded_loader import has_sharded_checkpoint, save_sharded_checkpoint
 from .weight_utils import default_dtype_context

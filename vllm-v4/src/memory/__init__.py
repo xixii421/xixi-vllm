@@ -1,5 +1,7 @@
 """Resource layer: KVManager + Sequence + prefix backends + Triton KV ops."""
 
+from __future__ import annotations
+
 from .block_manager import Block, BlockManager
 from .kv_ops import store_kvcache
 from .manager import KVManager

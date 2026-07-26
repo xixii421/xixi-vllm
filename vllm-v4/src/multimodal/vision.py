@@ -1,13 +1,3 @@
-"""Vision tower + encoder cache + budget CUDA Graph (official vLLM style, lean).
-
-Core performance pieces only:
-1. Token-budget EncoderCache with refcount (official EncoderCacheManager semantics)
-2. Batch encode of uncached items (single ViT call)
-3. Budget-based Vision Encoder CUDA Graph (official EncoderCudaGraphManager pattern)
-
-See: https://docs.vllm.ai/en/latest/design/cuda_graphs_multimodal/
-"""
-
 from __future__ import annotations
 
 import logging
@@ -24,8 +14,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class VisionEncodeOutput:
-    """Explicit encoder result (no hidden module property for DeepStack)."""
-
     embeds: torch.Tensor  # [total_tokens, out_dim] concatenated over images
     deepstack: list[torch.Tensor] | None
     sizes: list[int]
@@ -53,12 +41,6 @@ class _CacheEntry:
 
 
 class EncoderCache:
-    """Memory-aware encoder cache: token budget + refcount + LRU freeables.
-
-    Aligns with official ``EncoderCacheManager`` (cache_size = embedding tokens),
-    not entry-count LRU.
-    """
-
     def __init__(self, max_tokens: int = 16384):
         self.max_tokens = max(1, int(max_tokens))
         self.used_tokens = 0
@@ -163,12 +145,6 @@ class _BudgetGraph:
 
 
 class VisionEncoderCudaGraph:
-    """Budget-based ViT CUDA Graph (subset of official EncoderCudaGraphManager).
-
-    Captures power-of-two output-token budgets. Replay copies into static
-    buffers then ``graph.replay()``. Falls back to eager when no budget fits.
-    """
-
     def __init__(
         self,
         vit: Qwen3VisionTransformer,
@@ -353,8 +329,6 @@ class VisionEncoderCudaGraph:
 
 
 class Qwen3VisionTower(nn.Module):
-    """Qwen3-VL vision tower: batch encode + optional encoder CUDA Graph."""
-
     def __init__(self, vision_config) -> None:
         super().__init__()
         self._cfg = vision_config

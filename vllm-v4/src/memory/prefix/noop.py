@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from ..block_manager import BlockManager
 from ..sequence import Sequence
 

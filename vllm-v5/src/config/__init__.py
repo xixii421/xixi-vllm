@@ -1,5 +1,7 @@
 """Engine configuration (foundational; imported by runtime / models / entrypoints)."""
 
+from __future__ import annotations
+
 from .engine import EngineConfig, _free_tcp_port, _is_moe_config, _is_vl_config
 from .moe_backend import (
     cutlass_moe_available,

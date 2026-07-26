@@ -1,0 +1,56 @@
+[
+  {
+    "model": "Qwen3-1.7B",
+    "backend": "v5",
+    "trials": [
+      {
+        "model": "Qwen3-1.7B",
+        "total_s": 99.08,
+        "read_estimate_s": 0.012,
+        "other_s": 99.068,
+        "trial": 0
+      },
+      {
+        "model": "Qwen3-1.7B",
+        "total_s": 1.649,
+        "read_estimate_s": 0.014,
+        "other_s": 1.635,
+        "trial": 1
+      },
+      {
+        "model": "Qwen3-1.7B",
+        "total_s": 1.761,
+        "read_estimate_s": 0.009,
+        "other_s": 1.751,
+        "trial": 2
+      }
+    ]
+  },
+  {
+    "model": "Qwen3-4B",
+    "backend": "v5",
+    "trials": [
+      {
+        "model": "Qwen3-4B",
+        "total_s": 2.619,
+        "read_estimate_s": 0.082,
+        "other_s": 2.537,
+        "trial": 0
+      },
+      {
+        "model": "Qwen3-4B",
+        "total_s": 2.588,
+        "read_estimate_s": 0.099,
+        "other_s": 2.489,
+        "trial": 1
+      },
+      {
+        "model": "Qwen3-4B",
+        "total_s": 2.442,
+        "read_estimate_s": 0.114,
+        "other_s": 2.328,
+        "trial": 2
+      }
+    ]
+  }
+]

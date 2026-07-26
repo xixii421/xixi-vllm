@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch, torch.nn as nn, torch.nn.functional as F
 import numpy as np
 from typing import Optional

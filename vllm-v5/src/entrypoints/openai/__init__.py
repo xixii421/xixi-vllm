@@ -1,5 +1,7 @@
 """OpenAI-compatible serving layer (protocol + serving + thin HTTP)."""
 
+from __future__ import annotations
+
 from .api_server import create_app, main
 from .chat_parser import ParsedChat, parse_chat_messages
 from .protocol import (

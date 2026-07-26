@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from ..config.vit_cg import ViTCGConfig
 from .decode import CUDAGraphRunner
 from .vit import ViTCUDAGraphRunner

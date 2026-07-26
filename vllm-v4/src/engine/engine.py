@@ -1,4 +1,3 @@
-
 import warnings
 from collections.abc import Iterator
 from typing import Optional
@@ -8,7 +7,7 @@ from transformers import AutoTokenizer
 
 from ..config import EngineConfig
 from ..memory import KVManager, MultiModalFeature, Sequence
-from ..models.loader import load_model
+from ..models.loader import load_model, skip_param_init
 from ..models.qwen3 import Qwen3ForCausalLM
 from ..sampling_params import SamplingParams
 from .model_runner import ModelRunner
@@ -39,17 +38,19 @@ class Engine:
             print(f"Multimodal mode: Qwen3-VL processor loaded ({config.model})")
             from ..models.qwen3_vl import Qwen3VLForCausalLM
 
-            self.model = Qwen3VLForCausalLM(config.hf_config)
+            with skip_param_init():
+                self.model = Qwen3VLForCausalLM(config.hf_config)
             self.model.load_weights(
                 config.model,
                 self.device,
                 self.dtype,
-                warm_vit_cg=False,  # after decode CG capture (avoids InferenceMode clash)
+                warm_vit_cg=False,
             )
             self.model = self.model.eval()
             self._pending_vit_cg = bool(config.enable_vit_cuda_graph)
         else:
-            self.model = Qwen3ForCausalLM(config.hf_config)
+            with skip_param_init():
+                self.model = Qwen3ForCausalLM(config.hf_config)
             load_model(self.model, config.model)
             self.model = self.model.to(dtype=self.dtype, device=self.device).eval()
             self._pending_vit_cg = False

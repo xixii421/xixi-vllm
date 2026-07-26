@@ -1,0 +1,148 @@
+### 数据准备与封装
+
+在 vLLM-v4 框架中，调度器负责管理变长的请求序列，而模型执行器（Model Runner）需要高度规整的 GPU 张量来执行并行计算。`input_builder.py` 与 `model_inputs.py` 正是连接这两者的核心桥梁。
+
+> [input_builder.py](../src/engine/input_builder.py) | [model_inputs.py](../src/engine/model_inputs.py)
+
+这两个模块的设计遵循了经典的关注点分离原则：前者专注于**底层数据的转换与格式化**，后者专注于**上层接口的统一封装与路由**。以下将结合代码，由浅入深地剖析其设计动机与核心功能。
+
+### 一、 为什么需要这两个模块？
+
+首先， **调和“变长业务”与“定长计算”的矛盾**。GPU 擅长处理形状固定的密集矩阵运算，但 LLM 推理中的批次（Batch）是由长度各异的序列组成的。必须有一套机制，将这些参差不齐的 Python 列表，高效、紧凑地转换为 GPU 算子（如 FlashAttention）能够理解的特定张量格式。
+其次， **提升工程可维护性**。模型前向传播需要十余个元数据（如 `cu_seqlens`, `slot_mapping`, `block_tables` 等）。如果将这些参数直接作为独立参数传递给模型函数，会导致接口极其臃肿且极易出错。通过数据类（Dataclass）进行统一封装，是工业级代码的必然选择。
+最后，**隐藏底层复杂性**。上层调度逻辑不应关心 `slot_mapping` 是如何通过 `block_size` 计算出来的。通过工厂函数统一入口，实现了底层计算逻辑的完全内聚。
+
+
+
+以下是对 `input_builder.py` 模块的深度解析。本部分严格遵循系统工程教材的规范，采用平实、严谨且逻辑连贯的语言，由浅入深地剖析其设计动机、核心逻辑以及隐含的底层性能优化策略。
+
+### 二、 `input_builder.py` 
+该模块针对 LLM 推理的两个截然不同的阶段（Prefill 与 Decode），设计了高度定制化的数据重组策略。
+
+#### 1. Prefill阶段
+Prefill 阶段需要一次性处理用户输入的完整 Prompt。由于批次（Batch）内各序列的长度差异巨大，传统的做法是将其 Padding 至最大长度，但这会引入大量无效的零计算。本代码采用了**紧凑打包** 策略。
+
+*   **累积序列长度 (`cu_seqlens_q` 与 `cu_seqlens_k`) 的构建**：
+    代码通过 `cu_seqlens.append(cu_seqlens[-1] + seqlen)` 快速构建了一维的边界数组。这是 FlashAttention 等现代注意力算子处理变长 Batch 的标准输入格式（CSR 格式）。算子借此可以精确知晓每个序列在扁平化（Flattened）的一维 Tensor 中的起始与结束索引，从而在单次 Kernel 调用中并行处理所有序列。
+
+
+要理解 `cu_seqlens` 为何能提升性能，我们需要对比Padding方法与基于 `cu_seqlens` 的紧凑打包方法在处理变长序列时的本质差异。
+```
+假设当前推理引擎的一个 Batch 中包含 **3 个序列**，它们的真实长度分别为：
+序列 A：4 个 Token
+序列 B：2 个 Token
+序列 C：5 个 Token
+
+真实有效 Token 11 个。
+```
+为了让 GPU 能够进行规整的矩阵乘法，传统方法会将所有序列填充到批次中的最大长度（即 5）。
+*   **输入张量形状**：`[3, 5]` （共 15 个 Token，其中 4 个是无效的 Padding Token）。
+*   **Attention 计算过程**：模型会计算一个 $3 \times 5 \times 5$ 的注意力分数矩阵。
+*   **总计算元素数量**：$3 \text{ (batch)} \times 5 \text{ (seq\_len)} \times 5 \text{ (seq\_len)} = \mathbf{75}$ 个元素。
+
+现代算子将所有序列首尾相连，展平为一个一维数组，并利用 `cu_seqlens` 告知算子每个序列的边界。
+*   **输入张量形状**：`[11]` （仅包含 11 个真实有效的 Token）。
+*   **`cu_seqlens` 数组**：`[0, 4, 6, 11]` 
+    *   `0` 到 `4`：序列 A 的范围
+    *   `4` 到 `6`：序列 B 的范围
+    *   `6` 到 `11`：序列 C 的范围
+*   **Attention 计算过程**：FlashAttention 算子读取 `cu_seqlens` 后，会在底层 Kernel 中**独立且并行地**计算每个序列的注意力矩阵，绝不跨序列交叉计算。
+    *   序列 A 计算量：$4 \times 4 = 16$
+    *   序列 B 计算量：$2 \times 2 = 4$
+    *   序列 C 计算量：$5 \times 5 = 25$
+*   **总计算元素数量**：$16 + 4 + 25 = \mathbf{45}$ 个元素。
+
+通过上述例子，我们可以清晰地看到性能提升的来源：
+
+1. **计算量（FLOPs）的直接削减**：
+   在此例中，有效计算量从 75 降至 45，**计算量直接减少了 40%**。在真实的 LLM 推理中，Batch 内序列长度差异往往更大（例如一个序列长 1000，另一个长 10），这种无效计算的消除比例甚至可以达到 **70% ~ 90%**。
+
+2. **显存带宽的节省**：
+   GPU 的性能瓶颈通常不在于计算单元，而在于显存读写速度。
+   * 在 Padding 方法中，GPU 必须从显存中读取庞大的 $3 \times 5$ 的 Q、K、V 矩阵（包含大量无用的 0），计算后再写回。
+   * 在 `cu_seqlens` 方法中，显存中只存储和读取紧凑的 11 个有效 Token。这极大降低了 PCIe 和 HBM的传输压力，使得数据能更快地喂给计算核心。
+
+3. **SRAM（共享内存）的高效利用**：
+   FlashAttention 的核心创新是将分块计算放在 GPU 的片上 SRAM 中完成，避免反复读写 HBM。如果使用 Padding，宝贵的 SRAM 空间会被无意义的 Padding 数据占据；而使用 `cu_seqlens`，SRAM 的每一字节都用于处理真实的业务数据，显著提升了硬件资源的利用率。
+
+
+*   **细粒度的 `slot_mapping` 物理映射**：
+    这是 PagedAttention 机制的灵魂。序列的 Token 并非连续存储，而是分散在非连续的物理显存块中。代码通过严密的边界计算，为每一个待处理的 Token 生成其对应的物理槽位（Slot）索引：
+    ```python
+    start_block = start // block_size
+    end_block = (end + block_size - 1) // block_size
+    # 遍历该序列涉及的每一个物理块
+    for i in range(start_block, end_block):
+        slot_start = seq.block_table[i] * block_size
+        # 处理起始块的偏移
+        if i == start_block: slot_start += start % block_size
+        # 处理结束块的截断
+        if i != end_block - 1: slot_end = ... + block_size
+        else: slot_end = ... + end - i * block_size
+        slot_mapping_list.extend(range(slot_start, slot_end))
+    ```
+    > **【性能优化点】**：该逻辑主要处理单个序列的 Token 跨越多个物理块的复杂边界情况。通过纯 CPU 端的整数运算提前计算出所有映射关系，避免了在 GPU 端进行复杂的动态寻址。
+
+*   **异步数据传输通道**：
+    在所有 Python 列表收集完毕后，代码统一执行张量转换：
+    ```python
+    torch.tensor(input_ids_list, dtype=torch.int64, pin_memory=True).to(device, non_blocking=True)
+    ```
+    > **【性能优化点】**：`pin_memory=True`。
+
+#### 2. Decode 阶段
+
+Decode 阶段，模型每次仅接收上一个生成的 Token 并预测下一个 Token。此阶段的计算量极小，因此**数据准备的延迟必须被压缩到极致**。
+
+*   **极简的输入提取**：
+    代码摒弃了复杂的切片或遍历，直接通过 `seq.last_token` 提取当前步的输入 ID，并将位置编码固定为 `len(seq) - 1`。
+*   **`context_lens` 的传递**：
+    由于 Decode 阶段需要读取该序列此前生成的所有历史 KV Cache，代码引入了 `context_lens_list`。它明确告知底层 Attention 算子每个序列的当前总长度。算子结合 `block_table`，即可准确定位并读取历史状态的起始边界。
+
+#### 3. 变长到定长
+
+GPU 的 Warp 执行模型要求内存访问尽可能连续和规整。原生的 Python 列表是参差不齐的，GPU 无法直接对其进行高效的批量操作。
+
+```python
+def _block_tables(seqs: list[Sequence], device: torch.device) -> torch.Tensor:
+    max_len = max(len(seq.block_table) for seq in seqs)
+    # 使用 -1 对较短的序列进行 Padding 填充
+    tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
+    return torch.tensor(tables, dtype=torch.int32, pin_memory=True).to(device, non_blocking=True)
+```
+代码首先遍历找出批次中的最大块数 `max_len`，然后使用列表推导式，将较短的序列用 `-1` 填充至相同长度，最终转化为形状为 `[batch_size, max_len]` 的规整二维 Tensor。
+
+之后填充的 `-1` 是一个特殊的无效页标识。在底层的 PagedAttention CUDA Kernel 中，当读取到索引为 `-1` 的块时，算子会安全地忽略该位置或将其视为零向量，从而不会引发显存越界访问。
+
+
+### 三、 `model_inputs.py`
+`model_inputs.py` 就是最终的对外接口。
+
+#### 1. 结构化封装
+```python
+@dataclass
+class ModelInputs:
+    input_ids: Optional[torch.Tensor] = None
+    positions: Optional[torch.Tensor] = None
+    is_prefill: bool = False
+    cu_seqlens_q: Optional[torch.Tensor] = None
+    # ... 省略部分字段 ...
+    seqs: list["Sequence"] = field(default_factory=list)
+```
+模型的前向传播需要十余个元数据张量。若将它们作为独立参数传递，函数签名将变得极其臃肿且易错。使用 `@dataclass` 将其封装为单一、强类型的对象，提供了清晰的 IDE 类型提示，极大提升了代码的可维护性。
+
+并且保留 `seqs` 列表的引用，使得模型在输出 Logits 并完成采样后，能够方便地回溯并更新对应 `Sequence` 对象的内部状态（如追加新生成的 Token、更新缓存计数），形成了完整的数据闭环。
+
+#### 2. 智能路由与构建
+```python
+def build_model_inputs(seqs, is_prefill, block_size, device) -> ModelInputs:
+    if is_prefill:
+        input_ids, positions, ctx = prepare_prefill(seqs, block_size, device)
+    else:
+        input_ids, positions, ctx = prepare_decode(seqs, block_size, device)
+    
+    return ModelInputs(input_ids=input_ids, positions=positions, is_prefill=is_prefill, seqs=seqs, **ctx)
+```
+这是典型的工厂模式。上层调用者（如 `ModelRunner`）无需关心底层是调用了 `prepare_prefill` 还是 `prepare_decode`，只需传入序列列表和 `is_prefill` 标志即可。
+
+之后通过 `**ctx` 语法，将 `input_builder` 返回的上下文字典（包含 `slot_mapping`, `cu_seqlens` 等动态字段）直接注入到 `ModelInputs` 的对应属性中。未来若需新增元数据，只需在 `input_builder` 的返回字典中添加，此处无需任何修改。

@@ -208,6 +208,7 @@ def make_lean_engine(version: str, args):
             max_num_batched_tokens=8192,
             mix_prefill_decode=True,
             gpu_memory_utilization=args.gpu_util,
+            compile_prefill=getattr(args, "compile_prefill", True) and (not use_eager),
         )
         return Engine(cfg), SamplingParams, True, (not use_eager)
 
@@ -434,10 +435,39 @@ def main() -> None:
     ap.add_argument("--context-len", type=int, default=4096)
     ap.add_argument("--conc", default="1,2,4,8")
     ap.add_argument("--enforce-eager", action="store_true")
-    ap.add_argument("--prompt", default=PROMPT)
+    ap.add_argument(
+        "--compile-prefill",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="v3/v4: torch.compile prefill forward (TTFT). Default on.",
+    )
+    ap.add_argument("--prompt", default=None)
+    ap.add_argument(
+        "--prompt-tokens",
+        type=int,
+        default=0,
+        help="If >0, build a prompt with ~N tokens (overrides --prompt).",
+    )
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     args.conc_list = [int(x) for x in str(args.conc).split(",") if x.strip()]
+
+    if args.prompt_tokens and args.prompt_tokens > 0:
+        # Expand the stock prompt until tokenizer length ≈ target.
+        # Official / lean both consume the same string.
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+        base = PROMPT
+        text = base
+        # Grow then trim to hit target token count.
+        while len(tok.encode(text)) < args.prompt_tokens:
+            text = text + " " + base
+        ids = tok.encode(text)[: args.prompt_tokens]
+        args.prompt = tok.decode(ids)
+        print(f"prompt_tokens target={args.prompt_tokens} actual={len(tok.encode(args.prompt))}")
+    elif not args.prompt:
+        args.prompt = PROMPT
 
     report = (
         bench_official(args)

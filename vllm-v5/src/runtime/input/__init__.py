@@ -4,6 +4,8 @@
 Does not touch GPU, ViT, or EncoderCache.
 """
 
+from __future__ import annotations
+
 from .features import (
     ImageSpanInfo,
     build_mm_features,

@@ -12,6 +12,8 @@ Layout::
     parallel.py    tp + fused_backend
 """
 
+from __future__ import annotations
+
 from .block import Qwen3MoeSparseMoeBlock
 from .experts import Experts
 from .fused import clear_fused_state

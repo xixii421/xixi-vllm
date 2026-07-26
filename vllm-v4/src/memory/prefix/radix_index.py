@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from .hash_util import compute_block_hash
 from .radix_tree import RadixTree
 

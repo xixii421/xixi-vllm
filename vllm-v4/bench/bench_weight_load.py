@@ -1,255 +1,276 @@
 #!/usr/bin/env python3
-"""A/B microbench: safetensors iterator (old safe_open vs new load_file).
+"""Benchmark model weight loading speed (disk→CPU→GPU transfer) for v4 / v5 / official.
 
-Usage::
+Times the full "create model + load weights" process.
+Reports both total time and weight-only time.
 
-    cd vllm-v4
-    source ../.venv/bin/activate && source ../.env.cuda.sh
-    CUDA_VISIBLE_DEVICES=3 PYTHONPATH=. python bench/bench_weight_load.py \\
-        --model /mnt/nfs/zhangli/huggingface/Qwen3-0.6B
-    CUDA_VISIBLE_DEVICES=3 PYTHONPATH=. python bench/bench_weight_load.py \\
-        --model /mnt/nfs/zhangli/huggingface/Qwen3-VL-8B-Instruct --full-model
+Usage:
+  PYTHONPATH=vllm-v4  python bench/bench_weight_load.py --version v4 --model <path>
+  PYTHONPATH=vllm-v5  python bench/bench_weight_load.py --version v5 --model <path>
+  python bench/bench_weight_load.py --version official --model <path>
 """
 
 from __future__ import annotations
 
 import argparse
-import glob
+import json
 import os
 import statistics
-import sys
 import time
-from collections.abc import Iterable
 from pathlib import Path
 
 import torch
-from safetensors import safe_open
-from safetensors.torch import load_file
-from tqdm import tqdm
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 
-def iter_old(hf_folder: str) -> Iterable[tuple[str, torch.Tensor]]:
-    """Previous loader.py path: per-tensor safe_open on CPU."""
-    files = sorted(glob.glob(os.path.join(hf_folder, "*.safetensors")))
-    if not files:
-        raise FileNotFoundError(hf_folder)
-    for st_file in files:
-        with safe_open(st_file, framework="pt") as f:
-            for name in f.keys():
-                yield name, f.get_tensor(name)
+def _disk_size_gb(model_path: str) -> float:
+    total = 0
+    for f in Path(model_path).rglob("*.safetensors"):
+        total += f.stat().st_size
+    return total / (1024**3)
 
 
-def iter_new(
-    hf_folder: str, device: str = "cuda"
-) -> Iterable[tuple[str, torch.Tensor]]:
-    """Current loader.py path: whole-file load_file onto device."""
-    files = sorted(glob.glob(os.path.join(hf_folder, "*.safetensors")))
-    if not files:
-        raise FileNotFoundError(hf_folder)
-    for st_file in files:
-        state_dict = load_file(st_file, device=device)
-        for name, tensor in state_dict.items():
-            yield name, tensor
-        del state_dict
+def _peak_gpu_gb() -> float:
+    return torch.cuda.max_memory_allocated() / (1024**3)
 
 
-def _drain(it: Iterable[tuple[str, torch.Tensor]], *, to_device: str | None) -> tuple[int, int]:
-    """Materialize iterator; optionally copy each tensor to ``to_device`` (simulates param.copy_)."""
-    n = 0
-    nbytes = 0
-    for _name, t in it:
-        n += 1
-        nbytes += t.numel() * t.element_size()
-        if to_device is not None:
-            # Mimic default_weight_loader onto a same-shaped buffer on target device.
-            dst = torch.empty_like(t, device=to_device)
-            dst.copy_(t)
-            del dst
-        del t
-    if to_device is not None and to_device.startswith("cuda"):
-        torch.cuda.synchronize()
-    return n, nbytes
+def _safetensors_count(model_path: str) -> int:
+    return len(list(Path(model_path).rglob("*.safetensors")))
 
 
-def bench_iter(
-    label: str,
-    fn,
-    *,
-    repeats: int,
-    warmup: int,
-    to_device: str | None,
-) -> list[float]:
-    for _ in range(warmup):
-        _drain(fn(), to_device=to_device)
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    times = []
-    last_n = last_b = 0
-    for _ in range(repeats):
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-        t0 = time.perf_counter()
-        last_n, last_b = _drain(fn(), to_device=to_device)
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        times.append(time.perf_counter() - t0)
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
-    print(
-        f"  {label:<28} median={statistics.median(times)*1e3:8.1f} ms  "
-        f"min={min(times)*1e3:8.1f} ms  tensors={last_n}  "
-        f"payload={last_b/1e9:.2f} GB"
-    )
-    return times
+# ── v4 ──────────────────────────────────────────────────────────────────
 
 
-def bench_full_model(model_path: str, device: torch.device) -> None:
-    """End-to-end Engine-style load (VL or text) with current loader."""
-    from transformers import AutoConfig
-
-    from src.config import EngineConfig, is_multimodal
-    from src.models.loader import load_model, safetensors_weights_iterator
+def run_v4(args) -> dict:
+    from src.models.loader import load_model
     from src.models.qwen3 import Qwen3ForCausalLM
     from src.models.qwen3_vl import Qwen3VLForCausalLM
+    from transformers import AutoConfig
 
-    cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-    print(f"\n[full-model] {model_path} on {device}")
+    hf_cfg = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
+    is_vl = bool(getattr(hf_cfg, "vision_config", None)) or "VL" in type(hf_cfg).__name__
+    dev = torch.device("cuda:0")
 
-    def once_new() -> float:
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+    times_total = []
+    times_weight = []
+    mems = []
+    for trial in range(args.iters):
+        torch.cuda.reset_peak_memory_stats()
+
+        # Phase A: create model on GPU + dtype cast
         t0 = time.perf_counter()
-        if is_multimodal(cfg):
-            model = Qwen3VLForCausalLM(cfg).to(device=device, dtype=torch.bfloat16)
-            model.load_weights(model_path, device, torch.bfloat16)
+        if is_vl:
+            model = Qwen3VLForCausalLM(hf_cfg).to(dtype=torch.float16, device=dev).eval()
         else:
-            model = Qwen3ForCausalLM(cfg).to(device=device, dtype=torch.bfloat16)
-            load_model(model, model_path)
+            model = Qwen3ForCausalLM(hf_cfg).to(dtype=torch.float16, device=dev).eval()
         torch.cuda.synchronize()
-        dt = time.perf_counter() - t0
+        t_after_create = time.perf_counter()
+
+        if is_vl:
+            model.load_weights(args.model, dev, torch.float16)
+        else:
+            load_model(model, args.model)
+        torch.cuda.synchronize()
+        elapsed_total = time.perf_counter() - t0
+        elapsed_weight = time.perf_counter() - t_after_create
+
+        mem = _peak_gpu_gb()
+        times_total.append(elapsed_total)
+        times_weight.append(elapsed_weight)
+        mems.append(mem)
         del model
         torch.cuda.empty_cache()
-        return dt
+        print(f"  trial {trial}: total={elapsed_total:.3f}s  "
+              f"(create={elapsed_total-elapsed_weight:.3f}s + load={elapsed_weight:.3f}s)  "
+              f"peak_gpu={mem:.2f} GiB")
 
-    # Old path: force CPU safe_open style by temporarily patching
-    import src.models.loader as loader_mod
-    import src.models.qwen3_vl as vl_mod
+    return _report("v4", args.model, is_vl, times_total, times_weight, mems)
 
-    def once_old() -> float:
-        torch.cuda.empty_cache()
+
+# ── v5 ──────────────────────────────────────────────────────────────────
+
+
+def _init_v5_dist():
+    """Minimal single-process distributed init matching v5's ensure_single_process_parallel."""
+    from src.distributed.parallel_state import (
+        init_distributed_environment,
+        initialize_model_parallel,
+        is_initialized,
+    )
+
+    if is_initialized():
+        return
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", "29501")
+    os.environ["RANK"] = "0"
+    os.environ["WORLD_SIZE"] = "1"
+    os.environ["LOCAL_RANK"] = "0"
+    init_distributed_environment(
+        world_size=1, rank=0, backend="nccl",
+        init_method="tcp://127.0.0.1:29501", local_device=0,
+    )
+    initialize_model_parallel(tp_size=1, pp_size=1, tp_rank=0, pp_rank=0)
+
+
+def run_v5(args) -> dict:
+    from src.config.engine import _is_vl_config
+    from transformers import AutoConfig
+
+    _init_v5_dist()
+    hf_cfg = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
+    is_vl = _is_vl_config(hf_cfg)
+    dev = torch.device("cuda:0")
+
+    if is_vl:
+        from src.models.qwen3_vl import Qwen3VLForCausalLM
+        def _make(): return Qwen3VLForCausalLM(hf_cfg, mm_encoder_tp_mode="data")
+    else:
+        from src.models.qwen3 import Qwen3ForCausalLM
+        def _make(): return Qwen3ForCausalLM(hf_cfg)
+
+    times_total = []
+    times_weight = []
+    mems = []
+    for trial in range(args.iters):
+        torch.cuda.reset_peak_memory_stats()
+
+        t0 = time.perf_counter()
+        model = _make().to(dtype=torch.float16, device=dev).eval()
         torch.cuda.synchronize()
+        t_after_create = time.perf_counter()
 
-        def _old_iter(hf_folder, device=None):  # noqa: ARG001
-            yield from iter_old(hf_folder)
+        if is_vl:
+            model.load_weights(args.model, dev, torch.float16, rank=0, tp_size=1, pp_size=1)
+        else:
+            from src.models.loader import load_model_hf
+            load_model_hf(model, args.model)
+        torch.cuda.synchronize()
+        elapsed_total = time.perf_counter() - t0
+        elapsed_weight = time.perf_counter() - t_after_create
 
-        orig = loader_mod.safetensors_weights_iterator
-        loader_mod.safetensors_weights_iterator = _old_iter  # type: ignore[assignment]
-        vl_mod.safetensors_weights_iterator = _old_iter  # type: ignore[assignment]
-        try:
-            t0 = time.perf_counter()
-            if is_multimodal(cfg):
-                model = Qwen3VLForCausalLM(cfg).to(device=device, dtype=torch.bfloat16)
-                model.load_weights(model_path, device, torch.bfloat16)
-            else:
-                model = Qwen3ForCausalLM(cfg).to(device=device, dtype=torch.bfloat16)
-                # text path uses load_model → iterator without device kw
-                model.load_weights(iter_old(model_path))
-            torch.cuda.synchronize()
-            dt = time.perf_counter() - t0
-            del model
-        finally:
-            loader_mod.safetensors_weights_iterator = orig
-            vl_mod.safetensors_weights_iterator = orig
+        mem = _peak_gpu_gb()
+        times_total.append(elapsed_total)
+        times_weight.append(elapsed_weight)
+        mems.append(mem)
+        del model
         torch.cuda.empty_cache()
-        return dt
+        print(f"  trial {trial}: total={elapsed_total:.3f}s  "
+              f"(create={elapsed_total-elapsed_weight:.3f}s + load={elapsed_weight:.3f}s)  "
+              f"peak_gpu={mem:.2f} GiB")
 
-    # warmup construct once lightly skipped — full load is heavy
-    t_old = once_old()
-    t_new = once_new()
-    print(f"  old (safe_open CPU→copy)     {t_old*1e3:8.1f} ms")
-    print(f"  new (load_file→device)       {t_new*1e3:8.1f} ms")
-    if t_new > 0:
-        print(f"  speedup                      {t_old/t_new:8.2f}x")
+    return _report("v5", args.model, is_vl, times_total, times_weight, mems)
 
 
-def main() -> None:
+# ── Official vLLM (HF transformers) ───────────────────────────────────
+
+
+def run_official(args) -> dict:
+    """Use HF transformers (same underlying loader as vLLM)."""
+    from transformers import AutoConfig, AutoModel
+
+    hf_cfg = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
+    is_vl = bool(getattr(hf_cfg, "vision_config", None)) or "VL" in type(hf_cfg).__name__
+
+    times_total = []
+    times_weight = []
+    mems = []
+    for trial in range(args.iters):
+        torch.cuda.reset_peak_memory_stats()
+
+        # Phase A: load from disk → CPU memory (HF does both creation + I/O here)
+        t0 = time.perf_counter()
+        model = AutoModel.from_pretrained(
+            args.model, dtype=torch.float16, trust_remote_code=True,
+            attn_implementation=None, device_map=None,
+        )
+        t_after_io = time.perf_counter()
+
+        # Phase B: copy to GPU
+        model = model.to("cuda")
+        torch.cuda.synchronize()
+        elapsed_total = time.perf_counter() - t0
+        elapsed_weight = time.perf_counter() - t_after_io
+
+        mem = _peak_gpu_gb()
+        times_total.append(elapsed_total)
+        times_weight.append(elapsed_weight)
+        mems.append(mem)
+        del model
+        torch.cuda.empty_cache()
+        print(f"  trial {trial}: total={elapsed_total:.3f}s  "
+              f"(disk→CPU={elapsed_total-elapsed_weight:.3f}s + CPU→GPU={elapsed_weight:.3f}s)  "
+              f"peak_gpu={mem:.2f} GiB")
+
+    return _report("official", args.model, is_vl, times_total, times_weight, mems)
+
+
+# ── helpers ─────────────────────────────────────────────────────────────
+
+
+def _report(backend, model_path, is_vl, times_total, times_weight, mems):
+    n = len(times_total)
+    def _s(x): return statistics.stdev(x) if len(x) >= 2 else 0.0
+    return {
+        "backend": backend,
+        "model": model_path,
+        "is_multimodal": is_vl,
+        "disk_size_gb": round(_disk_size_gb(model_path), 3),
+        "n_safetensors": _safetensors_count(model_path),
+        "device": torch.cuda.get_device_name(0),
+        "iters": n,
+        "total_s": [round(t, 4) for t in times_total],
+        "load_s":   [round(w, 4) for w in times_weight],
+        "create_s": [round(t - w, 4) for t, w in zip(times_total, times_weight)],
+        "peak_gpu_gb": [round(m, 2) for m in mems],
+        "total_mean_s":   round(statistics.mean(times_total), 4),
+        "total_median_s": round(statistics.median(times_total), 4),
+        "total_stdev_s":  round(_s(times_total), 4),
+        "total_min_s":    round(min(times_total), 4),
+        "total_max_s":    round(max(times_total), 4),
+        "weight_mean_s":   round(statistics.mean(times_weight), 4),
+        "weight_median_s": round(statistics.median(times_weight), 4),
+        "weight_stdev_s":  round(_s(times_weight), 4),
+        "create_mean_s":   round(statistics.mean([t - w for t, w in zip(times_total, times_weight)]), 4),
+        "create_median_s": round(statistics.median([t - w for t, w in zip(times_total, times_weight)]), 4),
+    }
+
+
+def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--model",
-        default="/mnt/nfs/zhangli/huggingface/Qwen3-0.6B",
-    )
-    ap.add_argument("--device", default="cuda")
-    ap.add_argument("--repeats", type=int, default=5)
-    ap.add_argument("--warmup", type=int, default=1)
-    ap.add_argument(
-        "--full-model",
-        action="store_true",
-        help="Also time constructing + load_weights end-to-end",
-    )
+    ap.add_argument("--version", required=True, choices=["v4", "v5", "official"])
+    ap.add_argument("--model", required=True)
+    ap.add_argument("--iters", type=int, default=5)
+    ap.add_argument("--out", default="")
     args = ap.parse_args()
 
-    if not Path(args.model).is_dir():
-        raise SystemExit(f"model not found: {args.model}")
-    if not torch.cuda.is_available():
-        raise SystemExit("CUDA required for this bench")
-
-    device = args.device
+    print(f"device={torch.cuda.get_device_name(0)}")
     print(f"model={args.model}")
-    print(f"cuda={torch.cuda.get_device_name(0)} (visible device 0)")
-    print(f"files={len(sorted(glob.glob(os.path.join(args.model, '*.safetensors'))))}")
+    print(f"  safe_files={_safetensors_count(args.model)}")
+    print(f"  disk_size={_disk_size_gb(args.model):.3f} GiB")
+    print(f"version={args.version} iters={args.iters}")
+    print()
 
-    print("\n[1] Iterator only (no H2D copy) — pure read path")
-    t_old = bench_iter(
-        "old safe_open(CPU)",
-        lambda: iter_old(args.model),
-        repeats=args.repeats,
-        warmup=args.warmup,
-        to_device=None,
-    )
-    t_new_cpu = bench_iter(
-        "new load_file(cpu)",
-        lambda: iter_new(args.model, device="cpu"),
-        repeats=args.repeats,
-        warmup=args.warmup,
-        to_device=None,
-    )
-    t_new_gpu = bench_iter(
-        "new load_file(cuda)",
-        lambda: iter_new(args.model, device=device),
-        repeats=args.repeats,
-        warmup=args.warmup,
-        to_device=None,
-    )
+    if args.version == "v4":
+        report = run_v4(args)
+    elif args.version == "v5":
+        report = run_v5(args)
+    else:
+        report = run_official(args)
 
-    print("\n[2] Iterator + copy_ onto CUDA (simulates weight_loader)")
-    t_old_h2d = bench_iter(
-        "old CPU + copy_→cuda",
-        lambda: iter_old(args.model),
-        repeats=args.repeats,
-        warmup=args.warmup,
-        to_device=device,
-    )
-    t_new_h2d = bench_iter(
-        "new cuda + copy_→cuda",
-        lambda: iter_new(args.model, device=device),
-        repeats=args.repeats,
-        warmup=args.warmup,
-        to_device=device,
-    )
+    print()
+    print(f"==== {args.version} @ {args.model} ====")
+    t = report
+    print(f"  total:   mean={t['total_mean_s']:.3f}s median={t['total_median_s']:.3f}s "
+          f"stdev={t['total_stdev_s']:.3f}s [{t['total_min_s']:.3f}–{t['total_max_s']:.3f}]")
+    print(f"  └ create:{t['create_mean_s']:.3f}s median={t['create_median_s']:.3f}s")
+    print(f"  └ load:  {t['weight_mean_s']:.3f}s median={t['weight_median_s']:.3f}s")
 
-    def ratio(a, b):
-        return statistics.median(a) / statistics.median(b)
-
-    print("\n[summary]")
-    print(f"  load_file(cpu)  vs safe_open : {ratio(t_old, t_new_cpu):.2f}x")
-    print(f"  load_file(cuda) vs safe_open : {ratio(t_old, t_new_gpu):.2f}x  (read path)")
-    print(f"  new+copy vs old+copy         : {ratio(t_old_h2d, t_new_h2d):.2f}x")
-
-    if args.full_model:
-        bench_full_model(args.model, torch.device(device))
+    if args.out:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(report, indent=2))
+        print(f"wrote {out}")
+    else:
+        print(json.dumps(report, indent=2))
 
 
 if __name__ == "__main__":

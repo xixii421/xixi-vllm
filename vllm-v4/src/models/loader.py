@@ -1,4 +1,5 @@
 import concurrent.futures
+import contextlib
 import glob
 import os
 from collections.abc import Iterable
@@ -11,6 +12,19 @@ from tqdm import tqdm
 
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     param.data.copy_(loaded_weight)
+
+
+@contextlib.contextmanager
+def skip_param_init():
+    orig_linear = nn.Linear.reset_parameters
+    orig_embed = nn.Embedding.reset_parameters
+    nn.Linear.reset_parameters = lambda self: None
+    nn.Embedding.reset_parameters = lambda self: None
+    try:
+        yield
+    finally:
+        nn.Linear.reset_parameters = orig_linear
+        nn.Embedding.reset_parameters = orig_embed
 
 
 def _load_shard_cpu(path: str) -> list[tuple[str, torch.Tensor]]:

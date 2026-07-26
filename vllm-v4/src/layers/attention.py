@@ -52,6 +52,7 @@ class Attention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.layer_id = layer_id
 
+    @torch.compiler.disable
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         meta = _get_metadata()
         pool = meta.kv_cache_pool

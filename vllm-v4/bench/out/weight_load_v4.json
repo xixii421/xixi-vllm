@@ -1,0 +1,128 @@
+[
+  {
+    "model": "Qwen3-0.6B",
+    "backend": "v4",
+    "trials": [
+      {
+        "model": "Qwen3-0.6B",
+        "total_mb": 1433.7,
+        "n_files": 1,
+        "init_s": 5.209,
+        "read_s": 0.138,
+        "copy_s": 0.138,
+        "gpu_move_s": 0.716,
+        "total_s": 6.201,
+        "mb_per_s": 231.2,
+        "trial": 0
+      },
+      {
+        "model": "Qwen3-0.6B",
+        "total_mb": 1433.7,
+        "n_files": 1,
+        "init_s": 4.421,
+        "read_s": 0.12,
+        "copy_s": 0.12,
+        "gpu_move_s": 0.458,
+        "total_s": 5.119,
+        "mb_per_s": 280.0,
+        "trial": 1
+      },
+      {
+        "model": "Qwen3-0.6B",
+        "total_mb": 1433.7,
+        "n_files": 1,
+        "init_s": 4.209,
+        "read_s": 0.116,
+        "copy_s": 0.116,
+        "gpu_move_s": 0.443,
+        "total_s": 4.885,
+        "mb_per_s": 293.5,
+        "trial": 2
+      }
+    ]
+  },
+  {
+    "model": "Qwen3-1.7B",
+    "backend": "v4",
+    "trials": [
+      {
+        "model": "Qwen3-1.7B",
+        "total_mb": 3875.3,
+        "n_files": 2,
+        "init_s": 11.062,
+        "read_s": 0.448,
+        "copy_s": 0.448,
+        "gpu_move_s": 1.32,
+        "total_s": 13.277,
+        "mb_per_s": 291.9,
+        "trial": 0
+      },
+      {
+        "model": "Qwen3-1.7B",
+        "total_mb": 3875.3,
+        "n_files": 2,
+        "init_s": 11.652,
+        "read_s": 0.447,
+        "copy_s": 0.447,
+        "gpu_move_s": 1.39,
+        "total_s": 13.935,
+        "mb_per_s": 278.1,
+        "trial": 1
+      },
+      {
+        "model": "Qwen3-1.7B",
+        "total_mb": 3875.3,
+        "n_files": 2,
+        "init_s": 11.625,
+        "read_s": 0.504,
+        "copy_s": 0.504,
+        "gpu_move_s": 1.366,
+        "total_s": 13.998,
+        "mb_per_s": 276.8,
+        "trial": 2
+      }
+    ]
+  },
+  {
+    "model": "Qwen3-4B",
+    "backend": "v4",
+    "trials": [
+      {
+        "model": "Qwen3-4B",
+        "total_mb": 7672.3,
+        "n_files": 3,
+        "init_s": 25.022,
+        "read_s": 1.101,
+        "copy_s": 1.101,
+        "gpu_move_s": 2.927,
+        "total_s": 30.151,
+        "mb_per_s": 254.5,
+        "trial": 0
+      },
+      {
+        "model": "Qwen3-4B",
+        "total_mb": 7672.3,
+        "n_files": 3,
+        "init_s": 25.073,
+        "read_s": 1.058,
+        "copy_s": 1.058,
+        "gpu_move_s": 2.948,
+        "total_s": 30.138,
+        "mb_per_s": 254.6,
+        "trial": 1
+      },
+      {
+        "model": "Qwen3-4B",
+        "total_mb": 7672.3,
+        "n_files": 3,
+        "init_s": 25.361,
+        "read_s": 1.061,
+        "copy_s": 1.061,
+        "gpu_move_s": 2.81,
+        "total_s": 30.293,
+        "mb_per_s": 253.3,
+        "trial": 2
+      }
+    ]
+  }
+]

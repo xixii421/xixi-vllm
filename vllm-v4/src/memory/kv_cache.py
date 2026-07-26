@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 from torch import nn
 
@@ -76,13 +78,7 @@ class PagedKVCache:
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> None:
-        """Scatter K/V into the pool.
 
-        Args:
-            slot_mapping: int64 ``[n]`` flat slots.
-            k, v: ``[batch, seq, kv_heads, head_dim]`` or ``[seq, kv_heads, head_dim]``.
-                  Batched tensors are flattened to ``[batch*seq, ...]``.
-        """
         if k.dim() == 4:
             b, s, h, d = k.shape
             k = k.reshape(b * s, h, d)
@@ -105,7 +101,6 @@ class PagedKVCache:
         block_table: list[int] | torch.Tensor,
         seq_len: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Gather logical prefix ``[0, seq_len)`` into contiguous ``[seq, H, D]``."""
         if seq_len == 0:
             empty = self.kv.new_empty(0, self.num_kv_heads, self.head_dim)
             return empty, empty.clone()

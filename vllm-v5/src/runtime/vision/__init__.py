@@ -4,6 +4,8 @@ Called by ``runner.ModelRunner`` via injected ``model.mm_encoder``.
 Depends on ``layers.vision`` for ViT bricks; uses ``input.features`` for span helpers.
 """
 
+from __future__ import annotations
+
 from .encoder_cache import EncoderCache
 from .encoder_runner import VisionEncoderRunner
 from .pixel_store import PixelStore

@@ -1,5 +1,3 @@
-"""vllm-v3 entry: FlashInfer + CUDA Graph + continuous batching."""
-
 from __future__ import annotations
 
 import argparse

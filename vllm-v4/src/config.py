@@ -24,6 +24,10 @@ class EngineConfig:
     gpu_memory_utilization: float = 0.9
     # None → text defaults to eager; VL defaults to Decode CUDA Graph on.
     enforce_eager: bool | None = None
+    # Prefill torch.compile (inductor). None → on when Decode CG is on
+    # (``enforce_eager=False``). Decode still uses CUDA Graph; compile only
+    # accelerates the eager prefill forward (TTFT).
+    compile_prefill: bool | None = None
     dtype: str = "auto"
     # Prefix cache backend (v2-compatible). radix is completed beyond v2 (evict/invalidate/dedup).
     prefix_backend: str = "hash"
@@ -63,6 +67,8 @@ class EngineConfig:
         if self.enforce_eager is None:
             # VL: decode CG on by default; text stays eager unless --compile.
             self.enforce_eager = not self.is_multimodal
+        if self.compile_prefill is None:
+            self.compile_prefill = not bool(self.enforce_eager)
         if self.enable_vit_cuda_graph is None:
             self.enable_vit_cuda_graph = self.is_multimodal and not self.enforce_eager
         if self.encoder_compute_budget <= 0:
@@ -77,6 +83,4 @@ class EngineConfig:
 
     @property
     def text_config(self) -> PretrainedConfig:
-        """Language-model sub-config (heads / layers / lengths). VL keeps these
-        under ``hf_config.text_config``; text models use ``hf_config`` itself."""
         return getattr(self.hf_config, "text_config", self.hf_config)

@@ -1,3 +1,11 @@
+""" CUDA Graph Decode Runner
+    对 Decode的完整前向计算图进行 CUDA Graph 捕获与重放。
+    Decode 每步只处理 1 个 token，计算形状固定、逻辑简单，但 Python→CUDA
+    内核启动的 CPU 开销占比极大。CUDA Graph 将整个前向过程
+    （包括 FlashInfer 注意力、RoPE、MLP、RMSNorm 等）一次性捕获为一个 GPU 计算图，
+    后续重放时只需一次 kernel launch。
+"""
+
 import gc
 import torch
 import numpy as np
@@ -9,12 +17,6 @@ from ..utils.context import forward_context
 
 
 class CUDAGraphRunner:
-    """
-    专为 LLM Decode 阶段设计的高性能 CUDA Graph 封装器。
-    通过预捕获固定 Batch Size 的计算图，并在运行时仅更新指针和数据，
-    消除 PyTorch 动态调度和 Python 解释器的开销。
-    """
-    
     def __init__(
         self,
         model: torch.nn.Module,
@@ -103,7 +105,7 @@ class CUDAGraphRunner:
             self._metas[bs] = meta
             graph = torch.cuda.CUDAGraph()
             
-            # Warmup run (不计入 graph，用于初始化内部状态)
+            # Warmup run
             with forward_context(is_prefill=False, seqs=[], slot_mapping=self.slot_mapping[:bs]):
                 with attention_context(meta):
                     self.outputs[:bs] = self.model(
@@ -111,7 +113,7 @@ class CUDAGraphRunner:
                         positions=self.positions[:bs],
                     )
             
-            # Capture run (记录 CUDA Kernel 启动序列)
+            # Capture run
             with forward_context(is_prefill=False, seqs=[], slot_mapping=self.slot_mapping[:bs]):
                 with attention_context(meta):
                     with torch.cuda.graph(graph, pool=graph_pool):
@@ -218,26 +220,20 @@ class CUDAGraphRunner:
         seq_lens: List[int],
         block_tables: List[List[int]],
     ) -> None:
-        """
-        极致优化的索引重规划。
-        策略：局部变量绑定 + 直接 NumPy 视图切片赋值 + 消除冗余的全局数组重置。
-        在中小 Batch Size 下，这比 np.concatenate 等高级向量化操作快 30%~80%。
-        """
+
         c = self.backend.cfg
         block = self.block_size
         bufs = self._cg_bufs[pbs]
         host = self._host_bufs[pbs]
         dummy = self.dummy_page_id
 
-        # 获取 numpy 视图 (Zero-copy)，避免数据拷贝
         indptr_np = host["indptr"].numpy()
         last_np = host["last_page"].numpy()
         idx_np = host["indices"].numpy()
 
         acc = 0
-        indptr_np[0] = 0  # 仅需初始化起点，后续循环会完全覆盖旧值，无需 indptr_np[:] = 0
+        indptr_np[0] = 0
         
-        # 处理真实请求：使用 range 索引访问，避免 zip/enumerate 的迭代器开销
         for i in range(real_bs):
             s = seq_lens[i]
             nb = (s + block - 1) // block
@@ -246,24 +242,19 @@ class CUDAGraphRunner:
             if nb > len(table):
                 raise RuntimeError(f"block_table shorter than needed pages: need {nb}, have {len(table)}")
             
-            # 直接视图切片赋值：这是 NumPy 中最快的内存拷贝方式 (底层调用 memcpy)
             idx_np[acc : acc + nb] = table[:nb]
             acc += nb
             indptr_np[i + 1] = acc
             last_np[i] = (s - 1) % block + 1
 
-        # 处理 Padding 部分：填充 dummy page 以保持计算图形状固定
         for i in range(real_bs, pbs):
             idx_np[acc] = dummy
             acc += 1
             indptr_np[i + 1] = acc
             last_np[i] = 1
 
-        # 异步拷贝到 Device 端 (non_blocking=True 允许 CPU 继续执行，与 GPU 计算重叠)
         bufs["indices"][:acc].copy_(host["indices"][:acc], non_blocking=self._non_blocking)
 
-        # 通知 Flashinfer 更新内部指针。
-        # 注意：在 use_cuda_graph=True 模式下，plan() 仅更新内部指针，不会触发内存分配或破坏图结构。
         self.cg_wrappers[pbs].plan(
             indptr=host["indptr"],
             indices=bufs["indices"][:acc],
@@ -279,7 +270,7 @@ class CUDAGraphRunner:
         )
 
     def destroy(self) -> None:
-        """安全、彻底地释放所有资源，防止显存泄漏"""
+        """释放所有资源，防止显存泄漏"""
         self.graphs.clear()
         self.cg_wrappers.clear()
         self._metas.clear()

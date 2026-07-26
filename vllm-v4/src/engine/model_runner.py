@@ -12,6 +12,8 @@ from ..memory import KVManager, Sequence
 from ..utils.context import forward_context
 from .model_inputs import ModelInputs, build_model_inputs
 from .sampler import Sampler
+import torch._dynamo as dynamo
+
 
 
 class ModelRunner:
@@ -34,11 +36,16 @@ class ModelRunner:
         self.dtype = kv.dtype
         self.is_multimodal = config.is_multimodal
         self.backend = self._make_backend()
+        # Eager module kept for Decode CUDA Graph capture/replay.
+        # Prefill may use a torch.compile wrapper sharing the same weights.
+        self._prefill_model: torch.nn.Module | None = None
 
         self._warmup()
         self.cuda_graph_runner: CUDAGraphRunner | None = None
         if not config.enforce_eager:
             self.cuda_graph_runner = self._capture_cg()
+        if config.compile_prefill:
+            self._prefill_model = self._compile_prefill_model()
 
     def _make_backend(self) -> FlashInferBackend:
         cfg = self.config.text_config
@@ -129,6 +136,54 @@ class ModelRunner:
         )
         return runner
 
+    def _compile_prefill_model(self) -> torch.nn.Module:
+
+        dynamo.config.cache_size_limit = max(int(dynamo.config.cache_size_limit), 64)
+        compiled = torch.compile(
+            self.model,
+            dynamic=True,
+            fullgraph=False,
+            mode="reduce-overhead",
+        )
+        # Trigger on a few prefill sizes (text prompt bounds).
+        warm_lens = sorted({128, 256, 512, 1024})
+        warm_lens = [n for n in warm_lens if 0 < n <= self.config.context_len]
+        usable = self.kv.num_blocks_schedulable
+        with torch.inference_mode():
+            for n in warm_lens:
+                n_blocks = (n + self.block_size - 1) // self.block_size
+                if n_blocks > usable:
+                    continue
+                ids = torch.arange(1, n + 1, dtype=torch.int64, device=self.device)
+                pos = torch.arange(n, dtype=torch.int64, device=self.device)
+                cu = torch.tensor([0, n], dtype=torch.int32, device=self.device)
+                cu_cpu = torch.tensor([0, n], dtype=torch.int32, device="cpu")
+                sm = torch.arange(n, dtype=torch.int32, device=self.device)
+                bt = torch.full((1, n_blocks), -1, dtype=torch.int32, device=self.device)
+                bt[0, :n_blocks] = torch.arange(n_blocks, device=self.device)
+                indptr_cpu, idx_gpu, last_cpu = compute_paged_kv_metadata(
+                    [n], bt, self.block_size, self.device
+                )
+                meta = self.backend.build_metadata(
+                    1, indptr_cpu, idx_gpu, last_cpu, sm, True, self.kv_cache, cu_cpu
+                )
+                with forward_context(
+                    is_prefill=True,
+                    seqs=[],
+                    cu_seqlens_q=cu,
+                    cu_seqlens_k=cu,
+                    max_seqlen_q=n,
+                    max_seqlen_k=n,
+                    block_tables=bt,
+                    slot_mapping=sm,
+                ):
+                    with attention_context(meta):
+                        compiled(input_ids=ids, positions=pos)
+        self.kv_cache.zero_()
+        torch.cuda.empty_cache()
+        print(f"Prefill torch.compile ready (warm_lens={warm_lens})")
+        return compiled
+
     @torch.inference_mode()
     def run(
         self, prefills: list[Sequence], decodes: list[Sequence]
@@ -169,8 +224,6 @@ class ModelRunner:
                 logits, temperatures, top_ps=top_ps, top_ks=top_ks, min_ps=min_ps
             ).tolist()
 
-        # Intermediate chunked-prefill tokens still need ViT+LM to write KV /
-        # advance MRoPE; only skip LM-head/sample when no prompt finishes.
         need_sample = True
         if is_prefill:
             need_sample = any(
@@ -244,6 +297,14 @@ class ModelRunner:
             cu_cpu,
         )
 
+        use_compiled = (
+            is_prefill
+            and self._prefill_model is not None
+            and inputs_embeds is None
+            and deepstack is None
+        )
+        model = self._prefill_model if use_compiled else self.model
+
         with forward_context(
             is_prefill=is_prefill,
             seqs=seqs,
@@ -256,7 +317,7 @@ class ModelRunner:
             block_tables=inputs.block_tables,
         ):
             with attention_context(meta):
-                h = self.model(
+                h = model(
                     input_ids=None if inputs_embeds is not None else inputs.input_ids,
                     positions=inputs.positions,
                     inputs_embeds=inputs_embeds,

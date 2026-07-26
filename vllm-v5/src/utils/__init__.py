@@ -5,6 +5,8 @@
   cuda_env.py   FlashInfer arch pinning for mixed-GPU hosts
 """
 
+from __future__ import annotations
+
 from .cuda_env import apply_flashinfer_arch_list
 from .paths import resolve_hf_home, resolve_model_path
 from .profiler import CudaTimer, Timer, enabled, reset, rollup, summary

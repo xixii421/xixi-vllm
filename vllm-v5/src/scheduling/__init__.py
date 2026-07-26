@@ -9,6 +9,8 @@ Layout mirrors ``runtime/`` stage packages:
   radix.py         compressed radix tree
 """
 
+from __future__ import annotations
+
 from .block_manager import BlockManager
 from .output import SchedulerOutput
 from .radix import RadixNode, RadixTree, prefix_len

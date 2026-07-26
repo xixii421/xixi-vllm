@@ -149,31 +149,17 @@ class Sequence:
 
     @property
     def first_mm_token(self) -> int:
-        """Token offset of the earliest image placeholder (num_tokens if none)."""
         if not self.mm_features:
             return self.num_tokens
         return min(mf.start for mf in self.mm_features)
 
     def prefix_cacheable_full_blocks(self) -> int:
-        """Full blocks eligible for APC.
-
-        For text this is every full block. For multimodal we only cache blocks
-        that lie *entirely before* the first image placeholder: image KV depends
-        on pixel content that the token-id block hash does not capture, so caching
-        such blocks by token ids alone would return wrong KV on a hash collision.
-        """
         n_full = self.num_full_blocks()
         if not self.mm_features:
             return n_full
         return min(n_full, self.first_mm_token // self.block_size)
 
     def reset_mrope_state(self) -> None:
-        """Clear MRoPE cursors so a full re-prefill after deallocate is correct.
-
-        Preempt / finished deallocate resets ``num_cached_tokens`` but must also
-        drop ``mrope_next`` / ``rope_delta`` / per-image ``mrope_origin``; otherwise
-        chunked position math continues from a stale absolute cursor.
-        """
         self.rope_delta = 0
         self.mrope_next = None
         for mf in self.mm_features:

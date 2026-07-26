@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
 
@@ -6,25 +8,30 @@ from transformers import AutoConfig, PretrainedConfig
 
 @dataclass
 class EngineConfig:
-    model: str
+    """引擎配置：调度器 / 内存 / 算子 / 采样参数。"""
+
+    #  模型 
+    model: str  # 本地模型路径
+
+    #  调度器 
     context_len: int = 4096
-    kvcache_block_size: int = 256
     max_num_seqs: int = 256
     max_num_batched_tokens: int = 8192
-    gpu_memory_utilization: float = 0.9
-    enforce_eager: bool = True  # False → Decode CUDA Graph (--compile / bench --v3-compile)
-    dtype: str = "auto"
-    # Prefix cache backend (v2-compatible). radix is completed beyond v2 (evict/invalidate/dedup).
-    prefix_backend: str = "hash"
-    # Decode-first + one prefill chunk per step (v2 fairness path). False = prefill-first.
-    mix_prefill_decode: bool = True
-    # 0 = auto-size from VRAM; >0 = fixed block count (bench override).
-    num_kvcache_blocks: int = 0
-    # FlashInfer decode: Tensor Cores (aligns with v7 / upstream vLLM when True).
-    flashinfer_use_tensor_cores: bool = True
-    # FlashInfer plan + CG indices H2D: async when True (hides copy behind compute).
-    flashinfer_non_blocking: bool = True
+    mix_prefill_decode: bool = True  # True=decode优先混合调度，False=全prefill优先
 
+    #  内存 
+    kvcache_block_size: int = 256  # 必须是256的倍数（FlashInfer约束）
+    gpu_memory_utilization: float = 0.9
+    num_kvcache_blocks: int = 0  # 0=自动按显存计算，>0=固定块数(基准测试用)
+    prefix_backend: str = "hash"  # 前缀缓存后端: none / hash / radix
+
+    #  算子 
+    enforce_eager: bool = True  # False=启用Decode CUDA Graph
+    dtype: str = "auto"
+    flashinfer_use_tensor_cores: bool = True  # FlashInfer启用Tensor Core
+    flashinfer_non_blocking: bool = True  # FlashInfer plan异步H2D
+
+    #  运行时 
     hf_config: PretrainedConfig = field(init=False)
 
     def __post_init__(self) -> None:

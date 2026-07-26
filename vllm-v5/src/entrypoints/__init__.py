@@ -1,5 +1,7 @@
 """Product entrypoints: OpenAI serving + offline LLM."""
 
+from __future__ import annotations
+
 from .llm import LLM
 from .openai import (
     ChatCompletionRequest,

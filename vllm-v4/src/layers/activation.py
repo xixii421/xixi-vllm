@@ -23,5 +23,6 @@ from flashinfer.activation import silu_and_mul as flashinfer_silu_and_mul
 '''
 
 class SiluAndMul(nn.Module):
+    @torch.compiler.disable
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return flashinfer_silu_and_mul(x)

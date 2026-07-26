@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from .hash_util import compute_block_hash
 from ..block_manager import BlockManager
 from ..sequence import Sequence

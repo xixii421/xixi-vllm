@@ -1,5 +1,7 @@
 """Distributed primitives: process groups, collectives, PP helpers."""
 
+from __future__ import annotations
+
 from .communication_op import (
     all_gather,
     all_reduce,
