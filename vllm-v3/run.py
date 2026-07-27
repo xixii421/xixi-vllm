@@ -116,6 +116,8 @@ def run_batch(cfg: dict) -> None:
         EngineConfig(
             model=str(model_path),
             enforce_eager=cfg["enforce_eager"],
+            dtype=cfg["dtype"],
+            context_len=cfg["context_len"],
             max_num_seqs=cfg["max_num_seqs"],
             max_num_batched_tokens=cfg["max_num_batched_tokens"],
             mix_prefill_decode=cfg["mix_prefill_decode"],

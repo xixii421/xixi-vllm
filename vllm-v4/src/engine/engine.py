@@ -1,3 +1,4 @@
+import gc
 import warnings
 from collections.abc import Iterator
 from typing import Optional
@@ -22,6 +23,18 @@ class Engine:
         self.config = config
         self.device = torch.device("cuda:0")
         self.dtype = self._resolve_dtype()
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        free_mib, total_mib = torch.cuda.mem_get_info(self.device)
+        free_gib = free_mib / (1024**3)
+        total_gib = total_mib / (1024**3)
+        if free_gib < 2.0:
+            raise RuntimeError(
+                f"GPU 空闲显存不足: {free_gib:.1f} GiB / {total_gib:.1f} GiB。"
+                f"请先释放 GPU 上的其他进程（nvidia-smi 查看），或降低 gpu_memory_utilization。"
+            )
 
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, trust_remote_code=True)
         if self.tokenizer.pad_token is None:

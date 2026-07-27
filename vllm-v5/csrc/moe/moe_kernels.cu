@@ -1,7 +1,3 @@
-// MoE aux CUDA kernels for vllm-v7.
-// Algorithm adapted from vLLM ``moe_align_sum_kernels.cu`` / ``activation_kernels.cu``
-// but using classic ATen APIs (torch 2.9; official shipping build needs stable ABI / torch 2.11+).
-
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cub/cub.cuh>

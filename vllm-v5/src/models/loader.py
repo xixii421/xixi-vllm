@@ -1,9 +1,3 @@
-"""Safetensors / sharded checkpoint loading (HF + TP/PP shards).
-
-``safetensors_weights_iterator`` matches vllm-v4's measured-fast path:
-whole-file ``load_file(cpu)`` with one-shard-ahead prefetch on multi-shard trees.
-"""
-
 from __future__ import annotations
 
 import concurrent.futures

@@ -1,5 +1,3 @@
-"""ViT encoder CUDA Graph runner (fixed base grid + token budgets)."""
-
 from __future__ import annotations
 
 import gc

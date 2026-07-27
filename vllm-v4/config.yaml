@@ -17,7 +17,7 @@ top_k: 20
 enforce_eager: null    # null=auto（VL 默认开 CG，text 默认 eager）；true=强制 eager；false=强制 CG
 compile_prefill: null  # null=auto（CG 开启时自动 compile prefill）
 dtype: "auto"
-context_len: 4096
+context_len: 8192
 
 # --- 调度器 ---
 max_num_seqs: 256
@@ -35,6 +35,7 @@ flashinfer_use_tensor_cores: true
 flashinfer_non_blocking: true
 
 # --- 多模态 (v4 新增, 仅 VL 模型生效) ---
+image_max_side: 1024  # 图片长边最大像素，等比缩放（减少 visual token）
 enable_vit_cuda_graph: null  # null=auto（VL + CG 开启时自动启用）
 vit_cg_token_budgets: [64, 128, 256, 512, 1024]
 vit_cg_max_batch_size: 1

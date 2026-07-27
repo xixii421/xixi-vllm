@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import time
 from pathlib import Path
-
+from PIL import Image
 import yaml
 
 from src import Engine, EngineConfig, SamplingParams
@@ -124,7 +124,18 @@ def run_single(cfg: dict) -> None:
     print(f"\n\n{n} tokens in {elapsed:.2f}s ({n / elapsed:.1f} tok/s)")
 
 
-def run_image(cfg: dict, *, image_path: str, vit_cg: bool) -> None:
+def _resize_image(img: Image.Image, max_side: int) -> Image.Image:
+    """等比缩放图片，使长边不超过 max_side，减少 ViT 编码后的 visual token 数量。"""
+    w, h = img.size
+    longest = max(w, h)
+    if longest <= max_side:
+        return img
+    ratio = max_side / longest
+    new_size = (int(w * ratio), int(h * ratio))
+    return img.resize(new_size, Image.LANCZOS)
+
+
+def run_image(cfg: dict, *, image_path: str, vit_cg: bool, max_side: int) -> None:
     from PIL import Image
 
     if vit_cg:
@@ -138,6 +149,10 @@ def run_image(cfg: dict, *, image_path: str, vit_cg: bool) -> None:
         raise SystemExit(f"{model_path} is not a multimodal (VL) model")
 
     img = Image.open(image_path).convert("RGB")
+    original_size = img.size
+    img = _resize_image(img, max_side)
+    if img.size != original_size:
+        print(f"图片缩放: {original_size[0]}x{original_size[1]} → {img.size[0]}x{img.size[1]}")
     prompt = cfg["prompt"]
     print(f"Image: {image_path}\nPrompt: {prompt}\n")
     start = time.perf_counter()
@@ -194,8 +209,10 @@ def main() -> None:
     p.add_argument("--compile", action="store_true", help="启用 Decode CUDA Graph")
     p.add_argument("--prefix-backend", choices=("none", "hash", "radix"), default=None)
     p.add_argument("--max-num-seqs", type=int, default=None)
+    p.add_argument("--context-len", type=int, default=None, help="上下文窗口大小")
     p.add_argument("--batch", action="store_true", help="运行批量推理演示")
     p.add_argument("--image", default=None, help="图片路径 → 多模态推理")
+    p.add_argument("--image-max-side", type=int, default=1024, help="图片长边最大像素（等比缩放）")
     p.add_argument("--enable-vit-cg", action="store_true", help="启用 ViT CUDA Graph")
     p.add_argument("--download", action="store_true")
     p.add_argument("--verify-all", action="store_true")
@@ -223,14 +240,14 @@ def main() -> None:
     config_path = Path(args.config) if args.config else HERE / "config.yaml"
     cfg = load_config(config_path)
     for key in ("model", "prompt", "max_new_tokens", "temperature", "top_p", "top_k",
-                "prefix_backend", "max_num_seqs"):
+                "prefix_backend", "max_num_seqs", "context_len"):
         if (v := getattr(args, key)) is not None:
             cfg[key] = v
     if args.compile:
         cfg["enforce_eager"] = False
 
     if args.image:
-        run_image(cfg, image_path=args.image, vit_cg=args.enable_vit_cg)
+        run_image(cfg, image_path=args.image, vit_cg=args.enable_vit_cg, max_side=args.image_max_side)
     elif args.batch:
         run_batch(cfg)
     else:
