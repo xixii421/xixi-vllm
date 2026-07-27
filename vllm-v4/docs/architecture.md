@@ -11,26 +11,25 @@
 
 | 版本 | 主题 | src/ 行数 | Python 文件数 |
 |------|------|-----------|--------------|
-| v0 | 最简文本推理循环 | ~738 | 18 |
-| v1 | KV Cache + 页表 | ~1,887 | 28 |
-| v2 | Continuous Batching + 前缀缓存 | ~2,106 | 32 |
-| v3 | FlashInfer 算子 + Triton + Decode CG | ~3,436 | 36 |
-| **v4** | **多模态 Qwen3-VL** | **~12,558** | **75** |
+| v0 | 最简文本推理循环 | 738 | 12 |
+| v1 | KV Cache + 页表 | 1,887 | 26 |
+| v2 | Continuous Batching + 前缀缓存 | 2,106 | 31 |
+| v3 | FlashInfer 算子 + Triton + Decode CG | 3,508 | 36 |
+| v4 | 多模态 Qwen3-VL | 5,888 | 47 |
+| v5 | 分布式 / MoE / TP / PP | 11,826 | 101 |
 
-从 v3 到 v4，代码量增长了约 **3.6 倍**，增量几乎全部来自多模态相关模块（`src/multimodal/`、`src/layers/vision/`、`src/models/qwen3_vl.py` 等）以及大量的基准测试脚本。
+从 v3 到 v4，代码量增长了约 **1.7 倍**（3,508 → 5,888），增量主要来自多模态相关模块（`src/multimodal/`、`src/layers/vision/`、`src/models/qwen3_vl.py` 等）。从 v4 到 v5 增长约 **2.0 倍**（5,888 → 11,826），增量来自分布式能力（TP/PP/DP）和 MoE 支持。
 
 ### 1.2 v4 各模块代码量分布
 
 | 模块 | 行数 | 占比 | 说明 |
 |------|------|------|------|
-| `bench/` | ~5,000+ | ~40% | 性能基准测试（多版本对比、profile、CG suite） |
-| `src/multimodal/` | ~1,355 | ~11% | 多模态核心：processor + vit + vision + mrope |
-| `src/engine/` | ~1,323 | ~11% | 调度器、模型执行器、输入构造器 |
-| `src/memory/` | ~1,031 | ~8% | KV 管理器、前缀缓存（hash/radix） |
-| `src/models/` | ~773 | ~6% | 模型定义：qwen3 + qwen3_vl + 权重加载 |
-| `src/layers/` | ~458 | ~4% | 算子层：attention、RoPE/MRoPE、RMSNorm、activation |
-| `tests/` | ~1,650 | ~13% | 测试套件 |
-| `src/core/` | ~299 | ~2% | CUDA Graph 执行器 |
+| `src/multimodal/` | ~1,355 | ~23% | 多模态核心：processor + vit + vision + mrope |
+| `src/engine/` | ~1,323 | ~22% | 调度器、模型执行器、输入构造器 |
+| `src/memory/` | ~1,031 | ~18% | KV 管理器、前缀缓存（hash/radix） |
+| `src/models/` | ~773 | ~13% | 模型定义：qwen3 + qwen3_vl + 权重加载 |
+| `src/layers/` | ~458 | ~8% | 算子层：attention、RoPE/MRoPE、RMSNorm、activation |
+| `src/core/` | ~299 | ~5% | CUDA Graph 执行器 |
 
 ---
 
