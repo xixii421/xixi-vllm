@@ -1,7 +1,28 @@
-# dzyy-vllm — 多版本 vLLM 学习项目
+<div align="center">
+  <img src="assets/banner1.png" alt="dzyy-vllm" width="960">
 
-> 从零实现的 vLLM 引擎，涵盖 v0～v5 六个版本，逐步引入 KV Cache、Continuous Batching、FlashInfer、
-> CUDA Graph、多模态、MoE、TP、PP、EP等核心技术。各版本详情见各自 `README.md`。
+  <p>
+    <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.12"></a>
+    <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-2.13-EE4C2C?style=flat-square&logo=pytorch&logoColor=white" alt="PyTorch 2.13"></a>
+    <a href="https://developer.nvidia.com/cuda-toolkit"><img src="https://img.shields.io/badge/CUDA-13.0-76B900?style=flat-square&logo=nvidia&logoColor=white" alt="CUDA 13.0"></a>
+    <a href="https://flashinfer.ai/"><img src="https://img.shields.io/badge/FlashInfer-0.6.15-6366f1?style=flat-square" alt="FlashInfer"></a>
+    <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/badge/lint-ruff-7c3aed?style=flat-square" alt="Ruff"></a>
+
+  </p>
+
+  <p>
+    <img src="https://img.shields.io/badge/v0_minimal-gray?style=flat-square&label">
+    <img src="https://img.shields.io/badge/v1_kv--cache-gray?style=flat-square&label">
+    <img src="https://img.shields.io/badge/v2_continuous--batching-gray?style=flat-square&label">
+    <img src="https://img.shields.io/badge/v3_flashinfer-gray?style=flat-square&label">
+    <img src="https://img.shields.io/badge/v4_multimodal-gray?style=flat-square&label">
+    <img src="https://img.shields.io/badge/v5_distributed-gray?style=flat-square&label">
+  </p>
+
+  
+</div>
+
+---
 
 ## uv 快速配置指南
 
@@ -89,6 +110,10 @@ PYTHONPATH=vllm-v3 python vllm-v3/run.py --compile
 # v4 — 多模态 (Qwen3-VL)
 PYTHONPATH=vllm-v4 python vllm-v4/run.py \
     --model Qwen3-VL-2B-Instruct --image ./vllm-v4/cat.jpg --prompt "描述这张图"
+
+# v5 - MoE 待定
+
+# 鉴于代码量与优化量太大，还在完善中，目前代码已经可以成功运行
 ```
 
 
@@ -102,3 +127,4 @@ PYTHONPATH=vllm-v4 python vllm-v4/run.py \
 | [vllm-v3](vllm-v3/README.md) | 算子级性能提升 | FlashInfer paged attention、Decode CUDA Graph、Triton RMSNorm、Gumbel-Max 采样 |
 | [vllm-v4](vllm-v4/README.md) | 多模态（Qwen3-VL） | DeepStack、MRoPE、EncoderCache、ViT CUDA Graph、Vision Token 管理 |
 | [vllm-v5](vllm-v5/README.md) | TP、PP、MoE | 文档待完善 |
+| [vllm-v6]()| 若干量化方案 | 计划中 | 
