@@ -1,7 +1,7 @@
 # dzyy-vllm — 多版本 vLLM 学习项目
 
 > 从零实现的 vLLM 引擎，涵盖 v0～v5 六个版本，逐步引入 KV Cache、Continuous Batching、FlashInfer、
-> CUDA Graph、多模态等核心技术。各版本详情见各自 `README.md`。
+> CUDA Graph、多模态、MoE、TP、PP、EP等核心技术。各版本详情见各自 `README.md`。
 
 ## uv 快速配置指南
 
@@ -9,7 +9,7 @@
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
-uv --version  # 验证（本机已安装 0.7.7）
+uv --version  # 验证
 ```
 
 ### 2. 创建虚拟环境
