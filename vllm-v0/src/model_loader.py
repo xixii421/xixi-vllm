@@ -26,6 +26,5 @@ def safetensors_weights_iterator(hf_folder: str) -> Iterable[tuple[str, torch.Te
 
 
 def load_model(model: nn.Module, hf_folder: str) -> nn.Module:
-    """消费权重流；QKV 合并等名字映射由 model.load_weights 处理。"""
     model.load_weights(safetensors_weights_iterator(hf_folder))
     return model.eval()
