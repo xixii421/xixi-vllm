@@ -117,6 +117,14 @@ class Profiler:
                             cat = "aten::cat"
                         else:
                             cat = "aten::other"
+                    elif cat.startswith("void "):
+                        # CUDA kernel: void cutlass::, void pytorch_flash:: 等
+                        cat = (
+                            "aten::SDPA" if any(k in name for k in ("flash", "sdpa", "attention"))
+                            else "aten::GEMM" if any(k in name for k in ("cutlass", "cublas", "gemm"))
+                            else "aten::elementwise" if "elementwise" in name or "vectorized" in name
+                            else "GPU_KERNEL"
+                        )
                 elif name.startswith("cuda"):
                     if "Launch" in name:
                         cat = "cudaLaunch"
@@ -127,8 +135,15 @@ class Profiler:
                     else:
                         cat = "cuda_runtime"
                 elif name.startswith("void "):
-                    # CUDA kernel: void cutlass::Kernel2<...>, void pytorch_flash::...
-                    cat = "GPU_KERNEL"
+                    # CUDA kernel 底层实现: 归入对应上层算子类别
+                    if any(k in name for k in ("flash", "sdpa", "attention")):
+                        cat = "aten::SDPA"
+                    elif any(k in name for k in ("cutlass", "cublas", "cublasLt", "gemm")):
+                        cat = "aten::GEMM"
+                    elif "elementwise" in name or "vectorized" in name:
+                        cat = "aten::elementwise"
+                    else:
+                        cat = "GPU_KERNEL"
                 else:
                     cat = f"other::{name[:20]}"
                 if cat not in groups:
