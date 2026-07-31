@@ -1,11 +1,12 @@
 """Profiler: torch.profiler 薄封装。
 
 用法:
-  pf = Profiler(trace_dir="./traces/v0", label="v0")
+  pf = Profiler(trace_dir="./traces/v0", label="v0", profile_memory=True)
   with pf.annotate("prefill"):
       model(...)
-  pf.print_full_table()      # 所有算子的 CPU+CUDA 时间
-  pf.print_category_summary() # 按模块分组的分类汇总
+  pf.print_full_table()        # 所有算子的 CPU+CUDA 时间
+  pf.print_category_summary()  # 按模块分组的分类汇总
+  pf.print_memory_summary()    # 显存分配 Top-15 (需 profile_memory=True)
 """
 
 from __future__ import annotations
@@ -30,10 +31,14 @@ class Profiler:
         trace_dir: str = "./profiler_traces",
         label: str = "profile",
         with_stack: bool = False,
+        profile_memory: bool = False,
+        with_flops: bool = False,
     ) -> None:
         self.trace_dir = trace_dir
         self.label = label
         self._with_stack = with_stack
+        self._profile_memory = profile_memory
+        self._with_flops = with_flops
         self._running = False
         self._prof: _torch_profile | None = None
         os.makedirs(trace_dir, exist_ok=True)
@@ -42,7 +47,9 @@ class Profiler:
         return _torch_profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             record_shapes=True,
+            profile_memory=self._profile_memory,
             with_stack=self._with_stack,
+            with_flops=self._with_flops,
             on_trace_ready=tensorboard_trace_handler(
                 self.trace_dir, worker_name=self.label, use_gzip=False
             ),
@@ -176,3 +183,17 @@ class Profiler:
               f"CPU/GPU={cpu_total/max(cuda_total,1):.1f}x")
         print(f"  若 CPU/GPU>3: CPU 瓶颈（Python 开销/数据搬运/同步等），"
               f"nsys 可精确定位")
+
+    def print_memory_summary(self) -> None:
+        """打印 profiler 捕获的显存分配统计 (需 profile_memory=True)。"""
+        if self._prof is None or not self._profile_memory:
+            print("[profiler] 未开启 profile_memory，跳过显存统计")
+            return
+        try:
+            tbl = self._prof.key_averages().table(
+                sort_by="self_cpu_memory_usage", row_limit=15
+            )
+            print("\n[显存分配 Top-15]")
+            print(tbl)
+        except Exception:
+            print("[profiler] 无法获取显存统计")
