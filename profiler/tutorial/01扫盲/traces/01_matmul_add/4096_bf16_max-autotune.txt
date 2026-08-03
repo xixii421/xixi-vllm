@@ -1,0 +1,21 @@
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                             matmul_add         0.00%       0.000us         0.00%       0.000us       0.000us      23.027ms       100.11%      23.027ms       1.151ms            20  
+                                          ProfilerStep*         1.35%     316.535us        15.93%       3.745ms     187.272us       0.000us         0.00%      23.001ms       1.150ms            20  
+                                             matmul_add         2.56%     602.778us        14.58%       3.429ms     171.445us       0.000us         0.00%      23.001ms       1.150ms            20  
+                             Torch-Compiled Region: 0/0         3.36%     790.637us        11.34%       2.666ms     133.302us       0.000us         0.00%      23.001ms       1.150ms            20  
+## Call CompiledFxGraph f3vucqooad2w566n33uu3hxcuq6k...         4.52%       1.064ms         7.46%       1.755ms      87.751us      19.314ms        83.97%      23.001ms       1.150ms            20  
+                                 triton_tem_fused_add_0         0.00%       0.000us         0.00%       0.000us       0.000us      19.314ms        83.97%      19.314ms     965.716us            20  
+                                   aten::_foreach_copy_         0.90%     212.088us         2.26%     530.329us      26.516us       3.687ms        16.03%       3.687ms     184.355us            20  
+void at::native::(anonymous namespace)::multi_tensor...         0.00%       0.000us         0.00%       0.000us       0.000us       3.687ms        16.03%       3.687ms     184.355us            20  
+                               TorchDynamo Cache Lookup         0.68%     160.087us         0.68%     160.087us       8.004us       0.000us         0.00%       0.000us       0.000us            20  
+                                      Pregraph bytecode         0.23%      53.816us         0.23%      53.816us       2.691us       0.000us         0.00%       0.000us       0.000us            20  
+                 AOTDispatcher Runtime Wrapper Prologue         0.28%      66.560us         0.28%      66.560us       3.328us       0.000us         0.00%       0.000us       0.000us            20  
+                      aten::_debug_has_internal_overlap         0.07%      17.424us         0.07%      17.424us       0.290us       0.000us         0.00%       0.000us       0.000us            60  
+                                       cudaLaunchKernel         1.35%     318.241us         1.35%     318.241us      15.912us       0.000us         0.00%       0.000us       0.000us            20  
+                                        cudaGraphLaunch         0.61%     143.360us         0.61%     143.360us       7.168us       0.000us         0.00%       0.000us       0.000us            20  
+                                  cudaDeviceSynchronize        84.07%      19.767ms        84.07%      19.767ms      19.767ms       0.000us         0.00%       0.000us       0.000us             1  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 23.513ms
+Self CUDA time total: 23.001ms

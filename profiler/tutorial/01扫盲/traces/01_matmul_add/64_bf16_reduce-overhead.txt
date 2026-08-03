@@ -1,0 +1,21 @@
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                             matmul_add         0.00%       0.000us         0.00%       0.000us       0.000us     574.466us       465.21%     574.466us      28.723us            20  
+                                          ProfilerStep*         8.61%     450.641us        99.58%       5.211ms     260.561us       0.000us         0.00%     123.486us       6.174us            20  
+                                             matmul_add        16.49%     862.878us        90.97%       4.761ms     238.029us       0.000us         0.00%     123.486us       6.174us            20  
+                             Torch-Compiled Region: 0/0        20.85%       1.091ms        70.35%       3.682ms     184.088us       0.000us         0.00%     123.486us       6.174us            20  
+## Call CompiledFxGraph fommcl5qwhdiigkjuuiqheg3vajq...        28.87%       1.511ms        46.29%       2.423ms     121.127us      90.526us        73.31%     123.486us       6.174us            20  
+void cutlass::Kernel2<cutlass_80_tensorop_bf16_s1681...         0.00%       0.000us         0.00%       0.000us       0.000us      48.799us        39.52%      48.799us       2.440us            20  
+                                   aten::_foreach_copy_         5.54%     289.782us        12.06%     631.053us      31.553us      32.960us        26.69%      32.960us       1.648us            20  
+void at::native::(anonymous namespace)::multi_tensor...         0.00%       0.000us         0.00%       0.000us       0.000us      32.960us        26.69%      32.960us       1.648us            20  
+void cublasLt::splitKreduce_kernel<32, 16, int, __nv...         0.00%       0.000us         0.00%       0.000us       0.000us      23.582us        19.10%      23.582us       1.179us            20  
+                                          memcpy32_post         0.00%       0.000us         0.00%       0.000us       0.000us      18.145us        14.69%      18.145us       0.907us            20  
+                               TorchDynamo Cache Lookup         4.13%     215.944us         4.13%     215.944us      10.797us       0.000us         0.00%       0.000us       0.000us            20  
+                                      Pregraph bytecode         1.46%      76.234us         1.46%      76.234us       3.812us       0.000us         0.00%       0.000us       0.000us            20  
+                 AOTDispatcher Runtime Wrapper Prologue         1.76%      91.971us         1.76%      91.971us       4.599us       0.000us         0.00%       0.000us       0.000us            20  
+                      aten::_debug_has_internal_overlap         0.40%      20.743us         0.40%      20.743us       0.346us       0.000us         0.00%       0.000us       0.000us            60  
+                                       cudaLaunchKernel         6.52%     341.271us         6.52%     341.271us      17.064us       0.000us         0.00%       0.000us       0.000us            20  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 5.233ms
+Self CUDA time total: 123.486us
