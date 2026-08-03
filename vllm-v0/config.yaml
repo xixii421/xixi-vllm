@@ -14,5 +14,5 @@ top_p: 0.95
 top_k: 20
 
 # --- 引擎 ---
-enforce_eager: true  # v0 仅支持 eager 模式
+enforce_eager: true  # 关闭 torch.compile，便于调试
 dtype: "auto"

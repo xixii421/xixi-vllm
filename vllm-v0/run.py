@@ -23,7 +23,6 @@ from src.model_hub import (
     download_models,
     gpu_memory_gb,
     select_models_for_vram,
-    verify_models,
 )
 
 # ---------------------------------------------------------------------------
@@ -107,7 +106,6 @@ def main() -> None:
     p.add_argument("--top-p", type=float, default=None)
     p.add_argument("--top-k", type=int, default=None)
     p.add_argument("--download", action="store_true")
-    p.add_argument("--verify-all", action="store_true")
     p.add_argument("--list", action="store_true")
     args = p.parse_args()
 
@@ -119,9 +117,6 @@ def main() -> None:
         print(f"VRAM:  {vram:.1f} GB")
         print(f"All:   {', '.join(s.local_name for s in QWEN3_REGISTRY)}")
         print(f"Fit:   {', '.join(s.local_name for s in selected)}")
-        return
-    if args.verify_all:
-        verify_models(download=True)
         return
     if args.download:
         print(f"Downloading to {DEFAULT_CACHE_DIR} ...")

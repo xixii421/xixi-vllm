@@ -32,8 +32,8 @@ v0 的 `Sampler` 把两条路径收进同一个 `forward`，根据传入参数�
 ## 2. 整体设计
 
 ```py
-class Sampler(nn.Module):
-    def forward(self, logits, temperatures=None, min_ps=None, top_ps=None, top_ks=None):
+class Sampler:
+    def __call__(self, logits, temperatures=None, top_ps=None, top_ks=None):
         ...
 ```
 
@@ -46,22 +46,19 @@ class Sampler(nn.Module):
 ## 3. 贪心快路径
 
 ```py
-is_all_greedy = (
-    temperatures is None and min_ps is None and top_ps is None and top_ks is None
-)
-if is_all_greedy:
+if temperatures is None and top_ps is None and top_ks is None:
     return torch.argmax(logits, dim=-1)
 ```
 
 <span style="color:#b45309">**机制**</span> 当所有采样参数都是 `None` 时，直接 `argmax`，跳过 temperature、过滤、softmax、multinomial 全套流程。
 
-<span style="color:#059669">**细节**</span> Engine 在 `temperature <= 0` 时把 `temp_t` 设为 `None`，若 `top_p` / `top_k` / `min_p` 也没传，就会命中这条快路径。这是 v0 默认配置下推理最快的原因，也是很多线上服务的默认模式。
+<span style="color:#059669">**细节**</span> Engine 在 `temperature <= 0` 时把 `temp_t` 设为 `None`，若 `top_p` / `top_k` 也没传，就会命中这条快路径。这是 v0 默认配置下推理最快的原因，也是很多线上服务的默认模式。
 
 <span style="color:#059669">**细节**</span> 快路径不做 `float32` 转换，直接在模型输出的 dtype（通常是 `float16` / `bfloat16`）上 argmax。对贪心来说精度足够，又少一次类型转换。
 
 ## 4. 完整采样链
 
-当任一参数非 `None` 时，走完整的六步流水线
+当任一参数非 `None` 时，走完整的五步流水线
 
 ```
 logits [1, 151936]
@@ -69,9 +66,8 @@ logits [1, 151936]
   ├─ ① float32 转换
   ├─ ② Temperature scaling     logits /= T
   ├─ ③ Top-K + Top-P 过滤      砍掉低分 token → -inf
-  ├─ ④ Min-P 过滤              砍掉相对低概率 token → -inf
-  ├─ ⑤ Softmax                 logits → 概率分布
-  └─ ⑥ multinomial             按概率随机抽 1 个
+  ├─ ④ Softmax                 logits → 概率分布
+  └─ ⑤ multinomial             按概率随机抽 1 个
 ```
 
 ### 4.1 Temperature 温度缩放
@@ -111,19 +107,7 @@ logits = _apply_top_k_top_p(logits, top_ps, top_ks)
 
 <span style="color:#b45309">**机制**</span> 与 Top-K 的「固定个数」不同，Top-P 是**动态集合大小**。分布尖锐时可能只留几个 token，分布平坦时可能留几百个。这让采样既能砍掉长尾噪声，又不会把合法的低分 token 一刀切掉。
 
-### 4.3 Min-P
-
-```py
-logits = _apply_min_p(logits, min_ps)
-```
-
-<span style="color:#b45309">**机制**</span> 相对阈值过滤。先 softmax 得到概率，再删掉所有 `prob < min_p × max_prob` 的 token。`max_prob` 是当前分布里的最高概率。
-
-<span style="color:#059669">**细节**</span> Min-P 放在 Top-K / Top-P **之后**。前三步已经收窄了候选集，Min-P 再按相对概率做最后一轮清洗，去掉「虽然进了候选集但概率实在太低」的 token。
-
-<span style="color:#059669">**细节**</span> Min-P 是较新的采样策略（相比 Top-P），在保持多样性的同时能有效抑制胡言乱语。`run.py` 示例没开 min_p，但 Engine 接口已支持。
-
-### 4.4 Softmax + Multinomial
+### 4.3 Softmax + Multinomial
 
 ```py
 probs = torch.softmax(logits, dim=-1, dtype=torch.float)
@@ -170,19 +154,7 @@ logits_sort.masked_fill_(top_p_mask, -float("inf"))
 
 <span style="color:#059669">**细节**</span> Top-P 的 softmax 是在**已排序**的 logits 上做的，和最终 forward 里的 softmax 不是同一次计算。这里只是为了确定哪些 token 属于 nucleus，不影响最终概率分布的归一化。
 
-## 6. `_apply_min_p` 的实现
-
-```py
-probs = torch.softmax(logits, dim=-1)
-top_probs, _ = probs.max(dim=-1, keepdim=True)
-return logits.masked_fill_(probs < min_p.unsqueeze_(dim=1) * top_probs, -float("inf"))
-```
-
-<span style="color:#b45309">**机制**</span> 阈值是**相对于当前最高分**的动态值，而不是绝对概率门槛。max_prob 很高时门槛跟着抬高，max_prob 很低时也会适当放宽，避免把合法 token 误杀。
-
-<span style="color:#059669">**细节**</span> 这里对 logits 做了一次 softmax 只为算 mask，被 mask 后的 logits 还会在 forward 末尾再做一次 softmax。两次 softmax 开销在词表 15 万维时不可忽视，但 v0 单请求场景下完全可接受。
-
-## 7. 与 Engine 的参数对接
+## 6. 与 Engine 的参数对接
 
 Engine 里的调用方式
 
@@ -190,20 +162,17 @@ Engine 里的调用方式
 temp_t = None if temperature <= 0 else _t(temperature, torch.float)
 top_p_t = _t(top_p, torch.float)
 top_k_t = _t(top_k, torch.int)
-min_p_t = _t(min_p, torch.float)
 
-next_id = self.sampler(logits, temp_t, min_p_t, top_p_t, top_k_t).item()
+next_id = self.sampler(logits, temp_t, top_p_t, top_k_t).item()
 ```
 
-需要注意的三点
-
-<span style="color:#059669">**细节**</span> **参数顺序不同**。`generate` 签名是 `(temperature, top_p, top_k, min_p)`，传给 Sampler 时变成 `(temperatures, min_ps, top_ps, top_ks)`，min_p 和 top_p 的位置对调了，写调用代码时要对齐。
+需要注意的两点
 
 <span style="color:#059669">**细节**</span> **None 的含义**。`None` 表示「这一步不过滤」，不是「参数为零」。Engine 用 `None` 跳过未设置的过滤器；Sampler 内部用 `<= 0` 做退化处理（如 k≤0 等于不限制）。
 
 <span style="color:#059669">**细节**</span> **`.item()` 同步点**。`multinomial` 或 `argmax` 的结果在 GPU 上，`.item()` 拉回 Python int 时触发 CPU/GPU 同步。每生成一个 token 同步一次，是 v0 延迟的来源之一。
 
-## 8. 一组典型参数的效果
+## 7. 一组典型参数的效果
 
 以 `run.py` 的配置为例
 
@@ -216,13 +185,12 @@ engine.generate(prompt, max_new_tokens=400, temperature=0.9, top_p=0.95, top_k=2
 | temperature | 0.9 | 略低于 1，输出偏确定但不死板 |
 | top_k | 20 | 每步只在分数最高的 20 个 token 里抽 |
 | top_p | 0.95 | 在 Top-K 结果上再做 nucleus 截断 |
-| min_p | 未设置 | 不做相对概率过滤 |
 
 <span style="color:#b45309">**机制**</span> Top-K 和 Top-P **叠加使用**时，先 K 收窄候选集，再 P 动态裁剪。K=20 保证不会从 15 万个 token 里瞎抽，P=0.95 保证不会强行留满 20 个低概率 token。两者配合是聊天场景的经典组合。
 
 若改成 `temperature=0` 且其余不传，整条采样链被跳过，直接贪心 argmax，速度最快但输出完全确定。
 
-## 9. 一次采样的完整路径
+## 8. 一次采样的完整路径
 
 ```
 logits [1, 151936]     ← lm_head 输出，某个位置的 hidden state 投影到词表

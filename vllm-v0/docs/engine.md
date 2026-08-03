@@ -75,9 +75,9 @@ if not config.enforce_eager:
     self.model = torch.compile(self.model, mode="reduce-overhead")
 ```
 
-<span style="color:#b45309">**机制**</span> 先建空骨架，再流式灌权重（第 3 节 `model.md`），最后 `.to()` 上 GPU。默认开启 `torch.compile`，用 `reduce-overhead` 模式降低 Python 调度开销。
+<span style="color:#b45309">**机制**</span> 先建空骨架，再流式灌权重（第 3 节 `model.md`），最后 `.to()` 上设备/转 dtype。**加载顺序是刻意设计的**——若先 `.to(device)` 再灌权重，加载过程会反复在 CPU/GPU 间搬运张量，浪费显存；先建骨架、权重灌进参数后统一迁移，只搬一次。
 
-<span style="color:#059669">**细节**</span> `run.py` 里设了 `enforce_eager=True`，是为了调试时跳过 compile，避免首次运行的编译等待和 trace 报错不好定位。生产跑吞吐时可以关掉。
+<span style="color:#059669">**细节**</span> `enforce_eager=True` 时跳过 `torch.compile`。`run.py` 里默认开启，是为了调试时跳过编译等待和 trace 报错不好定位；关掉（`enforce_eager: false`）可让 `torch.compile(mode="reduce-overhead")` 生效——融合 kernel + CUDA Graph 消除启动开销（profile 实测 eager → compile 约 3.7x 加速）。
 
 <span style="color:#059669">**细节**</span> 只对 `model` 做 compile，`Sampler` 不 compile。采样分支里有大量条件判断和 `multinomial`，compile 收益小，反而增加复杂度。
 
@@ -172,19 +172,34 @@ yield self.tokenizer.decode([next_id])
 
 ### 3.5 `@torch.inference_mode()`
 
-<span style="color:#059669">**细节**</span> 比 `no_grad` 更激进。推理场景下省一点开销，也防止误触 autograd。
+<span style="color:#059669">**细节**</span> 比 `no_grad` 更激进：不仅不记录梯度，连 autograd 的自动求导机制整体跳过，推理场景下省开销、防误触。整个 `generate` 循环都跑在这个模式里——模型前向、logits 投影、采样全部无梯度。
+
+### 3.6 v0 的关键特征：每步重算全序列（无 KV Cache）
+
+<span style="color:#b45309">**机制**</span> 第 3.3 节看到 `input_ids` 每轮都重建 `[1, N]`、`positions` 每轮从 0 `arange`。这正是 v0 **没有 KV Cache** 的标志：
+
+```
+decode 第 t 步：
+  输入: 完整历史 [t0, t1, ..., t_{t-1}]（长度 N = t）
+  计算: 整条序列再过一次全部 28 层 Transformer
+  产出: 只用最后一个位置的 logits
+```
+
+<span style="color:#059669">**细节**</span> 每一步都在**重算所有历史 token 的 Attention**，复杂度 O(N²)。虽然只有最后一个位置被采样，但前 N-1 个位置的注意力分数全都白算了。这是 v0 最大的性能瓶颈，也是下一版 v1 引入 KV Cache 后要解决的第一个问题——缓存历史 K/V，decode 每步只对新增 token 做 O(1) 计算。
+
+<span style="color:#059669">**细节**</span> 正因为无 KV Cache，`positions` 每轮传完整 `0..N-1`，和 `model.py` 里「positions 从外层传入」的设计配套。v1 接 KV Cache 时，这里只需改成传增量位置偏移（如 `[N]`），RoPE 的 `index_select` 接口天然支持。
 
 ## 4. 与 Sampler 的协作
 
-Engine 不关心采样数学细节，只传五个参数
+Engine 不关心采样数学细节，只传采样参数
 
 ```py
-next_id = self.sampler(logits, temp_t, min_p_t, top_p_t, top_k_t).item()
+next_id = self.sampler(logits, temp_t, top_p_t, top_k_t).item()
 ```
 
-`Sampler` 内部的策略链（temperature → top-k → top-p → min-p → softmax → multinomial）在 `layers.md` 第 8 节已有说明。Engine 侧只需记住两点
+`Sampler` 内部的策略链（temperature → top-k → top-p → softmax → multinomial）在 `layers.md` 第 8 节已有说明。Engine 侧只需记住两点
 
-<span style="color:#059669">**细节**</span> 参数顺序是 `(logits, temperatures, min_ps, top_ps, top_ks)`，和 `generate` 函数签名的 `(temperature, top_p, top_k, min_p)` 顺序不同，调用时注意对齐。
+<span style="color:#059669">**细节**</span> 参数顺序是 `(logits, temperatures, top_ps, top_ks)`，和 `generate` 函数签名的 `(temperature, top_p, top_k)` 顺序不同，调用时注意对齐。
 
 <span style="color:#059669">**细节**</span> `.item()` 把 GPU 标量拉回 Python int，用于 `input_ids.append` 和 `eos` 判断。这一步是 CPU/GPU 同步点，每生成一个 token 都会触发一次，后续做 CUDA Graph 或批量解码时需要格外关注。
 

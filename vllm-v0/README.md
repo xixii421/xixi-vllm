@@ -23,7 +23,7 @@
 ```bash
 cd vllm-v0
 
-# 下载模型（需先修改 src/model_hub.py 中的缓存路径）
+# 下载模型（默认缓存到 ~/huggingface）
 python run.py --download
 
 # 推理（默认从 config.yaml 读取参数）

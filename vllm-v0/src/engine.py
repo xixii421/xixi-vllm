@@ -49,7 +49,6 @@ class Engine:
         temperature: float = 0.0,
         top_p: float | None = None,
         top_k: int | None = None,
-        min_p: float | None = None,
     ):
         ids = (
             list(prompt)
@@ -69,7 +68,6 @@ class Engine:
         temp_t = None if temperature <= 0 else pack(temperature, torch.float)
         top_p_t = pack(top_p, torch.float)
         top_k_t = pack(top_k, torch.int)
-        min_p_t = pack(min_p, torch.float)
 
         for _ in range(max_new_tokens):
             # ids: Python list 长度 N → 张量 [1, N]；positions 为 0..N-1
@@ -79,8 +77,8 @@ class Engine:
             h = self.model(input_ids, positions)  # [1, N, hidden]
             # 只投影最后一个时间步 → [1, vocab]
             logits = self.model.compute_logits(h[:, -1:]).squeeze(1)
-            # 注意传给 Sampler 的参数顺序：temp, min_p, top_p, top_k
-            next_id = int(self.sampler(logits, temp_t, min_p_t, top_p_t, top_k_t).item())
+            # 传给 Sampler 的参数顺序：temp, top_p, top_k
+            next_id = int(self.sampler(logits, temp_t, top_p_t, top_k_t).item())
 
             yield self.tokenizer.decode([next_id])
             ids.append(next_id)

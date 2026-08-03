@@ -183,7 +183,6 @@ $$
 
 ```python
 class SiluAndMul(nn.Module):
-    @torch.compile
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, y = x.chunk(2, -1)   # 拆成 value 和 gate 两半
         return F.silu(y) * x    # SiLU(gate) * value
@@ -196,6 +195,13 @@ class SiluAndMul(nn.Module):
 - `y` (后半) = `[0.75, -0.55]`
 
 `F.silu(y) * x` 正好得到 `[0.509*0.65, (-0.201)*(-0.7)] = [0.331, 0.141]`，与上一节 SwiGLU 的结果完全一致。
+
+在 `model.py` 中，MLP 先用 `torch.cat` 把 `up_proj` / `gate_proj` 的输出拼成一个向量（**后半是 gate**，与 `SiluAndMul` 约定一致），再送入 `SiluAndMul`：
+
+```python
+def forward(self, x: torch.Tensor) -> torch.Tensor:
+    return self.down_proj(self.act_fn(torch.cat([self.up_proj(x), self.gate_proj(x)], dim=-1)))
+```
 
 ### 6.3 效果
 

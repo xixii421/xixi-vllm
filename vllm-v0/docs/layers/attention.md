@@ -23,21 +23,18 @@ GQA:  Q₁..₁₆  K₁..₈   V₁..₈       ← 仅 8 个 KV head
 
 ### 3.1. 初始化
 ```py
-def __init__(self, num_heads: int, head_dim: int, scaling: float, num_kv_heads: int):
+def __init__(self, num_heads: int, head_dim: int, num_kv_heads: int):
     super().__init__()
-    self.num_heads = num_heads          # Q 的头数 (e.g., 32)
+    self.num_heads = num_heads          # Q 的头数 (e.g., 16)
     self.head_dim = head_dim            # 每个头的维度 (e.g., 128)
     self.num_kv_heads = num_kv_heads    # K/V 的头数 (e.g., 8)
     
     # 确保 Q 的头数可以被 K/V 的头数整除
     assert num_heads % num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
-    # 计算每个 K/V 头对应多少个 Q 头（即每个组的大小）
-    self.num_kv_groups = num_heads // num_kv_heads
-    self.scaling = scaling              # 缩放因子 (1 / sqrt(head_dim))
-
+    self.scaling = head_dim ** -0.5     # 缩放因子 (1 / sqrt(head_dim))，内部推导
 ```
 
-通过 num_kv_groups 计算出分组大小。例如，如果 num_heads=32，num_kv_heads=8，则 num_kv_groups=4。这意味着每 4 个 Q 头会共享 1 个 K 头和 1 个 V 头。
+分组大小（每个 KV 头对应多少个 Q 头）为 `num_heads // num_kv_heads`。例如 `num_heads=16`，`num_kv_heads=8` 时，每 2 个 Q 头共享 1 个 K 头和 1 个 V 头。GQA 的展开由 SDPA 的 `enable_gqa` 原生完成（见 3.3），代码里无需再存 `num_kv_groups`。
 
 
 ### 3.2. 前向传播

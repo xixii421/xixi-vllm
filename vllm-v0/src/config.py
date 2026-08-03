@@ -14,5 +14,4 @@ class EngineConfig:
 
     def __post_init__(self) -> None:
         self.model = os.path.expanduser(self.model)
-        # 启动时拉取 HF 结构超参；真正的权重在 Engine 里再 load
         self.hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)

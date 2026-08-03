@@ -206,7 +206,7 @@ Qwen3ForCausalLM          ← 对外入口，挂 lm_head 与 load_weights
 class Qwen3MLP(nn.Module):
     def forward(self, x):
         return self.down_proj(
-            self.act_fn(torch.cat([self.gate_proj(x), self.up_proj(x)], dim=-1))
+            self.act_fn(torch.cat([self.up_proj(x), self.gate_proj(x)], dim=-1))
         )
 ```
 
@@ -222,12 +222,20 @@ class Qwen3MLP(nn.Module):
 
 **初始化阶段**
 
+`Qwen3Attention` 直接吃 `Qwen3Config`，不再逐参数传递：
+
 ```py
-self.qkv_proj = nn.Linear(
-    hidden_size, (num_heads + 2 * num_kv_heads) * head_dim, bias=qkv_bias
-)
-self.q_norm = RMSNorm(head_dim, ...)
-self.k_norm = RMSNorm(head_dim, ...)
+class Qwen3Attention(nn.Module):
+    def __init__(self, config):
+        self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+
+        self.qkv_proj = nn.Linear(
+            config.hidden_size, self.q_size + 2 * self.kv_size, bias=False
+        )
+        self.q_norm = RMSNorm(self.head_dim, ...)
+        self.k_norm = RMSNorm(self.head_dim, ...)
 ```
 
 <span style="color:#b45309">**机制**</span> 三个投影矩阵合成一个 `qkv_proj`，一次 GEMM 同时产出 Q、K、V。`q_norm` / `k_norm` 是 Qwen3 特有的 **QK Norm**，对每个 head 内的向量单独做 RMSNorm，训练更稳。
