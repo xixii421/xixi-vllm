@@ -436,7 +436,7 @@ v2 对应的模块分布在 `kv/pool.py`（BlockPool）、`pagedattention/store.
 
 ## 六、仍有改进空间
 
-1. **Prefill 无 CUDA Graph**：v3 的 prefill 仍 eager（shape 不稳定），只有 decode 走了 CUDA Graph。Prefill 的 torch.compile效果不是很明显，尤其是和v5版本性能对比：
+1. **Prefill 长文本无 CG**：v3 的 prefill 首 chunk 走 piecewise CUDA Graph（覆盖 ≤1536 token），更长的续 chunk 走 eager（shape 动态、无法固定图）。曾尝试用 torch.compile 优化 prefill，实测因 FlashInfer `.plan()` 动态 shape 触发 N_layers 次 graph break，反而更慢（44ms vs 22ms），已从 v3 移除。
 ```
 | Prompt |  v4 TTFT  | v4 tok/s  |  v5 TTFT  | v5 tok/s  | v5/v4  |
 |--------|-----------|-----------|-----------|-----------|--------|

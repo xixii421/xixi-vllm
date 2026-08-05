@@ -56,6 +56,7 @@ class FlashInferBackend:
         is_prefill: bool,
         kv_cache_pool: torch.Tensor,
         cu_seqlen_q_cpu: Optional[torch.Tensor] = None,
+        use_fa2: bool = False,
     ) -> "AttentionMetadata":
         from .attention import AttentionMetadata
 
@@ -100,6 +101,7 @@ class FlashInferBackend:
             wrapper=wrapper,
             kv_cache_pool=kv_cache_pool,
             slot_mapping=slot_mapping,
+            use_fa2=use_fa2,
         )
 
 

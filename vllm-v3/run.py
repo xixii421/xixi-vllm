@@ -2,7 +2,7 @@
 
 用法:
     python run.py                                    # 单条推理（使用 config.yaml）
-    python run.py --compile                          # 启用 Decode CUDA Graph
+    python run.py --cg                               # 启用 Decode CUDA Graph
     python run.py --batch                            # 批量推理演示
 """
 
@@ -21,7 +21,6 @@ from src.models.hub import (
     download_models,
     gpu_memory_gb,
     select_models_for_vram,
-    verify_models,
 )
 
 # ---------------------------------------------------------------------------
@@ -38,6 +37,7 @@ DEFAULTS = {
     "top_p": 0.95,
     "top_k": 20,
     "enforce_eager": True,
+    "prefill_cuda_graph": False,
     "dtype": "auto",
     "context_len": 4096,
     "max_num_seqs": 256,
@@ -78,6 +78,7 @@ def run_single(cfg: dict) -> None:
         EngineConfig(
             model=str(model_path),
             enforce_eager=cfg["enforce_eager"],
+            prefill_cuda_graph=cfg["prefill_cuda_graph"],
             dtype=cfg["dtype"],
             context_len=cfg["context_len"],
             max_num_seqs=cfg["max_num_seqs"],
@@ -116,6 +117,7 @@ def run_batch(cfg: dict) -> None:
         EngineConfig(
             model=str(model_path),
             enforce_eager=cfg["enforce_eager"],
+            prefill_cuda_graph=cfg["prefill_cuda_graph"],
             dtype=cfg["dtype"],
             context_len=cfg["context_len"],
             max_num_seqs=cfg["max_num_seqs"],
@@ -162,12 +164,14 @@ def main() -> None:
     p.add_argument("--temperature", type=float, default=None)
     p.add_argument("--top-p", type=float, default=None)
     p.add_argument("--top-k", type=int, default=None)
-    p.add_argument("--compile", action="store_true", help="启用 Decode CUDA Graph")
+    p.add_argument("--cg", action="store_true", help="启用 Decode CUDA Graph")
+    p.add_argument("--compile", action="store_true", dest="cg",
+                   help="(别名) 启用 Decode CUDA Graph")
+    p.add_argument("--prefill-cg", action="store_true", help="启用 prefill piecewise CUDA Graph")
     p.add_argument("--prefix-backend", choices=("none", "hash", "radix"), default=None)
     p.add_argument("--max-num-seqs", type=int, default=None)
     p.add_argument("--batch", action="store_true", help="运行批量推理演示")
     p.add_argument("--download", action="store_true")
-    p.add_argument("--verify-all", action="store_true")
     p.add_argument("--list", action="store_true")
     args = p.parse_args()
 
@@ -179,9 +183,6 @@ def main() -> None:
         print(f"VRAM:  {vram:.1f} GB")
         print(f"All:   {', '.join(s.local_name for s in QWEN3_REGISTRY)}")
         print(f"Fit:   {', '.join(s.local_name for s in selected)}")
-        return
-    if args.verify_all:
-        verify_models(download=True)
         return
     if args.download:
         print(f"Downloading to {DEFAULT_CACHE_DIR} ...")
@@ -195,8 +196,10 @@ def main() -> None:
                 "prefix_backend", "max_num_seqs"):
         if (v := getattr(args, key)) is not None:
             cfg[key] = v
-    if args.compile:
+    if args.cg:
         cfg["enforce_eager"] = False
+    if args.prefill_cg:
+        cfg["prefill_cuda_graph"] = True
 
     if args.batch:
         run_batch(cfg)

@@ -51,7 +51,11 @@ class RMSNorm(nn.Module):
     def forward(self, x: torch.Tensor, residual: torch.Tensor | None = None):
         if not x.is_cuda:
             return self._forward_cpu(x, residual)
+        return self._forward_triton(x, residual)
 
+    def _forward_triton(
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
+    ):
         orig_shape = x.shape
         hidden_size = orig_shape[-1]
         if not x.is_contiguous():

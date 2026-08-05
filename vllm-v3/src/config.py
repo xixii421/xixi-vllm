@@ -27,6 +27,9 @@ class EngineConfig:
 
     #  算子 
     enforce_eager: bool = True  # False=启用Decode CUDA Graph
+    prefill_cuda_graph: bool = False  # True=prefill 走 piecewise CUDA Graph（首 chunk）
+    prefill_cg_max_tokens: int = 1536  # 捕获的最大 piece token 数（CG 仅在该区间有收益，
+                                       # 且限制了 graph pool 显存：4B 上 8192 网格直接 OOM）
     dtype: str = "auto"
     flashinfer_use_tensor_cores: bool = True  # FlashInfer启用Tensor Core
     flashinfer_non_blocking: bool = True  # FlashInfer plan异步H2D

@@ -11,13 +11,18 @@ from .loader import default_weight_loader
 class Qwen3MLP(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int):
         super().__init__()
-        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        # gate_proj/up_proj 融合为单个 [2*intermediate, hidden] GEMM（少一次 launch+HBM 往返）
+        self.gate_up_proj = nn.Linear(hidden_size, intermediate_size * 2, bias=False)
         self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        return self.down_proj(self.act_fn(torch.cat([self.gate_proj(x), self.up_proj(x)], dim=-1)))
+        x = self.gate_up_proj(x)
+        return self.down_proj(self.act_fn(x))
+
+    def forward_gate_up(self, gate_up: torch.Tensor) -> torch.Tensor:
+        """gate_up_proj 输出已在外部融合计算完毕，此处只做 silu+down。"""
+        return self.down_proj(self.act_fn(gate_up))
 
 
 class Qwen3Attention(nn.Module):
@@ -57,6 +62,10 @@ class Qwen3Attention(nn.Module):
 
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor):
         qkv = self.qkv_proj(hidden_states)
+        return self._forward_qkv(positions, qkv)
+
+    def _forward_qkv(self, positions: torch.Tensor, qkv: torch.Tensor) -> torch.Tensor:
+        """从已投影的 qkv 开始完成注意力：split → q/k norm → rope → attn → o_proj。"""
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         q = q.view(-1, self.num_heads, self.head_dim)
@@ -91,6 +100,10 @@ class Qwen3DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(self, positions, hidden_states, residual: torch.Tensor | None):
+        # 分离式：RMSNorm 与 Linear 各自独立（GEMM 交给 cuBLAS）。
+        # 曾用 fused_rmsnorm_gemm 融合 norm+linear，端到端实测无收益（4096-token
+        # prefill 52.60 vs 52.59ms），已删除。
+        # 保留 gate_up_proj 权重合并（官方 vLLM 同款 MergedColumnParallelLinear）。
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -136,6 +149,8 @@ class Qwen3ForCausalLM(nn.Module):
 
         _q_size = self.model.layers[0].self_attn.num_heads * self.model.layers[0].self_attn.head_dim
         _kv_size = self.model.layers[0].self_attn.num_kv_heads * self.model.layers[0].self_attn.head_dim
+        # Collect gate/up weights for fusion into gate_up_proj
+        gate_up_bufs: dict[str, tuple] = {}
 
         for name, w in weights:
             # merge q_proj/k_proj/v_proj → qkv_proj
@@ -150,11 +165,25 @@ class Qwen3ForCausalLM(nn.Module):
                     loaded.add(name.replace(hf, our))
                     break
             else:
-                if name in params:
+                # merge gate_proj + up_proj → gate_up_proj (fused MLP)
+                if "gate_proj" in name:
+                    our = name.replace("gate_proj", "gate_up_proj")
+                    gate_up_bufs.setdefault(our, [None, None])
+                    gate_up_bufs[our][0] = w
+                elif "up_proj" in name:
+                    our = name.replace("up_proj", "gate_up_proj")
+                    gate_up_bufs.setdefault(our, [None, None])
+                    gate_up_bufs[our][1] = w
+                elif name in params:
                     default_weight_loader(params[name], w)
                     loaded.add(name)
                 else:
                     skipped.append(name)
+
+        for our, (g_w, u_w) in gate_up_bufs.items():
+            if g_w is not None and u_w is not None and our in params:
+                default_weight_loader(params[our], torch.cat([g_w, u_w], dim=0))
+                loaded.add(our)
 
         unloaded = set(params) - loaded
         if "lm_head.weight" in unloaded and "model.embed_tokens.weight" in loaded:

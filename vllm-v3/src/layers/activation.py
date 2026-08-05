@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from flashinfer.activation import silu_and_mul as flashinfer_silu_and_mul
 '''
-测试性能对比如下，最终选择FlashInfer作为激活函数后端。
+测试性能对比如下，选择FlashInfer作为激活函数后端。
 +---------+----------+----------+--------------------------+--------------+--------------+
 |   Batch |   SeqLen |   Hidden |   Custom (torch.compile) |   FlashInfer |   Flash-Attn |
 +=========+==========+==========+==========================+==============+==============+
@@ -25,6 +25,5 @@ from flashinfer.activation import silu_and_mul as flashinfer_silu_and_mul
 '''
 
 class SiluAndMul(nn.Module):
-    @torch.compiler.disable
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return flashinfer_silu_and_mul(x)

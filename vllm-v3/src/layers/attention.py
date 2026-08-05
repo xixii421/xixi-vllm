@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from ..memory.kv_ops import store_kvcache
+from ..utils.context import get_context
 
 _ATTN_META: Optional["AttentionMetadata"] = None
 
@@ -18,6 +19,9 @@ class AttentionMetadata:
     kv_cache_pool: torch.Tensor
     slot_mapping: torch.Tensor
     output_kv_indices: Optional[torch.Tensor] = None
+    # 首 chunk prefill 用 FlashAttention-2（比 FlashInfer prefill 快 2-3x）。
+    # decode / 续 chunk / prefill CG 仍走 wrapper（FlashInfer paged）。
+    use_fa2: bool = False
 
 
 @contextmanager
@@ -62,14 +66,33 @@ class Attention(nn.Module):
         k_4d = pool[0, lid]
         v_4d = pool[1, lid]
 
-        store_kvcache(
-            k,
-            v,
-            k_4d.reshape(-1, n_kv, hd),
-            v_4d.reshape(-1, n_kv, hd),
-            meta.slot_mapping,
-        )
+        k_4d_2d = k_4d.reshape(-1, n_kv, hd)
+        v_4d_2d = v_4d.reshape(-1, n_kv, hd)
+        store_kvcache(k, v, k_4d_2d, v_4d_2d, meta.slot_mapping)
 
         q = q.contiguous().view(-1, self.num_heads, hd)
+
+        if meta.use_fa2:
+            from flash_attn import flash_attn_func, flash_attn_varlen_func
+
+            ctx = get_context()
+            # 多 seq 首 chunk：必须用 varlen 让每条 seq 各自 causal。
+            if ctx.cu_seqlens_q is not None and ctx.cu_seqlens_q.numel() > 2:
+                o = flash_attn_varlen_func(
+                    q,
+                    k,
+                    v,
+                    cu_seqlens_q=ctx.cu_seqlens_q,
+                    cu_seqlens_k=ctx.cu_seqlens_k,
+                    max_seqlen_q=ctx.max_seqlen_q,
+                    max_seqlen_k=ctx.max_seqlen_k,
+                    causal=True,
+                )
+            else:
+                o = flash_attn_func(
+                    q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0), causal=True
+                )[0]
+            return o.view(-1, self.num_heads * hd)
+
         o = meta.wrapper.run(q, (k_4d, v_4d))
         return o.view(-1, self.num_heads * hd)

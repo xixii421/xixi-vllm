@@ -4,7 +4,7 @@
 
 ---
 
-## 相对 v2 新增（8 大优化）
+## 相对 v2 新增（9 大优化）
 
 | # | 优化 | 对应模块 | 收益 |
 |:--:|------|---------|------|
@@ -15,9 +15,11 @@
 | 5 | KV 布局对齐 FlashInfer | `src/engine/model_runner.py` | NHD 布局，block_size=256 |
 | 6 | GQA 内核层处理 | FlashInfer plan | 不材料化 K/V，消除 `_expand_gqa()` |
 | 7 | contextvars 上下文传递 | `src/layers/attention.py` | 线程安全，CG 兼容 |
-| 8 | Decode CUDA Graph | `src/core/cuda_graph.py` | `--compile` 启用，decode 延迟大幅降低 |
+| 8 | Decode CUDA Graph | `src/core/cuda_graph.py` | `--cg` 启用，decode 延迟大幅降低 |
+| 9 | 快速权重加载 | `src/models/loader.py` | `skip_param_init` + 目标 dtype 构建 + `load_file` 分片预取 |
 
 **结果：** decode 吞吐从 v2 的 ~40 tok/s 提升到 ~400 tok/s（Qwen3-0.6B）。
+**加载：** 4B 模型权重加载从 ~29s 降到 ~3.9s（跳过随机初始化 + 整分片预取）。
 
 ---
 
@@ -30,7 +32,7 @@ cd vllm-v3
 python run.py --model Qwen3-0.6B --temperature 0
 
 # 启用 Decode CUDA Graph
-python run.py --model Qwen3-0.6B --compile
+python run.py --model Qwen3-0.6B --cg
 
 # 批量推理
 python run.py --model Qwen3-0.6B --batch

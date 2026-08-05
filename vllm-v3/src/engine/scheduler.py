@@ -89,30 +89,43 @@ class Scheduler:
         decodes: list[Sequence],
         tokens_used: int,
     ) -> int:
+        """一次尽量消化多个 waiting 请求（v4 迁移）。
+
+        原来只拉 waiting 队首一个，prefill 批恒为 bs=1，bs>1 的 prefill CG
+        piece 全废。循环版让同一步里并发多个 prefill，既提升吞吐，又让
+        prefill CG 能按 (bs>1, L) piece 整批重放。
+        约束：本步最多留一个未完成 chunk（partial），保证 chunked prefill
+        正确性且不让单个长请求饿死后续。
+        """
         if not self.waiting or not self._room(prefills, decodes):
             return tokens_used
-        remaining = self.max_num_batched_tokens - tokens_used
-        if remaining <= 0:
-            return tokens_used
-
-        seq = self.waiting[0]
-        if not self._try_alloc(seq):
-            return tokens_used
-
-        need = seq.num_tokens - seq.num_cached_tokens
-        if need <= 0:
-            self._promote_full_hit(seq)
-            return tokens_used
-
-        chunk = min(need, remaining)
-        seq.num_scheduled_tokens = chunk
-        seq.is_prefill = True
-        prefills.append(seq)
-        if seq.num_cached_tokens + chunk == seq.num_tokens:
-            seq.status = SequenceStatus.RUNNING
-            self.waiting.popleft()
-            self.running.append(seq)
-        return tokens_used + chunk
+        n_partial = 0
+        for seq in list(self.waiting):
+            if not self._room(prefills, decodes):
+                break
+            remaining = self.max_num_batched_tokens - tokens_used
+            if remaining <= 0:
+                break
+            if not self._try_alloc(seq):
+                break
+            need = seq.num_tokens - seq.num_cached_tokens
+            if need <= 0:
+                self._promote_full_hit(seq)
+                continue
+            chunk = min(need, remaining)
+            seq.num_scheduled_tokens = chunk
+            seq.is_prefill = True
+            prefills.append(seq)
+            tokens_used += chunk
+            if seq.num_cached_tokens + chunk == seq.num_tokens:
+                seq.status = SequenceStatus.RUNNING
+                self.waiting.remove(seq)
+                self.running.append(seq)
+            else:
+                n_partial += 1
+                if n_partial >= 1:
+                    break  # 本步最多留一个未完成 chunk
+        return tokens_used
 
     def _schedule_prefill_first(self) -> tuple[list[Sequence], list[Sequence]]:
         prefills: list[Sequence] = []
@@ -134,6 +147,11 @@ class Scheduler:
                 break
 
             chunk = min(need, remaining)
+            # 前缀命中：切到块粒度，让续 chunk 走 prefill CG
+            if seq.num_cached_tokens > 0:
+                chunk = min(chunk, self.block_size)
+            if remaining < chunk and prefills:
+                break
             seq.num_scheduled_tokens = chunk
             seq.is_prefill = True
             tokens_used += chunk

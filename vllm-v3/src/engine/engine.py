@@ -8,7 +8,7 @@ from transformers import AutoTokenizer
 
 from ..config import EngineConfig
 from ..memory import KVManager, Sequence
-from ..models.loader import load_model
+from ..models.loader import default_dtype_context, load_model, skip_param_init
 from ..models.qwen3 import Qwen3ForCausalLM
 from ..sampling_params import SamplingParams
 from .model_runner import ModelRunner
@@ -29,7 +29,11 @@ class Engine:
         self.context_len = config.context_len
         self.block_size = config.block_size
 
-        self.model = Qwen3ForCausalLM(config.hf_config)
+        # 目标 dtype 下构建（免 fp32 中间态）+ 跳过随机初始化（权重随后覆盖）。
+        # 权重用 load_file 整分片读 + 预取；上 GPU 只搬数据不转 dtype。
+        with default_dtype_context(self.dtype):
+            with skip_param_init():
+                self.model = Qwen3ForCausalLM(config.hf_config)
         load_model(self.model, config.model)
         self.model = self.model.to(dtype=self.dtype, device=self.device).eval()
 
@@ -60,7 +64,8 @@ class Engine:
         return n
 
     def _init_kv(self) -> None:
-        use_cg = not self.config.enforce_eager
+        # decode CG / piece prefill CG 都需要预留 dummy page
+        use_cg = (not self.config.enforce_eager) or self.config.prefill_cuda_graph
         num_blocks = self._resolve_num_blocks()
         self.kv = KVManager(
             self.config.hf_config,

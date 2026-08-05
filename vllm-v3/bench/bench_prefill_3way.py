@@ -34,7 +34,6 @@ import sys
 import time
 from pathlib import Path
 
-os.environ.setdefault("TORCHINDUCTOR_COMPILE_WORKERS", "0")
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 
 import torch
@@ -68,8 +67,24 @@ def make_prompt(target_tokens: int) -> str:
 #  vllm-v3 backend
 # ══════════════════════════════════════════════════════════════════════
 
-def bench_v3(out_path: str) -> None:
+def bench_v3(out_path: str, prefill_cg: bool = False, eager_legacy: bool = False) -> None:
     from src import Engine, EngineConfig
+    from src.models import qwen3 as qwen3_mod
+
+    if eager_legacy:
+        # 临时回退到「未融合」forward：norm 与 GEMM 分开、MLP 走独立 gate/up。
+        # 权重仍是合并后的 gate_up_proj，此处仅对比「norm+GEMM 是否融合」。
+        def legacy_forward(self, positions, hidden_states, residual):
+            if residual is None:
+                residual = hidden_states
+                hidden_states = self.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states = self.self_attn(positions, hidden_states)
+            hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+            return self.mlp(hidden_states), residual
+
+        qwen3_mod.Qwen3DecoderLayer.forward = legacy_forward
 
     print("vllm-v3: initializing ...")
     sync()
@@ -77,7 +92,8 @@ def bench_v3(out_path: str) -> None:
     eng = Engine(EngineConfig(
         model=MODEL,
         context_len=8192,
-        enforce_eager=False,        # CG on decode, prefill stays eager
+        enforce_eager=False,        # CG on decode, prefill eager
+        prefill_cuda_graph=prefill_cg,
         dtype="auto",
         prefix_backend="none",
         max_num_seqs=8,
@@ -88,7 +104,7 @@ def bench_v3(out_path: str) -> None:
     init_s = time.perf_counter() - t0
     print(f"  init: {init_s:.1f}s")
 
-    results = {"_meta": {"backend": "vllm-v3", "init_s": init_s}}
+    results = {"_meta": {"backend": "vllm-v3", "prefill_cg": prefill_cg, "eager_legacy": eager_legacy, "init_s": init_s}}
 
     for plen in PROMPT_LENS:
         prompt = make_prompt(plen)
@@ -254,10 +270,15 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Prefill TTFT 3-way: v3 / ullm / vLLM")
     p.add_argument("--backend", required=True, choices=list(BACKENDS))
     p.add_argument("--out", required=True, help="Output JSON path")
+    p.add_argument("--prefill-cg", action="store_true", help="v3: enable prefill piecewise CUDA Graph")
+    p.add_argument("--eager-legacy", action="store_true", help="v3: monkey-patch 未融合 forward 作对照")
     args = p.parse_args()
 
     print(f"=== Prefill TTFT 3-way: {args.backend} ===")
-    BACKENDS[args.backend](args.out)
+    if args.backend == "v3":
+        BACKENDS[args.backend](args.out, prefill_cg=args.prefill_cg, eager_legacy=args.eager_legacy)
+    else:
+        BACKENDS[args.backend](args.out)
 
 
 if __name__ == "__main__":
