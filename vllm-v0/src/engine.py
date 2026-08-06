@@ -27,9 +27,6 @@ class Engine:
         self.model = Qwen3ForCausalLM(config.hf_config)
         load_model(self.model, config.model)
         self.model = self.model.to(dtype=self.dtype, device=self.device).eval()
-        if not config.enforce_eager and self.device.type == "cuda":
-            # reduce-overhead：降低反复进图时的 Python / 调度开销
-            self.model = torch.compile(self.model, mode="reduce-overhead")
 
         # 采样器无训练参数；放在同一设备上即可
         self.sampler = Sampler()

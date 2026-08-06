@@ -1,22 +1,73 @@
-# vllm-v0 — 最小自回归推理
+# vllm-v0
 
-> 从零实现 Qwen3 单请求自回归推理：完整模型骨架、SDPA Attention、可选采样策略。
+> 从零实现自回归推理，以Qwen3为基准，实现整个模型的骨架，包括权重加载、模型搭建、采样策略与流式输出等。
 
----
 
-## 相对于无（起点）
+## 代码架构
 
-| 能力 | 说明 |
-|------|------|
-| Qwen3 模型骨架 | RMSNorm → QKV proj → RoPE → Attention → SwiGLU FFN |
-| 权重加载 | safetensors 流式读取 + HuggingFace config |
-| SDPA Attention | `F.scaled_dot_product_attention`，因果 mask |
-| 采样策略 | temperature / top-k / top-p / min-p |
-| 流式输出 | `generate()` 逐 token yield |
+```
+vllm-v0/
+├── run.py                        # CLI 入口
+├── config.yaml                   # 默认推理参数
+├── src/
+│   ├── config.py                 # 模型配置
+│   ├── model_hub.py              # 模型注册表
+│   ├── engine.py                 # 自回归循环
+│   ├── model.py                  # Qwen3 骨架
+│   ├── model_loader.py           # safetensors 权重装载
+│   ├── sampler.py                # 采样策略
+│   └── layers/                   # 算子层
+│       ├── attention.py          #   GQA + 因果 SDPA
+│       ├── activation.py         #   SiluAndMul
+│       ├── layernorm.py          #   RMSNorm
+│       └── rotary.py             #   RoPE 位置编码
+└── docs/                         # 设计文档
+```
 
-**限制：** 无 KV Cache，每步重算全部历史 token。
+### 自回归执行流
+```
+run.py ──> Engine.generate()
+              │
+              ├─ 1. token → ids
+              ├─ 2. for _ in max_new_tokens:           自回归循环
+              │       ├─ input_ids = 全部历史 ids        
+              │       ├─ model(input_ids, positions)    完整前向
+              │       ├─ compute_logits(h[:, -1:])      只取最后一步
+              │       ├─ sampler(logits)                采样出新 token
+              │       └─ ids.append(new_id)
+              └─ 3. yield 每个新 token
+```
 
----
+### 模型层
+```
+Qwen3ForCausalLM          # 表征与词表投影分离
+└── Qwen3Model
+    ├── embed_tokens      # nn.Embedding(vocab, hidden)
+    ├── layers            # num_hidden_layers × Qwen3DecoderLayer
+    │   └── Qwen3DecoderLayer
+    │       ├── input_layernorm       # RMSNorm
+    │       ├── self_attn
+    │       │   ├── qkv_proj          # 融合 QKV
+    │       │   ├── q_norm / k_norm   # QK-Norm（Qwen3 特有）
+    │       │   ├── rotary_emb        # RoPE
+    │       │   ├── Attention         # GQA + SDPA
+    │       │   └── o_proj
+    │       ├── post_attention_layernorm
+    │       └── mlp
+    │           ├── gate_proj / up_proj / down_proj
+    │           └── act_fn            # SiluAndMul（SwiGLU）
+    └── norm             # 最终 RMSNorm
+```
+
+### 权重加载
+```
+iterator ──> model.load_weights
+            ├─ q_proj.weight → qkv_proj[0 : q]
+            ├─ k_proj.weight → qkv_proj[q : q+kv]
+            ├─ v_proj.weight → qkv_proj[q+kv : q+2kv]
+            └─ 其余权重 → 同名直接 copy
+```
+
 
 ## 快速开始
 
@@ -33,34 +84,19 @@ python run.py --model Qwen3-0.6B --prompt "Hello, my name is"
 python run.py --list
 ```
 
----
 
-## 核心源码
 
-| 文件 | 内容 |
-|------|------|
-| `src/engine.py` | Engine：`encode → forward → sample → yield` |
-| `src/model.py` | Qwen3 骨架 + 层堆叠 + `forward()` |
-| `src/model_loader.py` | safetensors 权重装载 |
-| `src/sampler.py` | logits → token（temperature / top-k / top-p） |
-| `src/config.py` | EngineConfig（model / dtype / enforce_eager） |
-| `src/layers/layernorm.py` | RMSNorm |
-| `src/layers/rotary.py` | RoPE 位置编码 |
-| `src/layers/attention.py` | GQA + SDPA |
-| `src/layers/activation.py` | SiluAndMul（SwiGLU） |
-
----
 
 ## 文档
 
 | 顺序 | 文档 | 弄清什么 |
 |:--:|------|---------|
-| 1 | [architecture.md](docs/architecture.md) | 自回归循环全貌 |
+| 1 | [architecture.md](docs/architecture.md) | 自回归循环是什么 |
 | 2 | [layers.md](docs/layers.md) | Attention / MLP / Decoder 数据流 |
-| 3 | [layers/rmsnorm.md](docs/layers/rmsnorm.md) | Pre-Norm + fused residual |
-| 4 | [layers/rotary.md](docs/layers/rotary.md) | 位置如何旋进 Q/K |
-| 5 | [layers/attention.md](docs/layers/attention.md) | GQA + 因果 SDPA |
-| 6 | [layers/activation.md](docs/layers/activation.md) | SwiGLU 的 SiLU 门控 |
-| 7 | [model.md](docs/model.md) | 层堆叠 + 权重装载 |
-| 8 | [sampler.md](docs/sampler.md) | 采样策略实现 |
-| 9 | [engine.md](docs/engine.md) | encode → forward → sample 编排 |
+| 3 | [layers/rmsnorm.md](docs/layers/rmsnorm.md) | RMSNorm+残差详解 |
+| 4 | [layers/rotary.md](docs/layers/rotary.md) | RoPE位置编码 |
+| 5 | [layers/attention.md](docs/layers/attention.md) | GQA + SDPA |
+| 6 | [layers/activation.md](docs/layers/activation.md) | SwiGLU 详解|
+| 7 | [model.md](docs/model.md) | 模型详解 |
+| 8 | [sampler.md](docs/sampler.md) | 采样策略详解 |
+| 9 | [engine.md](docs/engine.md) | 执行流程详解 |

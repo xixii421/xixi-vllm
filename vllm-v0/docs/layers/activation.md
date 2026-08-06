@@ -206,7 +206,7 @@ def forward(self, x: torch.Tensor) -> torch.Tensor:
 ### 6.3 效果
 
 - **减少显存读写**：输入 `x` 只需从显存读取一次，而不是两次，中间结果在寄存器/共享内存中直接完成激活和乘法。
-- **减少 kernel 启动**：`split + silu + multiply` 三个小操作融合成一个 CUDA kernel，配合 `torch.compile` 可生成极高效的代码。
+- **减少 kernel 启动**：`split + silu + multiply` 三个小操作融合成一个 CUDA kernel，省去两次中间结果的发射与读写。
 
 因此，在vllm中看到的 `SiluAndMul`，正是 SwiGLU 算法在工程上的形态。
 

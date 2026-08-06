@@ -8,7 +8,6 @@ from transformers import AutoConfig, PretrainedConfig
 class EngineConfig:
     model: str
     context_len: int = 2048
-    enforce_eager: bool = True
     dtype: str = "auto"
     hf_config: PretrainedConfig = field(init=False)
 

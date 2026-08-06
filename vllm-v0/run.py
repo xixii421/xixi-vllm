@@ -38,7 +38,6 @@ DEFAULTS = {
     "temperature": 0.9,
     "top_p": 0.95,
     "top_k": 20,
-    "enforce_eager": True,
     "dtype": "auto",
 }
 
@@ -69,7 +68,6 @@ def run(cfg: dict) -> None:
     engine = Engine(
         EngineConfig(
             model=str(model_path),
-            enforce_eager=cfg["enforce_eager"],
             dtype=cfg["dtype"],
         )
     )

@@ -64,22 +64,17 @@ def _resolve_dtype(self):
 
 <span style="color:#059669">**细节**</span> v0 硬编码 `cuda:0`，没有多卡逻辑。
 
-### 2.3 模型加载与编译
+### 2.3 模型加载
 
 ```py
 self.model = Qwen3ForCausalLM(config.hf_config)
 load_model(self.model, config.model)
 self.model = self.model.to(dtype=self.dtype, device=self.device)
-
-if not config.enforce_eager:
-    self.model = torch.compile(self.model, mode="reduce-overhead")
 ```
 
 <span style="color:#b45309">**机制**</span> 先建空骨架，再流式灌权重（第 3 节 `model.md`），最后 `.to()` 上设备/转 dtype。**加载顺序是刻意设计的**——若先 `.to(device)` 再灌权重，加载过程会反复在 CPU/GPU 间搬运张量，浪费显存；先建骨架、权重灌进参数后统一迁移，只搬一次。
 
-<span style="color:#059669">**细节**</span> `enforce_eager=True` 时跳过 `torch.compile`。`run.py` 里默认开启，是为了调试时跳过编译等待和 trace 报错不好定位；关掉（`enforce_eager: false`）可让 `torch.compile(mode="reduce-overhead")` 生效——融合 kernel + CUDA Graph 消除启动开销（profile 实测 eager → compile 约 3.7x 加速）。
-
-<span style="color:#059669">**细节**</span> 只对 `model` 做 compile，`Sampler` 不 compile。采样分支里有大量条件判断和 `multinomial`，compile 收益小，反而增加复杂度。
+<span style="color:#059669">**细节**</span> v0 只跑 eager 前向（不做 `torch.compile`），让每一步的计算路径直观可读——这也是后续版本做 CUDA Graph 优化的教学起点。
 
 ### 2.4 Sampler
 

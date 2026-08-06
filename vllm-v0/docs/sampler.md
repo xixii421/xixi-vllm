@@ -37,7 +37,7 @@ class Sampler:
         ...
 ```
 
-<span style="color:#b45309">**机制**</span> 继承 `nn.Module` 但没有可学习参数，纯粹是一段 GPU 上的后处理逻辑。写成 Module 是为了和 `Engine` 里其他组件一样 `.to(device)`，也方便后续用 `torch.compile` 或 CUDA Graph 统一编排。
+<span style="color:#b45309">**机制**</span> 继承 `nn.Module` 但没有可学习参数，纯粹是一段 GPU 上的后处理逻辑。写成 Module 是为了和 `Engine` 里其他组件一样 `.to(device)`，也让调用链统一走 Module 接口。
 
 <span style="color:#059669">**细节**</span> 四个超参都是 `Tensor | None`，形状为 `[batch_size]`，支持逐请求不同采样策略。v0 的 Engine 目前 batch size 为 1，但 Sampler 本身已为批处理预留了接口。
 
