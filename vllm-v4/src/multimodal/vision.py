@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import torch
@@ -41,11 +41,16 @@ class _CacheEntry:
 
 
 class EncoderCache:
+    """LRU cache of vision encoder outputs (official-style: no ref counting).
+
+    Eviction order = insertion order (oldest first), so ``get`` must
+    ``move_to_end`` and ``put`` evicts from the front with ``popitem``.
+    """
+
     def __init__(self, max_tokens: int = 16384):
         self.max_tokens = max(1, int(max_tokens))
         self.used_tokens = 0
         self._cache: OrderedDict[str, _CacheEntry] = OrderedDict()
-        self._refs: dict[str, set[str]] = defaultdict(set)
 
     @staticmethod
     def _tokens(embeds: torch.Tensor, deepstack: list[torch.Tensor] | None) -> int:
@@ -61,14 +66,6 @@ class EncoderCache:
         self._cache.move_to_end(key)
         return e.embeds, e.deepstack
 
-    def can_allocate(self, key: str, tokens: int) -> bool:
-        if key in self._cache:
-            return True
-        freeable = sum(
-            e.tokens for k, e in self._cache.items() if not self._refs.get(k)
-        )
-        return self.used_tokens - freeable + tokens <= self.max_tokens
-
     def put(
         self,
         key: str,
@@ -82,47 +79,14 @@ class EncoderCache:
         if key in self._cache:
             old = self._cache.pop(key)
             self.used_tokens -= old.tokens
-        self._evict_until(tokens)
-        self._cache[key] = _CacheEntry(embeds=embeds, deepstack=ds, tokens=tokens)
-        self._cache.move_to_end(key)
-        self.used_tokens += tokens
-
-    def retain(self, key: str, request_id: str) -> None:
-        if key in self._cache:
-            self._refs[key].add(request_id)
-
-    def release(self, request_id: str) -> None:
-        empty: list[str] = []
-        for k, refs in self._refs.items():
-            refs.discard(request_id)
-            if not refs:
-                empty.append(k)
-        for k in empty:
-            del self._refs[k]
-
-    def _evict_until(self, need: int) -> None:
-        while self.used_tokens + need > self.max_tokens and self._cache:
-            victim = None
-            for k in self._cache:
-                if not self._refs.get(k):
-                    victim = k
-                    break
-            if victim is None:
-                # Over-commit rather than drop in-flight entries.
-                logger.warning(
-                    "EncoderCache over-commit: used=%d need=%d max=%d",
-                    self.used_tokens,
-                    need,
-                    self.max_tokens,
-                )
-                return
-            e = self._cache.pop(victim)
+        while self.used_tokens + tokens > self.max_tokens and self._cache:
+            _, e = self._cache.popitem(last=False)
             self.used_tokens -= e.tokens
-            self._refs.pop(victim, None)
+        self._cache[key] = _CacheEntry(embeds=embeds, deepstack=ds, tokens=tokens)
+        self.used_tokens += tokens
 
     def clear(self) -> None:
         self._cache.clear()
-        self._refs.clear()
         self.used_tokens = 0
 
     def __contains__(self, k: str) -> bool:

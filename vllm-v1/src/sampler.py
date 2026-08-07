@@ -1,4 +1,4 @@
-"""logits → 下一个 token id：贪心，或 temperature + top-k / top-p / min-p。"""
+"""logits → 下一个 token id：贪心，或 temperature + top-k / top-p。"""
 
 from __future__ import annotations
 
@@ -9,19 +9,18 @@ class Sampler:
     """无参数的后处理模块。
 
     全部采样超参为 None 时走 argmax；否则按
-    temperature → top-k/top-p → min-p → softmax → multinomial。
+    temperature → top-k/top-p → softmax → multinomial。
     """
 
     def __call__(
         self,
         logits: torch.Tensor,
         temperatures: torch.Tensor | None = None,
-        min_ps: torch.Tensor | None = None,
         top_ps: torch.Tensor | None = None,
         top_ks: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # 快路径：不做过滤、不做 softmax，直接取最大分
-        if temperatures is None and min_ps is None and top_ps is None and top_ks is None:
+        if temperatures is None and top_ps is None and top_ks is None:
             return torch.argmax(logits, dim=-1)
 
         # 采样阶段统一 fp32，避免大词表 softmax 在半精度下不稳定
@@ -30,7 +29,6 @@ class Sampler:
             temperatures = torch.where(temperatures <= 0, 1.0, temperatures)
             logits = logits / temperatures.unsqueeze(1)
         logits = _top_k_top_p(logits, top_ps, top_ks)
-        logits = _min_p(logits, min_ps)
         probs = torch.softmax(logits, dim=-1)
         return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
@@ -62,12 +60,3 @@ def _top_k_top_p(
         sorted_logits = sorted_logits.masked_fill(mask, -float("inf"))
 
     return torch.empty_like(sorted_logits).scatter_(1, sorted_idx, sorted_logits)
-
-
-def _min_p(logits: torch.Tensor, min_p: torch.Tensor | None) -> torch.Tensor:
-    """相对最高概率过滤：删掉 prob < min_p * max_prob 的位置。"""
-    if min_p is None:
-        return logits
-    probs = torch.softmax(logits, dim=-1)
-    top, _ = probs.max(dim=-1, keepdim=True)
-    return logits.masked_fill(probs < min_p.unsqueeze(1) * top, -float("inf"))

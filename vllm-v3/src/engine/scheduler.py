@@ -147,9 +147,6 @@ class Scheduler:
                 break
 
             chunk = min(need, remaining)
-            # 前缀命中：切到块粒度，让续 chunk 走 prefill CG
-            if seq.num_cached_tokens > 0:
-                chunk = min(chunk, self.block_size)
             if remaining < chunk and prefills:
                 break
             seq.num_scheduled_tokens = chunk

@@ -22,7 +22,6 @@ from src.models.hub import (
     download_models,
     gpu_memory_gb,
     select_models_for_vram,
-    verify_models,
 )
 
 # ---------------------------------------------------------------------------
@@ -52,8 +51,8 @@ DEFAULTS = {
     "flashinfer_use_tensor_cores": True,
     "flashinfer_non_blocking": True,
     "enable_vit_cuda_graph": None,
-    "vit_cg_token_budgets": [64, 128, 256, 512, 1024],
-    "vit_cg_max_batch_size": 1,
+    "vit_cg_token_budgets": [64, 128, 256, 512, 1024, 2048],
+    "vit_cg_max_batch_size": 4,
     "encoder_compute_budget": 0,
 }
 
@@ -215,7 +214,6 @@ def main() -> None:
     p.add_argument("--image-max-side", type=int, default=1024, help="图片长边最大像素（等比缩放）")
     p.add_argument("--enable-vit-cg", action="store_true", help="启用 ViT CUDA Graph")
     p.add_argument("--download", action="store_true")
-    p.add_argument("--verify-all", action="store_true")
     p.add_argument("--list", action="store_true")
     args = p.parse_args()
 
@@ -227,9 +225,6 @@ def main() -> None:
         print(f"VRAM:  {vram:.1f} GB")
         print(f"All:   {', '.join(s.local_name for s in QWEN3_REGISTRY)}")
         print(f"Fit:   {', '.join(s.local_name for s in selected)}")
-        return
-    if args.verify_all:
-        verify_models(download=True)
         return
     if args.download:
         print(f"Downloading to {DEFAULT_CACHE_DIR} ...")

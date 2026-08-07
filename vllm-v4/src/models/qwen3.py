@@ -3,6 +3,7 @@ from torch import nn
 from transformers.models.qwen3 import Qwen3Config
 
 from ..layers import Attention, RMSNorm, RotaryEmbedding, SiluAndMul
+from ..layers.fused_gemm import fused_rmsnorm_gemm
 from .loader import default_weight_loader
 
 
@@ -16,6 +17,10 @@ class Qwen3MLP(nn.Module):
     def forward(self, x):
         x = self.gate_up_proj(x)
         return self.down_proj(self.act_fn(x))
+
+    def forward_gate_up(self, gate_up: torch.Tensor) -> torch.Tensor:
+        """gate_up_proj 输出已在外部融合计算完毕，此处只做 silu+down。"""
+        return self.down_proj(self.act_fn(gate_up))
 
 
 class Qwen3Attention(nn.Module):
@@ -55,6 +60,10 @@ class Qwen3Attention(nn.Module):
 
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor):
         qkv = self.qkv_proj(hidden_states)
+        return self._forward_qkv(positions, qkv)
+
+    def _forward_qkv(self, positions: torch.Tensor, qkv: torch.Tensor) -> torch.Tensor:
+        """从已投影的 qkv 开始完成注意力：split → q/k norm → rope → attn → o_proj。"""
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         q = q.view(-1, self.num_heads, self.head_dim)
@@ -89,14 +98,39 @@ class Qwen3DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(self, positions, hidden_states, residual: torch.Tensor | None):
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+        # 融合路径：input_layernorm + qkv_proj 一次 GEMM 完成。
+        # fused_rmsnorm_gemm 返回 (qkv, 新残差)，新残差即 (x + 旧残差)。
+        # 仅 bf16 走 Triton 融合（kernel 内部按 bf16 特化）；其他 dtype 回退 eager。
+        if hidden_states.dtype == torch.bfloat16:
+            qkv, residual = fused_rmsnorm_gemm(
+                hidden_states,
+                residual,
+                self.self_attn.qkv_proj.weight,
+                self.input_layernorm.weight,
+                self.input_layernorm.eps,
+            )
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(positions, hidden_states)
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        return self.mlp(hidden_states), residual
+            if residual is None:
+                residual = hidden_states
+                hidden_states = self.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            qkv = self.self_attn.qkv_proj(hidden_states)
+        hidden_states = self.self_attn._forward_qkv(positions, qkv)
+
+        # 融合路径：post_attention_layernorm + gate_up_proj 一次 GEMM 完成。
+        if hidden_states.dtype == torch.bfloat16:
+            gate_up, residual = fused_rmsnorm_gemm(
+                hidden_states,
+                residual,
+                self.mlp.gate_up_proj.weight,
+                self.post_attention_layernorm.weight,
+                self.post_attention_layernorm.eps,
+            )
+        else:
+            hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+            gate_up = self.mlp.gate_up_proj(hidden_states)
+        return self.mlp.forward_gate_up(gate_up), residual
 
 
 class Qwen3Model(nn.Module):

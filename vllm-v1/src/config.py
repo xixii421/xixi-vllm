@@ -15,7 +15,6 @@ class EngineConfig:
 
     model: str
     context_len: int = 2048
-    enforce_eager: bool = True
     dtype: str = "auto"
     # KV / prefix (v1 新增相对 v0)
     prefix_backend: Literal["none", "hash", "radix"] = "hash"

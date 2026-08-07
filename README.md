@@ -101,7 +101,7 @@ PYTHONPATH=vllm-v0 python vllm-v0/run.py
 # v1 — KV Cache
 PYTHONPATH=vllm-v1 python vllm-v1/run.py
 
-# v2 — Continuous Batching + torch.compile
+# v2 — Continuous Batching
 PYTHONPATH=vllm-v2 python vllm-v2/run.py
 
 # v3 — FlashInfer + Decode CUDA Graph

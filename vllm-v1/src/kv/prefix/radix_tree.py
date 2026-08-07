@@ -39,7 +39,6 @@ class RadixTree:
 
     def __init__(self) -> None:
         self.root = _RadixNode(ref_count=1)
-        self._block_to_node: dict[int, _RadixNode] = {}
 
     def match_prefix(self, key: list[int]) -> tuple[list[int], _RadixNode]:
         """ 沿树走最长匹配，返回已命中的 value（块号列表）与停留节点。 """
@@ -93,29 +92,16 @@ class RadixTree:
             node.ref_count -= 1
             node = node.parent or self.root
 
-    def _index(self, node: _RadixNode) -> None:
-        """ 登记 value 中块号 → 节点。 """
-        for bid in node.value:
-            self._block_to_node[bid] = node
-
-    def _unindex(self, node: _RadixNode) -> None:
-        """ 取消该节点的块号登记。 """
-        for bid in node.value:
-            if self._block_to_node.get(bid) is node:
-                del self._block_to_node[bid]
-
     def _add(
         self, parent: _RadixNode, key: tuple[int, ...], value: tuple[int, ...]
     ) -> _RadixNode:
         """ 在 parent 下挂一条新边。 """
         node = _RadixNode(parent=parent, key=key, value=value)
         parent.children[key[0]] = node
-        self._index(node)
         return node
 
     def _split(self, node: _RadixNode, split_at: int) -> _RadixNode:
         """ 在边上 split_at 处拆成父边 + 子边。 """
-        self._unindex(node)
         new_node = _RadixNode(
             parent=node.parent,
             key=node.key[:split_at],
@@ -128,6 +114,4 @@ class RadixTree:
         node.value = node.value[split_at:]
         if new_node.parent is not None and new_node.key:
             new_node.parent.children[new_node.key[0]] = new_node
-        self._index(new_node)
-        self._index(node)
         return new_node

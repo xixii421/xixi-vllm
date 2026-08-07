@@ -34,8 +34,6 @@ class Engine:
         self.model = Qwen3ForCausalLM(config.hf_config)
         load_model(self.model, config.model)
         self.model = self.model.to(dtype=self.dtype, device=self.device).eval()
-        if not config.enforce_eager and self.device.type == "cuda":
-            self.model = torch.compile(self.model, mode="reduce-overhead")
 
         self.sampler = Sampler()
         self._init_kv()

@@ -3,7 +3,7 @@
 用法:
     python run.py                                    # 单条推理（使用 config.yaml）
     python run.py --batch                            # 批量推理演示
-    python run.py --model Qwen3-1.5B --compile        # CLI 覆盖配置
+    python run.py --model Qwen3-1.5B --prompt "你好"  # CLI 覆盖配置
 """
 
 from __future__ import annotations
@@ -32,7 +32,6 @@ DEFAULTS = {
     "temperature": 0.9,
     "top_p": 0.95,
     "top_k": 20,
-    "enforce_eager": True,
     "dtype": "auto",
     "context_len": 2048,
     "block_size": 16,
@@ -68,7 +67,6 @@ def run_single(cfg: dict) -> None:
     engine = Engine(
         EngineConfig(
             model=str(model_path),
-            enforce_eager=cfg["enforce_eager"],
             dtype=cfg["dtype"],
             context_len=cfg["context_len"],
             block_size=cfg["block_size"],
@@ -100,7 +98,6 @@ def run_batch(cfg: dict) -> None:
     engine = Engine(
         EngineConfig(
             model=str(model_path),
-            enforce_eager=cfg["enforce_eager"],
             prefix_backend=cfg["prefix_backend"],
             max_num_seqs=cfg["max_num_seqs"],
             max_num_batched_tokens=cfg["max_num_batched_tokens"],
@@ -138,7 +135,6 @@ def main() -> None:
     p.add_argument("--temperature", type=float, default=None)
     p.add_argument("--top-p", type=float, default=None)
     p.add_argument("--top-k", type=int, default=None)
-    p.add_argument("--compile", action="store_true", help="启用 torch.compile")
     p.add_argument("--block-size", type=int, default=None)
     p.add_argument("--prefix-backend", choices=("none", "hash", "radix"), default=None)
     p.add_argument("--max-num-seqs", type=int, default=None)
@@ -151,8 +147,6 @@ def main() -> None:
                 "block_size", "prefix_backend", "max_num_seqs"):
         if (v := getattr(args, key)) is not None:
             cfg[key] = v
-    if args.compile:
-        cfg["enforce_eager"] = False
 
     if args.batch:
         run_batch(cfg)

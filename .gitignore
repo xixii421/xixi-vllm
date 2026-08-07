@@ -52,9 +52,20 @@
 **/.vscode/
 !**/.vscode/extensions.json
 
+# Never commit profiler traces (can be 50MB–200MB each)
+# NOTE: patterns below only affect NEW (untracked) files. Already-tracked
+# traces must first be removed with `git rm --cached` (see git log commit msg).
+**/traces/
+**/trace.json
+**/*.pt.trace.json
+**/*.nsys-rep
+**/chrome_trace*.json
+
 # Bench outputs / logs / local dumps
 **/bench/results/
 **/bench/**/results/
+**/bench/out/
+**/bench/**/out/
 **/*.log
 **/tmp/
 **/.cache/

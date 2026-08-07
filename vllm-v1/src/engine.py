@@ -19,6 +19,7 @@ class Engine:
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.dtype = self._resolve_dtype()
 
+        # 分词器：部分模型无 pad_token，回退到 eos，避免后续填充报错
         self.tokenizer = AutoTokenizer.from_pretrained(
             config.model, trust_remote_code=True
         )
@@ -27,11 +28,10 @@ class Engine:
         self.eos_token_id = self.tokenizer.eos_token_id
         self.context_len = config.context_len
 
+        # 先建空骨架，再把 safetensors 灌进参数，最后上设备
         self.model = Qwen3ForCausalLM(config.hf_config)
         load_model(self.model, config.model)
         self.model = self.model.to(dtype=self.dtype, device=self.device).eval()
-        if not config.enforce_eager and self.device.type == "cuda":
-            self.model = torch.compile(self.model, mode="reduce-overhead")
 
         self.sampler = Sampler()
         self._init_kv()
@@ -79,7 +79,7 @@ class Engine:
         cache_len: int,
         write_end: int,
     ) -> None:
-        """Install ForwardContext with slot_mapping for tokens [cache_len, write_end)."""
+        """安装 ForwardContext：暴露本步要写入的 slot_mapping 与页表给 Attention。"""
         slots = slots_tensor(
             seq.block_table,
             cache_len,
@@ -98,16 +98,6 @@ class Engine:
             )
         )
 
-    def _sample(
-        self,
-        logits: torch.Tensor,
-        temp_t,
-        min_p_t,
-        top_p_t,
-        top_k_t,
-    ) -> int:
-        return int(self.sampler(logits, temp_t, min_p_t, top_p_t, top_k_t).item())
-
     @torch.inference_mode()
     def generate(
         self,
@@ -116,7 +106,6 @@ class Engine:
         temperature: float = 0.0,
         top_p: float | None = None,
         top_k: int | None = None,
-        min_p: float | None = None,
     ):
         input_ids = (
             list(prompt) if isinstance(prompt, list) else self.tokenizer.encode(prompt)
@@ -127,10 +116,10 @@ class Engine:
         def pack(v, dtype):
             return None if v is None else torch.tensor([v], device=self.device, dtype=dtype)
 
+        # temperature<=0 → 传 None，Sampler 走 argmax 快路径
         temp_t = None if temperature <= 0 else pack(temperature, torch.float)
         top_p_t = pack(top_p, torch.float)
         top_k_t = pack(top_k, torch.int)
-        min_p_t = pack(min_p, torch.float)
 
         seq: Sequence = self.kv.new_sequence(input_ids)
         self.kv.allocate(seq)
@@ -146,28 +135,22 @@ class Engine:
                 )
                 new_ids = input_ids[cached:]
                 ids = torch.tensor([new_ids], device=self.device, dtype=torch.long)
-                positions = torch.arange(
-                    cached, prompt_len, device=self.device
-                ).unsqueeze(0)
+                positions = torch.arange(cached, prompt_len, device=self.device).unsqueeze(0)
                 h = self.model(ids, positions)
                 logits = self.model.compute_logits(h[:, -1:]).squeeze(1)
             else:
                 # Entire prompt was prefix-cached — re-forward last token.
                 self._bind_ctx(
-                    seq,
-                    is_prefill=False,
-                    cache_len=prompt_len - 1,
-                    write_end=prompt_len,
+                    seq, is_prefill=False, cache_len=prompt_len - 1, write_end=prompt_len
                 )
-                last = input_ids[-1]
-                ids = torch.tensor([[last]], device=self.device, dtype=torch.long)
+                ids = torch.tensor([[input_ids[-1]]], device=self.device, dtype=torch.long)
                 positions = torch.tensor(
                     [[prompt_len - 1]], device=self.device, dtype=torch.long
                 )
                 h = self.model(ids, positions)
                 logits = self.model.compute_logits(h[:, -1:]).squeeze(1)
 
-            next_id = self._sample(logits, temp_t, min_p_t, top_p_t, top_k_t)
+            next_id = int(self.sampler(logits, temp_t, top_p_t, top_k_t).item())
             yield self.tokenizer.decode([next_id])
             if next_id == self.eos_token_id or prompt_len >= self.context_len:
                 return
@@ -180,10 +163,7 @@ class Engine:
                 if cache_len >= self.context_len:
                     break
                 self._bind_ctx(
-                    seq,
-                    is_prefill=False,
-                    cache_len=cache_len,
-                    write_end=cache_len + 1,
+                    seq, is_prefill=False, cache_len=cache_len, write_end=cache_len + 1
                 )
                 ids = torch.tensor([[next_id]], device=self.device, dtype=torch.long)
                 positions = torch.tensor(
@@ -191,7 +171,7 @@ class Engine:
                 )
                 h = self.model(ids, positions)
                 logits = self.model.compute_logits(h[:, -1:]).squeeze(1)
-                next_id = self._sample(logits, temp_t, min_p_t, top_p_t, top_k_t)
+                next_id = int(self.sampler(logits, temp_t, top_p_t, top_k_t).item())
                 cache_len += 1
                 seq.append_token(next_id)
                 self.kv.ensure_blocks(seq)

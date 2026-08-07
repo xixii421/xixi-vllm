@@ -245,8 +245,6 @@ class Engine:
             if not (is_pinned() if callable(is_pinned) else is_pinned):
                 pv = pv.pin_memory()
             uid = ph.mm_hash
-            if len(mm.mm_hashes) > 1:
-                uid = f"{uid}_{i}"
             features.append(
                 MultiModalFeature(
                     modality="image",

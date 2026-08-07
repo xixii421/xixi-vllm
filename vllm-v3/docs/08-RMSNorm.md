@@ -226,7 +226,7 @@ load(x) + load(residual) → norm → * weight → store(out, new_residual)
 
 ```bash
 cd vllm-v3
-python bench/bench_rmsnorm.py
+python bench/36_bench_rmsnorm.py
 ```
 
 

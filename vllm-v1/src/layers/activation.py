@@ -8,8 +8,8 @@ from torch import nn
 
 
 class SiluAndMul(nn.Module):
-    """输入最后一维是 gate∥up 拼接结果，对半切开后做门控乘法。"""
+    """SwiGLU 融合算子：前半 value，后半 gate，一次算子内完成激活与相乘。"""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate, up = x.chunk(2, dim=-1)
-        return F.silu(gate) * up
+        x, y = x.chunk(2, dim=-1)
+        return F.silu(y) * x

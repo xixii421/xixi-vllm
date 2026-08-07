@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
-from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import torch
 from transformers import AutoProcessor
 
-from .hasher import hash_pil_image
+from .hasher import hash_image_pixels
 from .image import convert_image_mode, normalize_image
 
 logger = logging.getLogger(__name__)
@@ -65,7 +62,7 @@ def _cpu_unpinned(t: torch.Tensor) -> torch.Tensor:
 
 
 class MultiModalProcessor:
-    def __init__(self, model_path: str, image_cache_size: int = 128):
+    def __init__(self, model_path: str):
         self.p = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
         tok = self.p.tokenizer
         self.img_tok = getattr(self.p, "image_token_id", getattr(tok, "image_token_id", None))
@@ -78,52 +75,6 @@ class MultiModalProcessor:
         self._image_pad = getattr(self.p, "image_token", None) or "<|image_pad|>"
         ip = getattr(self.p, "image_processor", None)
         self._merge_size = int(getattr(ip, "merge_size", 2) or 2)
-        self._cfg_fp = self._fingerprint_config()
-        self._img_cache: OrderedDict[tuple[str, str], _CachedImageFeat] = OrderedDict()
-        self._image_cache_size = max(1, image_cache_size)
-
-    def _fingerprint_config(self) -> str:
-        cfg = getattr(self.p, "image_processor", None)
-        payload: dict[str, Any] = {"cls": type(self.p).__name__, "merge_size": self._merge_size}
-        if cfg is not None:
-            for k in (
-                "min_pixels",
-                "max_pixels",
-                "patch_size",
-                "merge_size",
-                "temporal_patch_size",
-                "size",
-                "do_resize",
-                "do_normalize",
-                "image_mean",
-                "image_std",
-                "resample",
-            ):
-                if hasattr(cfg, k):
-                    payload[k] = getattr(cfg, k)
-        raw = json.dumps(payload, sort_keys=True, default=str).encode()
-        return hashlib.sha1(raw).hexdigest()[:16]
-
-    def _cache_get(self, uid: str) -> _CachedImageFeat | None:
-        key = (uid, self._cfg_fp)
-        hit = self._img_cache.get(key)
-        if hit is not None:
-            self._img_cache.move_to_end(key)
-        return hit
-
-    def _cache_put(self, uid: str, feat: _CachedImageFeat) -> None:
-        key = (uid, self._cfg_fp)
-        self._img_cache[key] = feat
-        self._img_cache.move_to_end(key)
-        while len(self._img_cache) > self._image_cache_size:
-            self._img_cache.popitem(last=False)
-
-    def clear_cache(self) -> None:
-        self._img_cache.clear()
-
-    @property
-    def image_cache_len(self) -> int:
-        return len(self._img_cache)
 
     @staticmethod
     def _prepare_pil(image):
@@ -132,7 +83,7 @@ class MultiModalProcessor:
         return convert_image_mode(image, "RGB")
 
     def _encode_image(self, image) -> _CachedImageFeat:
-        """Run HF image_processor only (no text) → cacheable mm_kwargs piece."""
+        """Run HF image_processor only (no text)."""
         image = self._prepare_pil(image)
         ip = self.p.image_processor
         out = ip(images=[image], return_tensors="pt")
@@ -152,39 +103,38 @@ class MultiModalProcessor:
         return feat.num_patches // (m * m)
 
     def _expand_image_pads(self, prompt: str, feats: list[_CachedImageFeat]) -> str:
-        """Replace each single ``<|image_pad|>`` with grid-sized repeats (Qwen-VL)."""
+        """Replace each single ``<|image_pad|>`` with grid-sized repeats (Qwen-VL).
+
+        Uses ``split`` so multi-image prompts expand each placeholder in order;
+        a naive ``str.replace(..., count=1)`` loop re-matches the pad rows just
+        emitted for the previous image (first span over-expands, last stays 1).
+        """
         pad = self._image_pad
-        out = prompt
-        for feat in feats:
-            n = self._vision_tokens(feat)
-            if pad not in out:
-                raise RuntimeError(
-                    f"expected {pad!r} in chat template prompt for image expansion"
-                )
-            out = out.replace(pad, pad * n, 1)
-        return out
+        parts = prompt.split(pad)
+        if len(parts) != len(feats) + 1:
+            raise RuntimeError(
+                f"expected {len(feats)} pad(s) ({pad!r}) in chat template prompt, "
+                f"found {len(parts) - 1}"
+            )
+        out = [parts[0]]
+        for i, feat in enumerate(feats):
+            out.append(pad * self._vision_tokens(feat))
+            out.append(parts[i + 1])
+        return "".join(out)
 
     def process(
         self, text: str, images: Optional[list] = None
     ) -> MultiModalInputs:
         """Process text (+ optional images) into ``MultiModalInputs``.
 
-        Image pixels/grid are cached per content hash and reused across prompts.
-        Prompt token ids are always rebuilt (depend on ``text``).
+        Pixel hash binds the cache key to the *encoded* input (config-aware);
+        prompt token ids are always rebuilt (depend on ``text``).
         """
         if not images:
             return MultiModalInputs(prompt_token_ids=self.p.tokenizer.encode(text))
 
-        prepared = [self._prepare_pil(im) for im in images]
-        uids = [hash_pil_image(im) for im in prepared]
-        feats: list[_CachedImageFeat] = []
-        for im, uid in zip(prepared, uids):
-            hit = self._cache_get(uid)
-            if hit is None:
-                # Already RGB+EXIF-normalized; skip re-prep inside encode.
-                hit = self._encode_image(im)
-                self._cache_put(uid, hit)
-            feats.append(hit)
+        feats = [self._encode_image(im) for im in images]
+        uids = [hash_image_pixels(f.pixel_values) for f in feats]
 
         msgs = [
             {

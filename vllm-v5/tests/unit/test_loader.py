@@ -10,6 +10,7 @@ import torch
 from safetensors.torch import save_file
 
 from src.models.loader import safetensors_weights_iterator
+from src.utils.paths import resolve_hf_home
 
 
 def _write_shard(path: Path, tensors: dict[str, torch.Tensor]) -> None:
@@ -79,11 +80,11 @@ def test_device_kwarg_accepted(tmp_path: Path):
 
 
 @pytest.mark.skipif(
-    not Path("/mnt/nfs/zhangli/huggingface/Qwen3-0.6B").is_dir(),
+    not (resolve_hf_home() / "Qwen3-0.6B").is_dir(),
     reason="Qwen3-0.6B not cached locally",
 )
 def test_real_qwen06b_key_count_stable():
-    folder = "/mnt/nfs/zhangli/huggingface/Qwen3-0.6B"
+    folder = resolve_hf_home() / "Qwen3-0.6B"
     keys1 = [k for k, _ in safetensors_weights_iterator(folder)]
     keys2 = [k for k, _ in safetensors_weights_iterator(folder)]
     assert keys1 == keys2

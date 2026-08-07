@@ -4,8 +4,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-# FAST_HF_HOME = Path("/data/huggingface-local")
-HUGGINGFACE_HUB_CACHE = Path("/mnt/nfs/zhangli/huggingface")
+# 缓存根目录：优先环境变量，其次退回 ~/huggingface
+HUGGINGFACE_HUB_CACHE = Path(
+    os.environ.get("HF_HOME")
+    or os.environ.get("HUGGINGFACE_HUB_CACHE")
+    or Path.home() / "huggingface"
+)
 
 
 def resolve_hf_home() -> Path:

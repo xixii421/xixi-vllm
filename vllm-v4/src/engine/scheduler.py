@@ -95,31 +95,40 @@ class Scheduler:
     ) -> int:
         if not self.waiting or not self._room(prefills, decodes):
             return tokens_used
-        remaining = self.max_num_batched_tokens - tokens_used
-        if remaining <= 0:
-            return tokens_used
-
-        seq = self.waiting[0]
-        if not self._try_alloc(seq):
-            return tokens_used
-
-        need = seq.num_tokens - seq.num_cached_tokens
-        if need <= 0:
-            self._promote_full_hit(seq)
-            return tokens_used
-
-        chunk = min(need, remaining)
-        chunk = self._clamp_chunk_for_encoder_budget(seq, chunk)
-        if chunk <= 0:
-            return tokens_used
-        seq.num_scheduled_tokens = chunk
-        seq.is_prefill = True
-        prefills.append(seq)
-        if seq.num_cached_tokens + chunk == seq.num_tokens:
-            seq.status = SequenceStatus.RUNNING
-            self.waiting.popleft()
-            self.running.append(seq)
-        return tokens_used + chunk
+        # 一次尽量消化多个 waiting 请求，避免「每步只 prefill 一个」的拖尾
+        # （bs > 单步 budget 时，剩余请求会 1 步 1 个，导致长尾 TPOT 暴涨）。
+        # 约束：同一时刻最多一个 partial chunk（未完成的 chunk 留在队首，
+        # 下步续切），保证 chunked prefill 的正确性且不让单个长请求饿死后续。
+        n_partial = 0
+        for seq in list(self.waiting):
+            if not self._room(prefills, decodes):
+                break
+            remaining = self.max_num_batched_tokens - tokens_used
+            if remaining <= 0:
+                break
+            if not self._try_alloc(seq):
+                break
+            need = seq.num_tokens - seq.num_cached_tokens
+            if need <= 0:
+                self._promote_full_hit(seq)
+                continue
+            chunk = min(need, remaining)
+            chunk = self._clamp_chunk_for_encoder_budget(seq, chunk)
+            if chunk <= 0:
+                continue
+            seq.num_scheduled_tokens = chunk
+            seq.is_prefill = True
+            prefills.append(seq)
+            tokens_used += chunk
+            if seq.num_cached_tokens + chunk == seq.num_tokens:
+                seq.status = SequenceStatus.RUNNING
+                self.waiting.remove(seq)
+                self.running.append(seq)
+            else:
+                n_partial += 1
+                if n_partial >= 1:
+                    break  # 本步最多留一个未完成 chunk
+        return tokens_used
 
     def _clamp_chunk_for_encoder_budget(self, seq: Sequence, chunk: int) -> int:
         """Shorten chunk so overlapping vision tokens fit the encoder budget.

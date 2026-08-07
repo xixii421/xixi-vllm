@@ -37,6 +37,6 @@ flashinfer_non_blocking: true
 # --- 多模态 (v4 新增, 仅 VL 模型生效) ---
 image_max_side: 1024  # 图片长边最大像素，等比缩放（减少 visual token）
 enable_vit_cuda_graph: null  # null=auto（VL + CG 开启时自动启用）
-vit_cg_token_budgets: [64, 128, 256, 512, 1024]
-vit_cg_max_batch_size: 1
+vit_cg_token_budgets: [64, 128, 256, 512, 1024, 2048]
+vit_cg_max_batch_size: 4
 encoder_compute_budget: 0    # 0=与 max_num_batched_tokens 相同

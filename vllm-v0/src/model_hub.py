@@ -7,12 +7,8 @@ from pathlib import Path
 import torch
 from huggingface_hub import snapshot_download
 
-# 缓存根目录：优先环境变量，其次退回 ~/huggingface
-DEFAULT_CACHE_DIR = Path(
-    os.environ.get("HF_HOME")
-    or os.environ.get("HUGGINGFACE_HUB_CACHE")
-    or Path.home() / "huggingface"
-)
+# 模型固定存放在 ~/huggingface
+DEFAULT_CACHE_DIR = Path.home() / "huggingface"
 
 
 @dataclass(frozen=True)
@@ -31,15 +27,14 @@ QWEN3_REGISTRY: tuple[ModelSpec, ...] = (
 )
 
 
-def is_downloaded(spec: ModelSpec, cache_dir: Path | None = None) -> bool:
-    path = (cache_dir or DEFAULT_CACHE_DIR) / spec.local_name
+def is_downloaded(spec: ModelSpec) -> bool:
+    path = DEFAULT_CACHE_DIR / spec.local_name
     return path.is_dir() and any(path.glob("*.safetensors"))
 
 
-def download_model(spec: ModelSpec, cache_dir: Path | None = None) -> Path:
-    root = cache_dir or DEFAULT_CACHE_DIR
-    target = root / spec.local_name
-    if is_downloaded(spec, root):
+def download_model(spec: ModelSpec) -> Path:
+    target = DEFAULT_CACHE_DIR / spec.local_name
+    if is_downloaded(spec):
         print(f"[skip] {spec.local_name} already at {target}")
         return target
     print(f"[download] {spec.repo_id} -> {target}")
@@ -52,11 +47,8 @@ def download_model(spec: ModelSpec, cache_dir: Path | None = None) -> Path:
     return target
 
 
-def download_models(
-    specs: list[ModelSpec] | None = None,
-    cache_dir: Path | None = None,
-) -> list[Path]:
-    return [download_model(s, cache_dir) for s in (specs or list(QWEN3_REGISTRY))]
+def download_models(specs: list[ModelSpec] | None = None) -> list[Path]:
+    return [download_model(s) for s in (specs or list(QWEN3_REGISTRY))]
 
 
 def gpu_memory_gb() -> float:

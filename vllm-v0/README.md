@@ -1,6 +1,6 @@
 # vllm-v0
 
-> 从零实现自回归推理，以Qwen3为基准，实现整个模型的骨架，包括权重加载、模型搭建、采样策略与流式输出等。
+> 以 Qwen3 为基准，从零实现完整的自回归推理流程，覆盖权重加载、模型搭建、采样与流式输出。
 
 
 ## 代码架构
@@ -59,14 +59,6 @@ Qwen3ForCausalLM          # 表征与词表投影分离
     └── norm             # 最终 RMSNorm
 ```
 
-### 权重加载
-```
-iterator ──> model.load_weights
-            ├─ q_proj.weight → qkv_proj[0 : q]
-            ├─ k_proj.weight → qkv_proj[q : q+kv]
-            ├─ v_proj.weight → qkv_proj[q+kv : q+2kv]
-            └─ 其余权重 → 同名直接 copy
-```
 
 
 ## 快速开始
@@ -83,8 +75,6 @@ python run.py --model Qwen3-0.6B --prompt "Hello, my name is"
 # 列出可用模型
 python run.py --list
 ```
-
-
 
 
 ## 文档

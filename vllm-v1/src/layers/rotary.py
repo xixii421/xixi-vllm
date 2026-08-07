@@ -14,28 +14,26 @@ def _rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tens
 
 
 class RotaryEmbedding(nn.Module):
-    """标准 RoPE；V 不旋转，由调用方只把 Q、K 传进来。"""
+    """标准 RoPE；Qwen3 全维旋转（rotary_dim == head_size），V 不旋转。"""
 
     def __init__(
         self,
         head_size: int,
-        rotary_dim: int,
         max_position_embeddings: int,
         base: float,
     ) -> None:
         super().__init__()
-        if rotary_dim % 2 != 0:
-            raise ValueError("rotary_dim must be even")
+        if head_size % 2 != 0:
+            raise ValueError("head_size must be even")
         self.head_size = head_size
-        self.rotary_dim = rotary_dim
 
-        # inv_freq[i] = base ^ (-2i / rotary_dim)
+        # inv_freq[i] = base ^ (-2i / head_size)
         inv_freq = 1.0 / (
-            base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim)
+            base ** (torch.arange(0, head_size, 2, dtype=torch.float) / head_size)
         )
         t = torch.arange(max_position_embeddings, dtype=torch.float)
         freqs = torch.outer(t, inv_freq)
-        # 缓存 [max_pos, rotary_dim] = concat(cos, sin)，各占一半宽度
+        # 缓存 [max_pos, head_size] = concat(cos, sin)，各占一半宽度
         self.register_buffer(
             "cos_sin_cache",
             torch.cat((freqs.cos(), freqs.sin()), dim=-1),
@@ -58,10 +56,6 @@ class RotaryEmbedding(nn.Module):
         def _apply(x: torch.Tensor) -> torch.Tensor:
             shape = x.shape
             x = x.reshape(flat.numel(), -1, self.head_size)
-            rot = _rotate(x[..., : self.rotary_dim], cos, sin)
-            # rotary_dim < head_size 时，尾部通道保持不动
-            if self.rotary_dim < self.head_size:
-                rot = torch.cat((rot, x[..., self.rotary_dim :]), dim=-1)
-            return rot.reshape(shape)
+            return _rotate(x, cos, sin).reshape(shape)
 
         return _apply(query), _apply(key)

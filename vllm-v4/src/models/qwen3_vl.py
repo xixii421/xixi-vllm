@@ -7,7 +7,7 @@ from transformers import AutoConfig, Qwen3VLConfig
 
 from ..layers import get_mrope
 from ..multimodal import EncoderCache, Qwen3VisionTower, mrope_positions
-from .loader import default_weight_loader, safetensors_weights_iterator
+from .loader import default_weight_loader, safetensors_weights_iterator, shard_copy
 from .qwen3 import Qwen3Attention, Qwen3DecoderLayer, Qwen3Model
 
 
@@ -151,17 +151,14 @@ class Qwen3VLForCausalLM(nn.Module):
             else:
                 continue
 
-            fused = None
+            fused = False
             for hf, offset, size in (
                 ("q_proj", 0, q),
                 ("k_proj", q, kv),
                 ("v_proj", q + kv, kv),
             ):
                 if f".{hf}." in our or our.endswith(f".{hf}.weight") or our.endswith(f".{hf}.bias"):
-                    our2 = our.replace(hf, "qkv_proj")
-                    if our2 in params:
-                        params[our2].data[offset : offset + size].copy_(w)
-                    fused = True
+                    fused = shard_copy(params, our.replace(hf, "qkv_proj"), w, offset, size)
                     break
             if fused:
                 continue
@@ -259,16 +256,12 @@ class Qwen3VLForCausalLM(nn.Module):
             return out
 
         m = self.vision_tower.merge_size
+        # Each mf.data is already pinned at the engine boundary → move to GPU
+        # non_blocking per image, then cat on device (avoids CPU cat + re-pin).
         pv = torch.cat(
-            [
-                mf.data if mf.data.device.type == "cpu" else mf.data.cpu()
-                for mf in miss_mf
-            ],
+            [mf.data.to(device=device, non_blocking=True) for mf in miss_mf],
             0,
         )
-        if not pv.is_pinned:
-            pv = pv.pin_memory()
-        pv = pv.to(device=device, non_blocking=True)
         grids, sizes = [], []
         for mf in miss_mf:
             if mf.grid_thw_tuple is not None:
@@ -293,7 +286,6 @@ class Qwen3VLForCausalLM(nn.Module):
                 mf.deepstack = ds
             out[idx] = emb
             self._encoder_cache.put(mf.uid, emb, ds)
-            self._encoder_cache.retain(mf.uid, getattr(mf, "request_id", mf.uid))
             cur += sz
         return out
 

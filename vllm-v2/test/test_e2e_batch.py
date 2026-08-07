@@ -35,7 +35,6 @@ def main() -> None:
     eng = Engine(
         EngineConfig(
             model=model,
-            enforce_eager=True,
             prefix_backend="none",
             max_num_seqs=4,
             context_len=512,
@@ -50,7 +49,6 @@ def main() -> None:
     eng2 = Engine(
         EngineConfig(
             model=model,
-            enforce_eager=True,
             prefix_backend="hash",
             max_num_seqs=4,
             context_len=512,

@@ -1,7 +1,10 @@
-"""Qwen3 CausalLM 骨架：Decoder 堆叠 + HF 权重装载（含 QKV 合并）。"""
+"""Qwen3 CausalLM 骨架：Decoder 堆叠 + HF 权重装载（含 QKV 合并）。
+
+与 v0 唯一的结构差异：Qwen3Attention 持有 layer_id，
+用于 KV Cache 写入时定位到对应层的物理页。
+"""
 
 from __future__ import annotations
-
 from collections.abc import Iterable
 
 import torch
@@ -14,96 +17,90 @@ from .layers.layernorm import RMSNorm
 from .layers.rotary import RotaryEmbedding
 from .model_loader import default_weight_loader
 
+
+# HF 的 q/k/v 投影权重分成三段, 分别对应 q, k, v 的投影权重, 按位移切片写入
+# 内存布局: [q | k | v]
 _QKV_SHARDS = (
-    ("q_proj", "qkv_proj", lambda q, kv: 0, lambda q, kv: q),
-    ("k_proj", "qkv_proj", lambda q, kv: q, lambda q, kv: kv),
-    ("v_proj", "qkv_proj", lambda q, kv: q + kv, lambda q, kv: kv),
+    ("q_proj", lambda q, kv: (0, q)),
+    ("k_proj", lambda q, kv: (q, kv)),
+    ("v_proj", lambda q, kv: (q + kv, kv)),
 )
 
 
 class Qwen3MLP(nn.Module):
-    def __init__(self, hidden_size: int, intermediate_size: int) -> None:
+    """SwiGLU 前馈网络"""
+
+    def __init__(self, config: Qwen3Config) -> None:
         super().__init__()
-        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+        # gate 决定放行多少, up 提供候选值, down 回到 hidden
+        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
         self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # SiluAndMul 约定后半是 gate：silu(gate) * up
         return self.down_proj(
-            self.act_fn(torch.cat([self.gate_proj(x), self.up_proj(x)], dim=-1))
+            self.act_fn(torch.cat([self.up_proj(x), self.gate_proj(x)], dim=-1))
         )
 
 
 class Qwen3Attention(nn.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        layer_id: int,
-        max_position: int = 4096 * 32,
-        head_dim: int | None = None,
-        rms_norm_eps: float = 1e-6,
-        qkv_bias: bool = False,
-        rope_theta: float = 10000,
-    ) -> None:
-        super().__init__()
-        self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads
-        self.head_dim = head_dim or hidden_size // num_heads
-        self.q_size = num_heads * self.head_dim
-        self.kv_size = num_kv_heads * self.head_dim
+    """Qwen3 自注意力: FusedQKV -> QK Norm -> RoPE -> GQA -> Linear（v1 带 KV Cache）"""
 
-        self.qkv_proj = nn.Linear(
-            hidden_size,
-            (num_heads + 2 * num_kv_heads) * self.head_dim,
-            bias=qkv_bias,
-        )
-        self.o_proj = nn.Linear(num_heads * self.head_dim, hidden_size, bias=False)
+    def __init__(self, config: Qwen3Config, layer_id: int) -> None:
+        super().__init__()
+        self.num_heads = config.num_attention_heads
+        self.num_kv_heads = config.num_key_value_heads
+        # 小模型可能显式给 head_dim
+        self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+
+        # 一次线性同时产出 Q|K|V，加载时再按切片写入三段
+        self.qkv_proj = nn.Linear(config.hidden_size, self.q_size + 2 * self.kv_size, bias=False)
+        self.o_proj = nn.Linear(self.q_size, config.hidden_size, bias=False)
+        # RoPE 按绝对位置旋转 Q、K；Qwen3 全维旋转 (rotary_dim == head_dim)
         self.rotary_emb = RotaryEmbedding(
-            self.head_dim, self.head_dim, max_position, rope_theta
+            self.head_dim,
+            config.max_position_embeddings,
+            float(getattr(config, "rope_theta", 1_000_000)),
         )
-        self.attn = Attention(
-            num_heads, self.head_dim, self.head_dim**-0.5, num_kv_heads, layer_id
-        )
-        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        # layer_id 用于 KV Cache 写/读时定位物理页所在层
+        self.attn = Attention(self.num_heads, self.head_dim, self.num_kv_heads, layer_id)
+        # QK-Norm：按每个 head 的 head_dim 做 RMSNorm
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
+        # 一次投影 -> 三段切分 -> 分别做 norm 和 RoPE -> 重新组装 -> 线性投影
         q, k, v = self.qkv_proj(hidden_states).split(
             [self.q_size, self.kv_size, self.kv_size], dim=-1
         )
+        # [B,S,H*D] → [B,S,H,D] 逐 head 做 norm，再拍平回 [B,S,H*D]；V 不做 norm 和 RoPE
         q = self.q_norm(q.unflatten(-1, (-1, self.head_dim))).flatten(-2)
         k = self.k_norm(k.unflatten(-1, (-1, self.head_dim))).flatten(-2)
         q, k = self.rotary_emb(positions, q, k)
 
+        # 显式分出 head 维：Q 有 num_heads 头，K/V 只有 num_kv_heads 头（GQA）
         b, s, _ = q.shape
         q = q.view(b, s, self.num_heads, self.head_dim)
         k = k.view(b, s, self.num_kv_heads, self.head_dim)
         v = v.view(b, s, self.num_kv_heads, self.head_dim)
+        # Attention 内部完成 KV 写/读与注意力，输出压平后过 o_proj
         return self.o_proj(self.attn(q, k, v).flatten(-2))
 
 
 class Qwen3DecoderLayer(nn.Module):
+    """Qwen3 解码器层: 自注意 -> 残差 -> MLP -> 残差"""
+
     def __init__(self, config: Qwen3Config, layer_id: int) -> None:
         super().__init__()
-        self.self_attn = Qwen3Attention(
-            hidden_size=config.hidden_size,
-            num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
-            layer_id=layer_id,
-            max_position=config.max_position_embeddings,
-            rope_theta=float(getattr(config, "rope_theta", 1_000_000)),
-            rms_norm_eps=config.rms_norm_eps,
-            qkv_bias=bool(getattr(config, "attention_bias", False)),
-            head_dim=getattr(config, "head_dim", None),
-        )
-        self.mlp = Qwen3MLP(config.hidden_size, config.intermediate_size)
+        self.self_attn = Qwen3Attention(config, layer_id)
+        self.mlp = Qwen3MLP(config)
+        # 输入层 norm 与残差融合；输出层 norm 与残差融合
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -111,17 +108,21 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # 首层：residual 取 embedding；之后各层在 RMSNorm 内完成 h+residual 再归一化
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(positions, hidden_states)
+        # Attn 输出再归一化，然后过 MLP
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         return self.mlp(hidden_states), residual
 
 
 class Qwen3Model(nn.Module):
+    """Qwen3 模型: Embed -> 堆叠Layers -> Norm"""
+
     def __init__(self, config: Qwen3Config) -> None:
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
@@ -131,22 +132,28 @@ class Qwen3Model(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        # residual 初始为 None，首层 Layer 直接用 embedding 作为残差
         h, residual = self.embed_tokens(input_ids), None
         for layer in self.layers:
             h, residual = layer(positions, h, residual)
+        # final norm 同时完成最后一次残差融合；只返回归一化后的表征
         return self.norm(h, residual)[0]
 
 
 class Qwen3ForCausalLM(nn.Module):
+    """Qwen3 模型顶层: backbone + LM head"""
+
     def __init__(self, config: Qwen3Config) -> None:
         super().__init__()
         self.model = Qwen3Model(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        # 只算 Backbone，推理引擎需要 hidden state 时再算 LM head
         return self.model(input_ids, positions)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # 表征计算与词表投影分离，后续张量并行时 lm_head 可以单独切分
         return self.lm_head(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
@@ -157,18 +164,20 @@ class Qwen3ForCausalLM(nn.Module):
 
         for name, w in weights:
             merged = False
-            for hf, our, off_fn, size_fn in _QKV_SHARDS:
-                if hf not in name:
+            for hf, off_fn in _QKV_SHARDS:
+                # 精确匹配 "..._proj.weight"，避免 v_proj 命中已合并的 qkv_proj
+                if f".{hf}.weight" not in name:
                     continue
-                fused = name.replace(hf, our)
+                fused = name.replace(hf, "qkv_proj")  # HF 名 -> 本项目名
                 param = params[fused]
-                off, size = off_fn(q_size, kv_size), size_fn(q_size, kv_size)
+                off, size = off_fn(q_size, kv_size)
+                # 切片写入，不是整段覆盖
                 param.data[off : off + size].copy_(w)
                 loaded.add(fused)
                 merged = True
                 break
             if merged:
-                continue
+                continue  # QKV 已处理，跳到下一个权重
             if name in params:
                 default_weight_loader(params[name], w)
                 loaded.add(name)
@@ -178,7 +187,7 @@ class Qwen3ForCausalLM(nn.Module):
                 params["lm_head.weight"], params["model.embed_tokens.weight"]
             )
             loaded.add("lm_head.weight")
-
+        # 检查是否有未加载的权重
         missing = set(params) - loaded
         if missing:
             print(f"[WARN] {len(missing)} params not loaded: {sorted(missing)[:8]}...")

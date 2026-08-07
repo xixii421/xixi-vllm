@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..layers.vision import ViTAttentionBackend
+from ..models.loader import shard_copy
 
 
 def _bilinear(embed_weight, t, h, w, num_grid, m_size, dtype):
@@ -219,47 +220,27 @@ class Qwen3VisionTransformer(nn.Module):
         loaded = 0
         hs = self.hidden_size
 
-        def _copy_slice(target_key: str, src: torch.Tensor, start: int, end: int) -> bool:
-            if target_key not in params:
-                return False
-            dst = params[target_key]
-            params[target_key].data[start:end].copy_(src.to(dtype=dst.dtype))
-            return True
-
         for hk, v in state_dict.items():
             if not hk.startswith(pfx):
                 continue
             nk = hk[len(pfx) :].replace("linear_fc1", "fc1").replace("linear_fc2", "fc2")
 
             # Split Q/K/V → fused qkv (shard copy). Check before generic path.
-            if nk.endswith("attn.q.weight"):
-                t = nk.replace("attn.q.weight", "attn.qkv.weight")
-                loaded += int(_copy_slice(t, v, 0, hs))
-                continue
-            if nk.endswith("attn.k.weight"):
-                t = nk.replace("attn.k.weight", "attn.qkv.weight")
-                loaded += int(_copy_slice(t, v, hs, 2 * hs))
-                continue
-            if nk.endswith("attn.v.weight"):
-                t = nk.replace("attn.v.weight", "attn.qkv.weight")
-                loaded += int(_copy_slice(t, v, 2 * hs, 3 * hs))
-                continue
-            if nk.endswith("attn.q.bias"):
-                t = nk.replace("attn.q.bias", "attn.qkv.bias")
-                loaded += int(_copy_slice(t, v, 0, hs))
-                continue
-            if nk.endswith("attn.k.bias"):
-                t = nk.replace("attn.k.bias", "attn.qkv.bias")
-                loaded += int(_copy_slice(t, v, hs, 2 * hs))
-                continue
-            if nk.endswith("attn.v.bias"):
-                t = nk.replace("attn.v.bias", "attn.qkv.bias")
-                loaded += int(_copy_slice(t, v, 2 * hs, 3 * hs))
-                continue
-
-            if nk in params:
-                params[nk].data.copy_(v.to(dtype=params[nk].dtype))
-                loaded += 1
+            for hf, off in (("q", 0), ("k", hs), ("v", 2 * hs)):
+                if nk.endswith(f"attn.{hf}.weight"):
+                    loaded += int(
+                        shard_copy(params, nk.replace(f"attn.{hf}.weight", "attn.qkv.weight"), v, off, hs)
+                    )
+                    break
+                if nk.endswith(f"attn.{hf}.bias"):
+                    loaded += int(
+                        shard_copy(params, nk.replace(f"attn.{hf}.bias", "attn.qkv.bias"), v, off, hs)
+                    )
+                    break
+            else:
+                if nk in params:
+                    params[nk].data.copy_(v.to(dtype=params[nk].dtype))
+                    loaded += 1
         return loaded
 
     @staticmethod

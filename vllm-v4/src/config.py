@@ -28,6 +28,9 @@ class EngineConfig:
     # (``enforce_eager=False``). Decode still uses CUDA Graph; compile only
     # accelerates the eager prefill forward (TTFT).
     compile_prefill: bool | None = None
+    # Prefill piecewise CUDA Graph. None → same default as ``compile_prefill``.
+    # 捕获 (bs, L) 固定形状图重放首 chunk，省掉 prefill 每步的 kernel launch。
+    prefill_cuda_graph: bool | None = None
     dtype: str = "auto"
     # Prefix cache backend (v2-compatible). radix is completed beyond v2 (evict/invalidate/dedup).
     prefix_backend: str = "hash"
@@ -41,8 +44,9 @@ class EngineConfig:
     flashinfer_non_blocking: bool = True
     # Vision encoder CUDA Graph (budget replay). Default on for VL when not eager.
     enable_vit_cuda_graph: bool | None = None
-    vit_cg_token_budgets: tuple[int, ...] = (64, 128, 256, 512, 1024)
-    vit_cg_max_batch_size: int = 1
+    # Budgets double to 2048; >1 batch lets multi-image requests hit one graph.
+    vit_cg_token_budgets: tuple[int, ...] = (64, 128, 256, 512, 1024, 2048)
+    vit_cg_max_batch_size: int = 4
     # Max merged vision tokens to encode in one step (0 = same as max_num_batched_tokens).
     encoder_compute_budget: int = 0
 
@@ -69,6 +73,8 @@ class EngineConfig:
             self.enforce_eager = not self.is_multimodal
         if self.compile_prefill is None:
             self.compile_prefill = not bool(self.enforce_eager)
+        if self.prefill_cuda_graph is None:
+            self.prefill_cuda_graph = not bool(self.enforce_eager)
         if self.enable_vit_cuda_graph is None:
             self.enable_vit_cuda_graph = self.is_multimodal and not self.enforce_eager
         if self.encoder_compute_budget <= 0:

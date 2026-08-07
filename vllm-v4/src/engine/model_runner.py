@@ -2,6 +2,7 @@ import torch
 
 from ..config import EngineConfig
 from ..core.cuda_graph import CUDAGraphRunner
+from ..core.prefill_cuda_graph import PrefillCUDAGraphRunner
 from ..layers.attention import attention_context
 from ..layers.attention_backend import (
     BackendConfig,
@@ -44,6 +45,9 @@ class ModelRunner:
         self.cuda_graph_runner: CUDAGraphRunner | None = None
         if not config.enforce_eager:
             self.cuda_graph_runner = self._capture_cg()
+        self.prefill_cg_runner: PrefillCUDAGraphRunner | None = None
+        if config.prefill_cuda_graph:
+            self.prefill_cg_runner = self._capture_prefill_cg()
         if config.compile_prefill:
             self._prefill_model = self._compile_prefill_model()
 
@@ -136,7 +140,45 @@ class ModelRunner:
         )
         return runner
 
+    def _capture_prefill_cg(self) -> PrefillCUDAGraphRunner:
+        cfg = self.config.text_config
+        hd = getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads)
+        max_bs = min(self.config.max_num_seqs, 256)
+        dummy_page_id = self.kv.dummy_page_id
+        if dummy_page_id < 0:
+            raise RuntimeError("CUDA Graph capture requires a reserved dummy page")
+        runner = PrefillCUDAGraphRunner(
+            model=self.model,
+            max_batch_size=max_bs,
+            max_model_len=self.config.context_len,
+            max_batched_tokens=self.config.max_num_batched_tokens,
+            block_size=self.block_size,
+            hidden_size=cfg.hidden_size,
+            num_qo_heads=cfg.num_attention_heads,
+            num_kv_heads=cfg.num_key_value_heads,
+            head_dim=hd,
+            device=self.device,
+            dtype=self.dtype,
+            backend=self.backend,
+            kv_cache_pool=self.kv_cache,
+            dummy_page_id=dummy_page_id,
+        )
+        runner.capture()
+        print(
+            f"CUDA Graph captured for prefill piecewise "
+            f"({len(runner.pieces)} pieces, dummy_page={dummy_page_id})"
+        )
+        return runner
+
     def _compile_prefill_model(self) -> torch.nn.Module:
+        # 关键：prefill 的 seq_len 每次请求都变（513、1022…），必须让 inductor
+        # 生成「动态 shape」的单份代码，而不是每个 shape 重新编译 / 重录 CUDA Graph。
+        #   1) dynamic=True        → 符号化 seq/batch 维，避免每个长度重编译
+        #   2) cudagraph_skip_dynamic_graphs=True
+        #                          → 动态 shape 时跳过 CUDA Graph 重录（重录比编译还慢，
+        #                            这是 reduce-overhead 在动态 prefill 上的致命坑）
+        # 收益：任意 prompt 长度首次 prefill 即命中编译好的图，TTFT 稳定。
+        torch._inductor.config.triton.cudagraph_skip_dynamic_graphs = True
 
         dynamo.config.cache_size_limit = max(int(dynamo.config.cache_size_limit), 64)
         compiled = torch.compile(
@@ -179,10 +221,50 @@ class ModelRunner:
                 ):
                     with attention_context(meta):
                         compiled(input_ids=ids, positions=pos)
+                if self.is_multimodal:
+                    self._warm_compiled_mm(compiled, n, bt, sm, cu, cu_cpu, indptr_cpu, idx_gpu, last_cpu)
         self.kv_cache.zero_()
         torch.cuda.empty_cache()
-        print(f"Prefill torch.compile ready (warm_lens={warm_lens})")
+        print(f"Prefill torch.compile ready (warm_lens={warm_lens}, mm={'yes' if self.is_multimodal else 'no'})")
         return compiled
+
+    def _warm_compiled_mm(
+        self, compiled, n, bt, sm, cu, cu_cpu, indptr_cpu, idx_gpu, last_cpu
+    ) -> None:
+        """Warm the compiled model on an MM prefill shape (inputs_embeds + 3D MRoPE)."""
+        hidden = self.config.text_config.hidden_size
+        emb = torch.randn(n, hidden, device=self.device, dtype=self.dtype)
+        pos3d = torch.arange(n, dtype=torch.int64, device=self.device).repeat(3, 1)
+        deepstack = None
+        n_ds = int(getattr(self.model, "_ndps", 0))
+        if n_ds:
+            deepstack = [
+                torch.zeros(n, hidden, device=self.device, dtype=self.dtype)
+                for _ in range(n_ds)
+            ]
+        rope = getattr(self.model, "_mrope_module", None)
+        if callable(rope):
+            rope().ensure_cache_size(n + 1)
+        meta = self.backend.build_metadata(
+            1, indptr_cpu, idx_gpu, last_cpu, sm, True, self.kv_cache, cu_cpu
+        )
+        with forward_context(
+            is_prefill=True,
+            seqs=[],
+            cu_seqlens_q=cu,
+            cu_seqlens_k=cu,
+            max_seqlen_q=n,
+            max_seqlen_k=n,
+            block_tables=bt,
+            slot_mapping=sm,
+        ):
+            with attention_context(meta):
+                compiled(
+                    input_ids=None,
+                    positions=pos3d,
+                    inputs_embeds=emb,
+                    deepstack_input_embeds=deepstack,
+                )
 
     @torch.inference_mode()
     def run(
@@ -268,6 +350,28 @@ class ModelRunner:
             )
             return _sample(self._logits_for_sample(h, inputs))
 
+        # Piecewise prefill CUDA Graph：仅首 chunk（无缓存前缀，KV 分布均匀）。
+        # 续 chunk / 前缀缓存命中 / 多模态走 eager/compile。
+        if (
+            is_prefill
+            and self.prefill_cg_runner is not None
+            and inputs_embeds is None
+            and deepstack is None
+            and all(s.num_cached_tokens == 0 for s in seqs)
+        ):
+            seq_lens = [s.num_scheduled_tokens for s in seqs]
+            if self.prefill_cg_runner.can_use(len(seqs), seq_lens):
+                h = self.prefill_cg_runner.replay(
+                    inputs.input_ids,
+                    inputs.positions,
+                    inputs.slot_mapping,
+                    seq_lens=seq_lens,
+                    block_tables=[list(s.block_table) for s in seqs],
+                )
+                if not need_sample:
+                    return [0] * len(seqs)
+                return _sample(self._logits_for_sample(h, inputs))
+
         seq_lens = (
             [s.num_cached_tokens + s.num_scheduled_tokens for s in seqs]
             if is_prefill
@@ -297,12 +401,7 @@ class ModelRunner:
             cu_cpu,
         )
 
-        use_compiled = (
-            is_prefill
-            and self._prefill_model is not None
-            and inputs_embeds is None
-            and deepstack is None
-        )
+        use_compiled = is_prefill and self._prefill_model is not None
         model = self._prefill_model if use_compiled else self.model
 
         with forward_context(
@@ -337,6 +436,8 @@ class ModelRunner:
     def destroy(self) -> None:
         if self.cuda_graph_runner is not None:
             self.cuda_graph_runner.destroy()
+        if self.prefill_cg_runner is not None:
+            self.prefill_cg_runner.destroy()
 
 
 def _cu_q(seqs: list[Sequence]) -> list[int]:

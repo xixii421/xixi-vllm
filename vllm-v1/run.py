@@ -2,7 +2,7 @@
 
 用法:
     python run.py                                    # 使用 config.yaml 默认值
-    python run.py --model Qwen3-1.5B --compile        # CLI 覆盖配置
+    python run.py --model Qwen3-1.5B --prompt "你好"  # CLI 覆盖配置
     python run.py --prefix-backend radix              # 切换前缀缓存后端
 """
 
@@ -23,7 +23,6 @@ from src.model_hub import (
     download_models,
     gpu_memory_gb,
     select_models_for_vram,
-    verify_models,
 )
 
 # ---------------------------------------------------------------------------
@@ -39,7 +38,6 @@ DEFAULTS = {
     "temperature": 0.9,
     "top_p": 0.95,
     "top_k": 20,
-    "enforce_eager": True,
     "dtype": "auto",
     "context_len": 2048,
     "block_size": 16,
@@ -72,7 +70,6 @@ def run(cfg: dict) -> None:
     engine = Engine(
         EngineConfig(
             model=str(model_path),
-            enforce_eager=cfg["enforce_eager"],
             dtype=cfg["dtype"],
             context_len=cfg["context_len"],
             block_size=cfg["block_size"],
@@ -81,7 +78,7 @@ def run(cfg: dict) -> None:
     )
 
     prompt = cfg["prompt"]
-    print(f"Prompt: {prompt}\n{prompt}", end="", flush=True)
+    print(f"Prompt: {prompt}", end="", flush=True)
     start = time.perf_counter()
     n = 0
     for tok in engine.generate(
@@ -112,11 +109,9 @@ def main() -> None:
     p.add_argument("--temperature", type=float, default=None)
     p.add_argument("--top-p", type=float, default=None)
     p.add_argument("--top-k", type=int, default=None)
-    p.add_argument("--compile", action="store_true", help="启用 torch.compile")
     p.add_argument("--block-size", type=int, default=None)
     p.add_argument("--prefix-backend", choices=("none", "hash", "radix"), default=None)
     p.add_argument("--download", action="store_true")
-    p.add_argument("--verify-all", action="store_true")
     p.add_argument("--list", action="store_true")
     args = p.parse_args()
 
@@ -128,9 +123,6 @@ def main() -> None:
         print(f"VRAM:  {vram:.1f} GB")
         print(f"All:   {', '.join(s.local_name for s in QWEN3_REGISTRY)}")
         print(f"Fit:   {', '.join(s.local_name for s in selected)}")
-        return
-    if args.verify_all:
-        verify_models(download=True)
         return
     if args.download:
         print(f"Downloading to {DEFAULT_CACHE_DIR} ...")
@@ -145,8 +137,6 @@ def main() -> None:
                 "block_size", "prefix_backend"):
         if (v := getattr(args, key)) is not None:
             cfg[key] = v
-    if args.compile:
-        cfg["enforce_eager"] = False
 
     run(cfg)
 

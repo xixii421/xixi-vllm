@@ -14,6 +14,24 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
     param.data.copy_(loaded_weight)
 
 
+def shard_copy(
+    params: dict[str, torch.Tensor],
+    target_key: str,
+    src: torch.Tensor,
+    offset: int,
+    size: int,
+) -> bool:
+    """Copy ``src`` into ``params[target_key][offset:offset+size]`` (QKV/GateUp shards).
+
+    Shared by ViT and LLM weight loading for fused QKV projections.
+    """
+    if target_key not in params:
+        return False
+    dst = params[target_key]
+    params[target_key].data[offset : offset + size].copy_(src.to(dtype=dst.dtype))
+    return True
+
+
 @contextlib.contextmanager
 def skip_param_init():
     orig_linear = nn.Linear.reset_parameters
