@@ -5,18 +5,18 @@ import torch
 from torch import nn
 from transformers.models.qwen3 import Qwen3Config
 
-from layers.layernorm import RMSNorm
-from layers.rotary import RotaryEmbedding
-from layers.attention import Attention
-from layers.activation import SiluAndMul
-from model_loader import default_weight_loader
+from .layers.layernorm import RMSNorm
+from .layers.rotary import RotaryEmbedding
+from .layers.attention import Attention
+from .layers.activation import SiluAndMul
+from .model_loader import default_weight_loader
 
 _QKV_SHARDS = (
-    ("q_proj",lambda q,kv:(0,q)),
-    ("k_proj",lambda q,kv:(q,kv)),
-    ("v_proj",lambda q,kv:(q+kv,kv)),
+    ("q_proj", lambda q, kv: (0, q)),
+    ("k_proj", lambda q, kv: (q, kv)),
+    ("v_proj", lambda q, kv: (q + kv, kv)),
 )
-# 张量切片，HF 的q/k/v投影权重分成三段，分别对应q,k,v的投影权重，按照位移切片写入
+# HF 的 q/k/v 权重按偏移切片写入本项目融合后的 qkv_proj
 
 class Qwen3MLP(nn.Module):
     """SwiGLU 前馈网络"""
@@ -160,45 +160,37 @@ class Qwen3ForCausalLM(nn.Module):
         # 表征计算与词表投影分离,后续张量并行时lm_head可以单独切分
         return self.lm_head(hidden_states)
 
-    def load_weights(self,weights:Iterable[tuple[str,torch.Tensor]]) -> None:
-        # weights 一系列(权重名，权重张量)元组
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
+        # weights: (权重名, 权重张量) 序列；QKV 分片先合并，其余直接拷贝
         params = dict(self.named_parameters())
-        # named_parameters 是nn.Module的内置方法，它会递归遍历整个自定义模型所有已经注册的可训练参数,类型同上述weights
-        loaded:set[str] = set() # 用于记录哪些权重已经完成加载复制
-        attn0 = self.model.layers[0].self_attn # 取第一层的实例
-        q_size,kv_size = attn0.q_size,attn0.kv_size # 取出第一层实例的值
+        loaded: set[str] = set()
+        attn0 = self.model.layers[0].self_attn
+        q_size, kv_size = attn0.q_size, attn0.kv_size
 
-        for name,w in weights:
+        for name, w in weights:
             merged = False
-            for hf,off_fn in _QKV_SHARDS:
-            # 1 hf 代指定义的q_proj k_proj v_proj
-            # 2 off_fn 是一个lambda函数，接收q和kv返回切片偏移offset和片段长度size
+            for hf, off_fn in _QKV_SHARDS:
                 if f".{hf}.weight" not in name:
                     continue
-                # 如果该模型权重不包含 q_proj k_proj v_proj 不做QKV切片拷贝逻辑
-                fused = name.replace(hf,"qkv_proj")
-                # 将上述三个权重名统一替换为自定义的 qkv_proj
-                param = params[fused] # 通过权重名查找 parameter 对象
-                off,size = off_fn(q_size,kv_size) # 根据lambda计算偏移
-                param.data[off:off+size].copy_(w) # 拷贝对应权重值
-                loaded.add(fused) # 记录 qkv_proj 权重已经填充数据
+                fused = name.replace(hf, "qkv_proj")  # HF 名 -> 本项目融合名
+                param = params[fused]
+                off, size = off_fn(q_size, kv_size)  # 计算切片偏移与长度
+                param.data[off : off + size].copy_(w)
+                loaded.add(fused)
                 merged = True
                 break
             if merged:
                 continue
             if name in params:
                 default_weight_loader(params[name], w)
-                # 填充剩余权重值
-                loaded.add(name) # 记录剩余权重成功填充
-        if "lm_head.weight" not in loaded and "model.embed_tokens_weight" in loaded:
+                loaded.add(name)
+
+        if "lm_head.weight" not in loaded and "model.embed_tokens.weight" in loaded:
+            # 权重共享：embed_tokens 与 lm_head 绑定，复用已加载的词嵌入
             default_weight_loader(
-                params["lm_head.weight"], params["model.embed_tokens_weight"]
+                params["lm_head.weight"], params["model.embed_tokens.weight"]
             )
             loaded.add("lm_head.weight")
-            # 1 解决权重共享问题
-            # 2 某些模型，比如千问3，开启权重绑定，词嵌入层embed_tokens和输出头lm_head共享同一套权重
-            # 3 所以需要检查lm_head权重是否存在
-        missing = set(params) - loaded # 检查是否有未加载的权重
+        missing = set(params) - loaded
         if missing:
             print(f"[WARN] {len(missing)} params not loaded: {sorted(missing)[:8]}...")
-            # 如果有 打印未加载权重，这里只打印前八个

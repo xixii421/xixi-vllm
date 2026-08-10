@@ -3,10 +3,10 @@ from __future__ import annotations
 import torch
 from transformers import AutoTokenizer
 
-from config import EngineConfig
-from model import Qwen3ForCausalLM
-from model_loader import load_model
-from sampler import Sampler
+from .config import EngineConfig
+from .model import Qwen3ForCausalLM
+from .model_loader import load_model
+from .sampler import Sampler
 
 class Engine:
     def __init__(self,config:EngineConfig) -> None:
@@ -76,7 +76,7 @@ class Engine:
 
         temp_t = None if temperature<=0 else pack(temperature,torch.float)
         top_p_t = pack(top_p,torch.float)
-        top_k_t = pack(top_k,torch.float)
+        top_k_t = pack(top_k,torch.int)
 
         for _ in range(max_new_tokens):
             # ids: Python list 长度 N → 张量 [1, N]；positions 为 0..N-1

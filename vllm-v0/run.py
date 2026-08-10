@@ -15,9 +15,9 @@ from pathlib import Path
 
 import yaml
 
-from config import EngineConfig
-from engine import Engine
-from model_hub import (
+from src.config import EngineConfig
+from src.engine import Engine
+from src.model_hub import (
     DEFAULT_CACHE_DIR,
     QWEN3_REGISTRY,
     download_models,
