@@ -61,6 +61,11 @@
 **/*.nsys-rep
 **/chrome_trace*.json
 
+# profiler 产出物（json trace / txt 汇总均可由脚本再生成，一律不入库）
+profiler/**/out/
+profiler/**/*.nsys-rep
+profiler/**/*.sqlite
+
 # Bench outputs / logs / local dumps
 **/bench/results/
 **/bench/**/results/
