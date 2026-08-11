@@ -1,4 +1,5 @@
 # CUDA Graph Decode Runner 的设计与实现
+> !!!AI 辅助，暂未修改
 
 > **导读**：在 LLM 的 Decode 阶段，模型每次仅处理一个 Token，计算量极小。然而，CPU 频繁向 GPU 下发计算指令（Kernel Launch）的开销，往往超过了计算本身的时间。本文将由整体到局部深度拆解 `CUDAGraphRunner` 模块的设计哲学、核心接口与工程亮点，带你掌握工业级推理引擎的底层优化精髓。
 

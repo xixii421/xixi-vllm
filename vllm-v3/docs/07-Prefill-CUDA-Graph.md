@@ -1,4 +1,5 @@
 # 10 · Prefill CUDA Graph：piece CG
+> !!!AI 辅助，暂未修改
 
 > 对应 [04-CUDA-Graph](./04-CUDA-Graph.md)（decode CG）。这一份专门讲 **prefill 怎么用 CG**。
 > 核心矛盾：prefill 的序列长度是动态的，CUDA Graph 却要求固定形状。

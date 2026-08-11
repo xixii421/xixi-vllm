@@ -1,4 +1,5 @@
 # 07 · v3 Attention 相对 v2 的性能优化
+> !!!AI 辅助，暂未修改
 
 > 对应 [01-v2性能瓶颈](./01-v2性能瓶颈.md) 中 **瓶颈 A（Attention）** 和 **瓶颈 C（KV 写）**。  
 > v3 用 **FlashInfer + Triton** 两把刀，把 v2 的 PyTorch SDPA 体系彻底换血。
