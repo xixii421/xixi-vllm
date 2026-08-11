@@ -62,10 +62,14 @@ PYTHONPATH=. pytest tests/test_scheduler.py -q
 
 | 文档 | 说明 |
 |------|------|
-| [01-v2性能瓶颈.md](docs/01-v2性能瓶颈.md) | v2 慢在哪（3 大瓶颈） |
-| [07-Attention优化.md](docs/07-Attention优化.md) | 8 大优化详解 + FlashInfer vs FlashAttention |
-| [03-实测证据.md](docs/03-实测证据.md) | bench 数据（吞吐、延迟、前缀命中） |
-| [04-CUDA-Graph.md](docs/04-CUDA-Graph.md) | CUDA Graph 原理 + v3 实现 |
-| [05-Input.md](docs/05-Input.md) | pin_memory + H2D 优化 |
-| [06-Sampler.md](docs/06-Sampler.md) | 批量采样 vs 逐样本 |
-| [08-RMSNorm.md](docs/08-RMSNorm.md) | Triton RMSNorm 性能实测 |
+| [00-优化总览.md](docs/00-优化总览.md) | v3 优化方向与三面划分 |
+| [01-v2性能瓶颈.md](docs/01-v2性能瓶颈.md) | v2 慢在哪（5 大瓶颈 A~E） |
+| [02-实测证据.md](docs/02-实测证据.md) | 算子 → 机制 → 端到端 三层实测（含 piece CG/前缀命中/dec@P/short_P/多引擎对比，附完整测试代码） |
+| [04-Attention.md](docs/04-Attention.md) | FlashInfer paged attention + FlashInfer vs FlashAttention |
+| [05-算子融合.md](docs/05-算子融合.md) | Triton RMSNorm / RoPE / SiLU 融合 |
+| [06-CUDA-Graph.md](docs/06-CUDA-Graph.md) | Decode CUDA Graph 原理 + v3 实现 |
+| [07-Prefill-CUDA-Graph.md](docs/07-Prefill-CUDA-Graph.md) | Prefill piecewise CUDA Graph |
+| [08-显存优化.md](docs/08-显存优化.md) | CG workspace / graph pool 显存管理 |
+| [09-输入管线.md](docs/09-输入管线.md) | pin_memory + H2D 优化 |
+| [10-Sampler.md](docs/10-Sampler.md) | 批量采样 vs 逐样本 |
+| [11-模型加载.md](docs/11-模型加载.md) | 快速权重加载 |

@@ -10,24 +10,23 @@
 | --- | --- | --- |
 | 1 | [00-优化总览](./00-优化总览.md) | **完整优化线路图**（从这里开始） |
 | 2 | [01-v2性能瓶颈](./01-v2性能瓶颈.md) | v2 慢在哪（逐项拆解） |
-| 3 | [02-v3如何消除瓶颈](./02-v3如何消除瓶颈.md) | 每个瓶颈对应的 v3 改法 |
-| 4 | [03-实测证据](./03-实测证据.md) | 数字证明瓶颈被打掉 |
+| 3 | [02-实测证据](./02-实测证据.md) | 数字证明瓶颈被打掉（算子 → 机制 → 端到端三层） |
 
 ## 专题（按优化点深入）
 
 | 文档 | 内容 | 知识点 |
 | --- | --- | --- |
-| [04-CUDA-Graph](./04-CUDA-Graph.md) | Decode CUDA Graph 设计与实现 | 图捕获/重放、静态内存、非阻塞传输 |
-| [05-Input](./05-Input.md) | 输入数据管线 | cu_seqlens、slot_mapping、pin_memory |
-| [06-Sampler](./06-Sampler.md) | 采样器 | 整批采样、Gumbel-max、同步开销 |
-| [07-Attention优化](./07-Attention优化.md) | Attention 后端换血 | FlashInfer、PagedAttention、KV 写 |
-| [08-RMSNorm](./08-RMSNorm.md) | RMSNorm 融合 | 算子融合、Triton |
-| [09-显存优化](./09-显存优化.md) | **CG 显存治理**（workspace 共享） | 显存分解、graph pool、共享安全判据 |
-| [10-Prefill-CUDA-Graph](./10-Prefill-CUDA-Graph.md) | **Piece CG + 续 chunk CG** | 动态形状的三种处理、收益判据 |
-| [11-代码写作指南](./11-代码写作指南.md) | **如何写可读、可教的代码** | 单一职责、分派器、命名、注释、docstring |
+| [04-Attention](./04-Attention.md) | Attention 后端换血 | FlashInfer、PagedAttention、KV 写 |
+| [05-算子融合](./05-算子融合.md) | RMSNorm / RoPE / SiLU 融合 | 算子融合、Triton |
+| [06-CUDA-Graph](./06-CUDA-Graph.md) | Decode CUDA Graph 设计与实现 | 图捕获/重放、静态内存、非阻塞传输 |
+| [07-Prefill-CUDA-Graph](./07-Prefill-CUDA-Graph.md) | Prefill piecewise CUDA Graph | 动态形状的三种处理、收益判据 |
+| [08-显存优化](./08-显存优化.md) | **CG 显存治理**（workspace 共享） | 显存分解、graph pool、共享安全判据 |
+| [09-输入管线](./09-输入管线.md) | 输入数据管线 | cu_seqlens、slot_mapping、pin_memory |
+| [10-Sampler](./10-Sampler.md) | 采样器 | 整批采样、Gumbel-max、同步开销 |
+| [11-模型加载](./11-模型加载.md) | 快速权重加载 | 分片读取、dtype 直落 |
 
 ## 一句话
 
 > v2 文档自己写了：*「涉及到算子的优化都没有做」*。
 > v3 文档要回答的是：**那些没做的算子具体卡在哪，以及换掉之后快多少。**
-> 以及：**CG 带来的显存开销是多少，如何共享/取舍**（[09](./09-显存优化.md)）。
+> 以及：**CG 带来的显存开销是多少，如何共享/取舍**（[08](./08-显存优化.md)）。
