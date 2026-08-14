@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import torch
 
-
 def slots_tensor(
     block_table: list[int],
     start: int,
@@ -21,6 +20,6 @@ def slots_tensor(
         raise ValueError("invalid range")
     slots = [
         block_table[pos // block_size] * block_size + (pos % block_size)
-        for pos in range(start, end)
+        for pos in range(start,end)
     ]
-    return torch.tensor(slots, device=device, dtype=torch.long)
+    return torch.tensor(slots, device=device,dtype=torch.long)
