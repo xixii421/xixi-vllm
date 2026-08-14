@@ -1,13 +1,13 @@
 """ KV 生命周期编排：allocate / ensure / finish + 前缀索引
 
 典型流程:
-
     seq = manager.new_sequence(prompt_ids)
     manager.allocate(seq)          # 匹配前缀 + 分配余页
     ... Engine 绑 ForwardContext，Attention 用 store.write/gather ...
     manager.ensure_blocks(seq)     # decode 变长时补页
     manager.finish(seq)            # 发布满块进索引，页回 cached/free
 """
+
 
 from __future__ import annotations
 
@@ -16,33 +16,34 @@ from typing import Literal
 import torch
 from torch import nn
 
-from ..pagedattention import PagedStore
-from .pool import BlockPool
-from .prefix import HashPrefixIndex, NoopPrefixIndex, RadixPrefixIndex
-from .sequence import Sequence
+from pagedattention.store import PagedStore
+from kv.pool import BlockPool
+from kv.prefix.hash_index import HashPrefixIndex
+from kv.prefix.noop import NoopPrefixIndex
+from kv.prefix.radix_index import RadixPrefixIndex
+from kv.sequence import Sequence
 
-_PrefixBackend = Literal["none", "hash", "radix"]
-
+_PrefixBackend = Literal["none","hash","radix"]
 
 def _make_index(backend: _PrefixBackend):
-    """ 按配置创建前缀索引后端。 """
+    """ 按配置创建前缀索引后端 """
     if backend == "hash":
         return HashPrefixIndex()
-    if backend == "radix":
-        return RadixPrefixIndex()
-    return NoopPrefixIndex()
-
+    elif backend == "radix":
+        return HashPrefixIndex()
+    else:
+        return NoopPrefixIndex()
 
 class KVManager:
-    """ 单引擎的 KV 与前缀缓存入口。 """
+    """ 单引擎的 KV 与前缀缓存入口 """
 
     def __init__(
         self,
-        model: nn.Module,
+        model: nn.Module, # 拿到 head_dim、num_kv_heads 等模型参数，分配 KV block 需要
         *,
-        num_blocks: int,
-        block_size: int,
-        prefix_backend: _PrefixBackend,
+        num_blocks: int, # 内存池总block数
+        block_size: int, # 每个block存token数量
+        prefix_backend: _PrefixBackend, # 控制索引
         device: torch.device,
         dtype: torch.dtype,
     ) -> None:
@@ -54,15 +55,16 @@ class KVManager:
             block_size=block_size,
             device=device,
             dtype=dtype,
-        )
-        self.store = PagedStore(self.pool)  # Attention 只拿 store，不拿 Sequence
+        ) # 按照模型创建kv缓存池
+        self.store = PagedStore(self.pool) # 读写 kv缓存池
         self.index = _make_index(prefix_backend)
-        self.pool.on_evict = lambda bid: self.index.invalidate(bid, self.pool)
-        self._seq_counter = 0
-        self.last_num_cached_tokens = 0
+        self.pool.on_evict = lambda bid: self.index.invalidate(bid,self.pool)
+        # 驱逐回调 内存池不够需要回收物理块bid
+        self._seq_counter = 0 # 请求数量
+        self.last_num_cached_tokens = 0 # 上一轮迭代一共命中缓存的token数量，用于统计前缀缓存命中率
 
-    def new_sequence(self, token_ids: list[int]) -> Sequence:
-        """ 创建尚未绑页的 Sequence。 """
+    def new_sequence(self,token_ids: list[int]) -> Sequence:
+        """ 创建尚未绑页的 Sequence """
         self._seq_counter += 1
         return Sequence(
             token_ids=list(token_ids),
@@ -70,8 +72,8 @@ class KVManager:
             seq_id=self._seq_counter,
         )
 
-    def allocate(self, seq: Sequence) -> None:
-        """ 前缀命中复用页，其余 allocate_fresh；写好 block_table。 """
+    def allocate(self,seq: Sequence) -> None:
+        """ 前缀命中复用页，其余 allocate_fresh；写好 block_table """
         seq.block_table.clear()
         seq.num_cached_tokens = 0
         need = seq.num_blocks
@@ -79,56 +81,67 @@ class KVManager:
             self.last_num_cached_tokens = 0
             return
 
-        # 命中过长可能导致 free 不够：逐页缩短可复用前缀
+        # 自残缩短前缀，转移驱逐代价
         hit = self.index.match(seq, self.pool)
-        max_cached = min(len(hit), need)
+        max_cached = min(len(hit),need) # 计划复用块数
         while max_cached >= 0:
-            new_needed = need - max_cached
+            new_needed = need - max_cached # 复用之后需要的新块数
             reclaimable = sum(1 for b in hit[:max_cached] if b in self.pool.cached_ids)
+            # reclaimable 代表复用块中，在cached中的数量，其余的都在used
+            # 目的：把驱逐的代价，尽量留给当前这个请求自己承担，尽量保护全局其他请求的缓存
+            # 怎么理解：前缀减少肯定是从后往前的，如果我们减去一个cached块，后面还要请求一个free块，没有收益
+            # 如果我们减去一个used块，没有多出资源，反而还要多请求一个free，负收益
+            # 但是后面cached转换free的时候做LRU，有限选择自己刚才的cached块转换
+            # 可以很好的承担驱逐代价，而不影响全局其他请求的cached
+            # 不过allocate_fresh为了教学没有写LRU，了解就行
             if len(self.pool.free_ids) + reclaimable >= new_needed:
-                break
-            max_cached -= 1
-        if max_cached < 0:
+                break # 新块需要的空间够了
+            max_cached -= 1 # 不够的话需要减去复用块长度
+        if max_cached < 0: # 没有可供复用的块
             raise RuntimeError("not enough KV blocks for sequence")
 
         for bid in hit[:max_cached]:
             if bid in self.pool.used_ids:
-                self.pool.blocks[bid].ref_count += 1
+                self.pool.blocks[bid].ref_count += 1 # 可复用块 引用加一
             elif bid in self.pool.cached_ids:
-                self.pool.reclaim_cached(bid)
+                self.pool.reclaim_cached(bid) # 引用，转为used块
             else:
                 raise RuntimeError(f"prefix hit on non-resident block {bid}")
             seq.block_table.append(bid)
 
-        for _ in range(max_cached, need):
+        for _ in range(max_cached,need): # 分配未复用块，有free则用，没free则从cached里拿
             seq.block_table.append(self.pool.allocate_fresh())
 
-        seq.num_cached_tokens = max_cached * self.block_size
+        seq.num_cached_tokens = max_cached * self.block_size # 更新复用token数
         self.last_num_cached_tokens = seq.num_cached_tokens
 
         if isinstance(self.index, RadixPrefixIndex) and max_cached > 0:
             self.index.pin_match(seq, max_cached)
+            # 如果索引是基树索引且有复用前缀，需要更新基树引用
 
-    def ensure_blocks(self, seq: Sequence) -> None:
-        """ decode 变长时把 block_table 补到够用。 """
+    def ensure_blocks(self,seq: Sequence) -> None:
+        """ decode 变长时把 block_table 补到够用 """
         while len(seq.block_table) < seq.num_blocks:
             seq.block_table.append(self.pool.allocate_fresh())
 
-    def finish(self, seq: Sequence) -> None:
-        """ 满块发布进前缀索引；页转 cached 或 free。 """
+    def finish(self,seq: Sequence) -> None:
+        """ 满块发布进前缀索引；页转 cached 或 free """
+        # 序列seq执行结束，收尾
         n_full = seq.num_full_blocks()
-        if n_full > 0:
-            self.index.publish(seq, n_full, self.pool)
+        if n_full > 0: # 注册发布到前缀索引
+            self.index.publish(seq,n_full,self.pool)
 
         if isinstance(self.index, RadixPrefixIndex):
+            # 请求结束，解除该序列所有旧引用
             self.index.release_seq(seq.seq_id)
 
-        published = set(seq.block_table[:n_full]) if n_full > 0 else set()
+        published = set(seq.block_table[:n_full]) if n_full > 0 else set() # 进索引的满块bid
         for bid in list(seq.block_table):
             keep = bid in published and self.prefix_backend != "none"
+            # bid in published 其实代表是否是完整满块
+            # 之前的block_table 包含 prefix复用块，新加块，decode新加块
             if not keep and self.prefix_backend == "hash":
-                self.index.invalidate(bid, self.pool)
-            self.pool.release_to_cached_or_free(bid, keep_cached=keep)
-
+                self.index.invalidate(bid, self.pool) # keep不是满块则不保留清理索引
+            self.pool.release_to_cached_or_free(bid, keep_cached=keep) # 所有块更新物理池状态
         seq.block_table.clear()
         seq.num_cached_tokens = 0

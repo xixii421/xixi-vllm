@@ -7,13 +7,13 @@ from typing import TYPE_CHECKING
 
 import torch
 
-if TYPE_CHECKING:
+if TYPE_CHECKING: # 静态检查时为True 实际允许时为False
     from ..pagedattention import PagedStore
 
 
 @dataclass
 class ForwardContext:
-    """ Attention 只用页表合同。 """
+    """ Attention 只用页表合同 """
 
     is_prefill: bool              # 是否 prefill 步
     cache_len: int                # 本步开始前已有 KV 长度
@@ -22,16 +22,13 @@ class ForwardContext:
     block_table: list[int]        # 逻辑页 → 物理块号
     store: PagedStore             # 物理读写模块
 
-
 _forward_ctx: ForwardContext | None = None
 
-
 def set_forward_context(ctx: ForwardContext | None) -> None:
-    """ 安装或清空当前线程的 ForwardContext。 """
+    """ 安装或清空当前线程的 ForwardContext """
     global _forward_ctx
     _forward_ctx = ctx
 
-
 def get_forward_context() -> ForwardContext | None:
-    """ 读取当前 ForwardContext；无则 Attention 走无缓存 SDPA。 """
+    """ 读取当前 ForwardContext；无则 Attention 走无缓存 SDPA """
     return _forward_ctx
