@@ -1,6 +1,6 @@
 """ 单请求的逻辑状态：token 序列 + 页表 """
 
-from __future__ import absolute_import
+from __future__ import annotations
 
 from dataclasses import dataclass,field
 
