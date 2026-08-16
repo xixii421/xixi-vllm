@@ -1,23 +1,8 @@
-"""v2 vs v3 算子级性能剖析。
-
-对 v3 优化的每个核心算子做 v2/v3 双实现对比，覆盖 prefill 与 decode 两种形状。
-使用与 Qwen3-0.6B 一致的真实维度（hidden=1024, intermediate=3072,
-heads=16, kv_heads=8, head_dim=128）。
-
-计时方式：CUDA event，预热后取多次运行的中位数。
-
-模块对照（对应 docs/01-v2性能瓶颈.md 的 A~E）：
-  rmsnorm / rope / silu / mlp      → 瓶颈 D（算子碎片）
-  kvwrite                          → 瓶颈 C（index_copy_ 落盘）
-  attn_prefill / attn_decode       → 瓶颈 A（attention 逐条/SDPA）
-  sampler                          → 瓶颈 E（sort + multinomial 同步）
-  layer_decode / layer_prefill     → 整层前向（eager 组合路径）
+"""01 — 算子层：v2 vs v3（对应 docs/01-v2性能瓶颈.md 的 A~E）。
 
 用法:
-    python bench_ops_v2_vs_v3.py              # 全部模块
-    python bench_ops_v2_vs_v3.py --only rmsnorm,mlp
-    python bench_ops_v2_vs_v3.py --iters 200 --warm 50
-    python bench_ops_v2_vs_v3.py --device cuda:1
+    python bench/01_ops.py
+    python bench/01_ops.py --only rmsnorm,rope,attn_decode
 """
 
 from __future__ import annotations
@@ -65,10 +50,22 @@ D = dict(device="cuda", dtype=torch.bfloat16)
 
 def make_rmsnorm(ver: str, hidden: int = 1024):
     mod = load_ver(ver, "src/layers/layernorm.py")
-    return mod.RMSNorm(hidden, eps=1e-6).to(**D)
+    m = mod.RMSNorm(hidden, eps=1e-6).to(**D)
+    if ver == "v3":
+        # v3 始终返回 (out, residual)，算子微基准只要归一化输出
+        def run(x):
+            out, _ = m(x)
+            return out
+
+        return run
+    return m
 
 
 def make_rope(ver: str, head_dim: int = 128, max_pos: int = 4096):
+    if ver == "v3":
+        # v3 的 RoPE 走 vllm::rotary_embedding custom op（FlashInfer），需先注册
+        sys.path.insert(0, str(ROOT))
+        import src.layers.ops  # noqa: F401
     mod = load_ver(ver, "src/layers/rotary.py")
     return mod.RotaryEmbedding(head_dim, head_dim, max_pos, base=1_000_000).to(**D)
 
@@ -398,7 +395,7 @@ def _attn_decode(args):
     return rows
 
 
-@case("sampler", "E · Sampler：v2 sort+multinomial vs v3 topk+gumbel")
+@case("sampler", "E · Sampler：v2 sort+multinomial vs v3 融合有序采样")
 def _sampler(args):
     v2, v3 = make_sampler("v2"), make_sampler("v3")
     rows = []
@@ -407,11 +404,40 @@ def _sampler(args):
         temp = torch.full((bs,), 0.9, **D)
         top_p = torch.full((bs,), 0.95, **D)
         top_k = torch.full((bs,), 20, dtype=torch.int32, device="cuda")
-        t2 = bench(v2, logits, temp, top_p, top_k,
+        # 注意：两版参数顺序不同，统一用关键字传入以保证公平对比。
+        t2 = bench(v2, logits, temp, top_ps=top_p, top_ks=top_k,
                    warm=args.warm, iters=args.iters)
         t3 = bench(v3, logits, temp, top_ps=top_p, top_ks=top_k,
                    warm=args.warm, iters=args.iters)
-        rows.append((f"{bs}×151936", t2, t3))
+        rows.append((f"{bs}×151936 (topk+topp)", t2, t3))
+    return rows
+
+
+@case("sampler_scenarios", "E · Sampler 场景细分：greedy / topk / topp / all")
+def _sampler_scenarios(args):
+    v2, v3 = make_sampler("v2"), make_sampler("v3")
+    rows = []
+    for bs in [1, 8, 256]:
+        logits = torch.randn(bs, 151936, **D)
+        temp = torch.full((bs,), 0.9, **D)
+        top_p = torch.full((bs,), 0.95, **D)
+        top_k = torch.full((bs,), 20, dtype=torch.int32, device="cuda")
+
+        # greedy：全 temperature=0
+        temp0 = torch.zeros(bs, **D)
+        t2 = bench(v2, logits, temp0, warm=args.warm, iters=args.iters)
+        t3 = bench(v3, logits, temp0, warm=args.warm, iters=args.iters)
+        rows.append((f"{bs} greedy", t2, t3))
+
+        # 仅 top-k
+        t2 = bench(v2, logits, temp, top_ks=top_k, warm=args.warm, iters=args.iters)
+        t3 = bench(v3, logits, temp, top_ks=top_k, warm=args.warm, iters=args.iters)
+        rows.append((f"{bs} top_k=20", t2, t3))
+
+        # 仅 top-p
+        t2 = bench(v2, logits, temp, top_ps=top_p, warm=args.warm, iters=args.iters)
+        t3 = bench(v3, logits, temp, top_ps=top_p, warm=args.warm, iters=args.iters)
+        rows.append((f"{bs} top_p=0.95", t2, t3))
     return rows
 
 
@@ -546,10 +572,9 @@ def main() -> None:
         block = fmt_row(name, CASES[name]["label"], rows)
         print(block)
         md.append(block)
-    out = Path(args.device.replace(":", "_") + "_ops_bench.md")
     out_dir = Path(__file__).resolve().parent / "out"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / out.name
+    out = out_dir / "01_ops.md"
     out.write_text("\n".join(md) + "\n")
     print(f"\n→ saved to {out}")
 
