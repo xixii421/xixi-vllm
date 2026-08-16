@@ -20,7 +20,7 @@ class EngineConfig:
     mix_prefill_decode: bool = True  # True=decode优先混合调度，False=全prefill优先
 
     #  内存 
-    kvcache_block_size: int = 256  # 必须是256的倍数（FlashInfer约束）
+    kvcache_block_size: int = 256  # 必须是256的倍数（FA2 paged 约束）
     gpu_memory_utilization: float = 0.9
     num_kvcache_blocks: int = 0  # 0=自动按显存计算，>0=固定块数(基准测试用)
     prefix_backend: str = "hash"  # 前缀缓存后端: none / hash / radix
@@ -31,7 +31,6 @@ class EngineConfig:
     compile_mode: str = "reduce-overhead"  # torch.compile mode: default / reduce-overhead / max-autotune
     compile_dynamic: bool = True  # True=符号形状（一次编译覆盖任意长度，避免按长度重编译）；False=固定形状重放（仅离线固定长度，新长度会重编译 ~2-12s）
     dtype: str = "auto"
-    flashinfer_use_tensor_cores: bool = True  # FlashInfer 启用 Tensor Core
 
     #  运行时 
     hf_config: PretrainedConfig = field(init=False)
@@ -44,7 +43,7 @@ class EngineConfig:
                 "Use a local directory (e.g. ~/huggingface/Qwen3-0.6B)."
             )
         if self.kvcache_block_size % 256 != 0:
-            raise ValueError("kvcache_block_size must be a multiple of 256 (FlashInfer)")
+            raise ValueError("kvcache_block_size must be a multiple of 256 (FA2 paged)")
         if self.prefix_backend not in ("none", "hash", "radix"):
             raise ValueError(
                 f"prefix_backend must be none|hash|radix, got {self.prefix_backend!r}"

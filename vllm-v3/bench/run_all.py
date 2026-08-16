@@ -1,4 +1,4 @@
-"""清空 bench/out 后按序跑 01-07。
+"""清空 bench/out 后按序跑全部性能用例，结果只写 txt。
 
 v3 / nano 用仓库 .venv2；官方 vLLM 用 .venv-vllm。
 默认钉在本机 NVIDIA GeForce RTX 4090 D（nvidia-smi PCI 序）。
@@ -61,18 +61,20 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
 
     for name in (
-        "01_ops.py",
-        "02_correctness.py",
-        "03_prefill.py",
-        "04_prefix.py",
-        "05_scheduler.py",
-        "06_e2e.py",
+        "bench_prefill.py",
+        "bench_e2e.py",
     ):
         run(PY, f"bench/{name}", env=env)
 
-    run(PY, "bench/07_compare.py", "--engine", "v3", env=env)
-    run(PY, "bench/07_compare.py", "--engine", "nano", env=env)
-    run(PYV, "bench/07_compare.py", "--engine", "vllm", env=env)
+    run(PY, "bench/bench_compare.py", "--engine", "v3", env=env)
+    run(PY, "bench/bench_compare.py", "--engine", "nano", env=env)
+    run(PYV, "bench/bench_compare.py", "--engine", "vllm", env=env)
+    run(PY, "bench/bench_ttft_decode.py", "--engine", "v3", env=env)
+    run(PY, "bench/bench_ttft_decode.py", "--engine", "nano", env=env)
+    run(PYV, "bench/bench_ttft_decode.py", "--engine", "vllm", env=env)
+    run(PY, "bench/bench_concurrent.py", "--engine", "v3", env=env)
+    run(PY, "bench/bench_concurrent.py", "--engine", "nano", env=env)
+    run(PYV, "bench/bench_concurrent.py", "--engine", "vllm", env=env)
 
     print("\n======== bench/out ========")
     for p in sorted(OUT.iterdir()):

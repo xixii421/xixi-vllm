@@ -105,3 +105,21 @@ def write_result(name: str, body: str) -> Path:
     path.write_text(text)
     print(f"→ {path}")
     return path
+
+
+def append_lines(name: str, lines: list[str], *, header: str | None = None) -> Path:
+    """追加多行到 bench/out/<name>（txt）。
+
+    header 仅在文件为空时写入一次；跨引擎脚本各自 append 自己的行，
+    避免 JSON 中间文件与合并逻辑。
+    """
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    path = OUT_DIR / name
+    first = not path.exists() or path.stat().st_size == 0
+    with path.open("a") as f:
+        if first and header:
+            f.write(header.rstrip("\n") + "\n")
+        for ln in lines:
+            f.write(ln.rstrip("\n") + "\n")
+    print(f"→ {path}")
+    return path

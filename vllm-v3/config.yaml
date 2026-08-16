@@ -1,6 +1,9 @@
 # ============================================================
-# vllm 统一配置文件（v3 — FlashInfer + CUDA Graph）
+# vllm 统一配置文件（v3 — FA2 + CUDA Graph）
 # 命令行参数会覆盖此处的默认值
+#
+# 默认是「体验档」：eager 前向，启动快、稳定，适合首次跑通。
+# 追求吞吐时，把下面「性能档」两处开关打开（或加 --cg --compile）。
 # ============================================================
 
 # --- 模型 ---
@@ -14,9 +17,11 @@ top_p: 0.95
 top_k: 20
 
 # --- 引擎 ---
-enforce_eager: false  # false=启用 Decode CUDA Graph
-prefill_cuda_graph: true  # prefill piecewise CUDA Graph（TTFT 最大收益）
-dtype: "auto"
+enforce_eager: true   # true=eager（体验档默认）；false=启用 Decode CUDA Graph（性能档）
+torch_compile: false  # true=prefill 首 chunk 走 torch.compile（性能档）；false=不编译
+compile_mode: "reduce-overhead"  # default / reduce-overhead / max-autotune
+compile_dynamic: true   # true=符号形状（一次编译覆盖任意长度，在线服务推荐）；false=固定形状重放（新长度会重编译）
+dtype: "auto"           # 显式填 float16 / bfloat16 可覆盖；auto 通常落到 float16
 context_len: 4096
 
 # --- 调度器 ---
@@ -25,11 +30,7 @@ max_num_batched_tokens: 8192
 mix_prefill_decode: true
 
 # --- KV Cache ---
-kvcache_block_size: 256  # FlashInfer 要求 256 的倍数
+kvcache_block_size: 256  # FA2 paged 要求 256 的倍数
 prefix_backend: "hash"   # none / hash / radix
-gpu_memory_utilization: 0.9
+gpu_memory_utilization: 0.85  # 开 CG+compile 时可调低至 0.8，避免小显存 OOM
 num_kvcache_blocks: 0    # 0=自动计算
-
-# --- FlashInfer 算子 ---
-flashinfer_use_tensor_cores: true
-flashinfer_non_blocking: true

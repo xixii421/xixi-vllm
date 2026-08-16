@@ -9,11 +9,11 @@ __all__ = ["Engine", "EngineConfig", "SamplingParams"]
 
 if TYPE_CHECKING:
     from .config import EngineConfig
-    from .engine import Engine
+    from .control.engine import Engine
     from .sampling_params import SamplingParams
 
 _LAZY = {
-    "Engine": (".engine", "Engine"),
+    "Engine": (".control.engine", "Engine"),
     "EngineConfig": (".config", "EngineConfig"),
     "SamplingParams": (".sampling_params", "SamplingParams"),
 }
