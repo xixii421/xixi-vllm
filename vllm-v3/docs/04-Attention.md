@@ -437,7 +437,7 @@ v2 对应的模块分布在 `kv/pool.py`（BlockPool）、`pagedattention/store.
 
 ## 六、仍有改进空间
 
-1. **Prefill 长文本无 CG**：v3 的 prefill 首 chunk 走 piecewise CUDA Graph（覆盖 ≤1536 token），更长的续 chunk 走 eager（shape 动态、无法固定图）。曾尝试用 torch.compile 优化 prefill，实测因 FlashInfer `.plan()` 动态 shape 触发 N_layers 次 graph break，反而更慢（44ms vs 22ms），已从 v3 移除。
+1. **Prefill 任意规模都有 CG**：v3 的 prefill 走 piecewise CUDA Graph（token 尺寸网格 `(256..2048)` 固定，网格 cap = CG 收益边界、与调度器解耦，>cap 回退 eager；首 chunk 用 FA2、续 chunk 用 FlashInfer paged）。曾尝试用 torch.compile 优化 prefill，实测因 FlashInfer `.plan()` 动态 shape 触发 N_layers 次 graph break，反而更慢（44ms vs 22ms），已从 v3 移除。
 ```
 | Prompt |  v4 TTFT  | v4 tok/s  |  v5 TTFT  | v5 tok/s  | v5/v4  |
 |--------|-----------|-----------|-----------|-----------|--------|

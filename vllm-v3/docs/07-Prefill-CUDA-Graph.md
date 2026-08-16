@@ -1,108 +1,154 @@
-# 10 · Prefill CUDA Graph：piece CG
-> !!!AI 辅助，暂未修改
+# 10 · Prefill CUDA Graph：piecewise
 
 > 对应 [04-CUDA-Graph](./04-CUDA-Graph.md)（decode CG）。这一份专门讲 **prefill 怎么用 CG**。
 > 核心矛盾：prefill 的序列长度是动态的，CUDA Graph 却要求固定形状。
-> v3 用 **piece CG** 解决首 chunk 的短 prompt 场景。
+> v3 对齐官方 vLLM 的 **PIECEWISE**：attention 摘出 eager，其余进图。
+> 设计原则：**没有测速判据；网格 cap 由 CG 收益边界决定（2048），超过 cap 的批次
+> 回退 eager，不 pad 进大图做负收益计算**。
 
 ## 一、为什么 prefill 也能用 CG？
 
 ### 1.1 prefill 的瓶颈是 CPU 发射地板
 
-eager prefill 单步 ~20ms，其中 GPU 计算只需 ~2.7ms，其余 ~17ms 是 **360 次 kernel 发射的 CPU 串行化**（GPU 在等 CPU）。这正是 CG 最擅长消除的开销。
+eager prefill 单步的 wall 时间里，GPU 计算只占一小部分，其余是 **数百次 kernel 发射的
+CPU 串行化**（GPU 在等 CPU）。这正是 CUDA Graph 最擅长消除的开销。
 
-但注意：这只对 **CPU-bound 区间**成立。长文本 prefill（>1536 token）是 GPU-bound（GPU 打满），CG 消除发射开销的收益趋近于零——这是 piece CG 的适用边界所在。
+短 prompt 时发射开销主导 → CG 收益最大（实测 ~2.5x）。长文本 prefill 是 GPU-bound
+（GPU 打满），CG 消除发射开销的收益趋近于零——这是物理边界，任何实现都一样。
 
-### 1.2 难点：动态长度
+### 1.2 官方 vLLM 的做法（对齐目标）
 
-decode 每步恒为 bs 个 token（形状固定），CG 直接可用。prefill 的 token 数随 prompt 长度变化——**动态形状无法直接捕获**。
+官方 V1 的 piecewise 编译：
 
-### 1.3 v3 的解法：按形状分片 + 有界覆盖
+1. 在 **attention 边界 split** forward 成多段；
+2. 非 attention 段（embed / norm / qkv_proj / rope / o_proj / mlp）按捕获尺寸捕获
+   成 CUDA Graph；
+3. attention 段保持 eager，首 chunk 用 FA2 varlen，续 chunk 用 FlashInfer paged；
+4. token 维用少量捕获尺寸离散化，运行时 pad 到最近尺寸。
+
+> **v3 与官方的一处刻意差异**：官方用 torch.compile（Dynamo symbolic shape）把网格
+> 铺到调度批次上限；v3 复用 layer 算子（不 compile，理由见 2.6），网格上限由
+> **CG 收益边界**决定而非调度器——超过收益边界的批次（GPU-bound 大 batch）回退
+> eager，避免 pad GEMM + 层间拷贝的负收益。
+
+### 1.3 v3 的解法：token 尺寸网格 + 复用 layer 算子
+
+v3 无 Dynamo 的 symbolic-shape splitting，用「token 尺寸网格」离散化一次前向的总
+token 数 `T`。每个尺寸捕获 `N+1` 张 piece 图（`N`=层数）：
 
 ```
-piece CG:  把 (batch_size, 长度) 空间切成离散的 (bs, L) 网格，
-           只捕获网格上的固定形状图。请求落在网格上 → 重放；落空 → eager。
+piece_0 : embed + 层0 pre（input_norm + qkv + qk_norm + rope）→ q0,k0,v0
+[eager] : 层0 attention（FA2 varlen / FlashInfer paged）→ attn_out_0
+piece_1 : 层0 post（o_proj + post_norm + mlp）+ 层1 pre → q1,k1,v1
+[eager] : 层1 attention
+  ...
+piece_N : 层N-1 post + final_norm → outputs
 ```
 
-> 早期版本还有 **Continuation CG**（前缀命中续 chunk 的 q_len 网格图），因其
-> `len(seqs)==1` 限制在并发前缀命中场景几乎不命中（实测 64 次前缀命中仅 4 次走
-> cont CG），收益/成本比差（+2.5~2.7 GiB graph pool），已从 v3 移除。前缀命中
-> 续 chunk 现在直接走 eager——radix 已跳过 KV 重算，剩余待算 token 较少。
+运行时决策**只有一个**：取 `>= 实际 token 数` 的最小捕获尺寸，pad 进图。
 
 ---
 
-## 二、Piece CG（`core/prefill_cuda_graph.py`）
+## 二、实现要点（`core/prefill_cuda_graph.py`）
 
-### 2.1 piece 网格设计
+### 2.1 三处关键设计（对比旧版）
 
-```python
-# bs=1 用 1.5x 中点网格，把「pad 到下一个 2 的幂」的最坏浪费压到 ~1.25x
-fine_L = (128, 192, 256, 384, 512, 576, 640, 704, 768, 896, 1024, 1152, 1280, 1536)
-# bs≥2 按 bs 定制（bs*L ≤ cg_max_tokens=1536）
-per_bs_L = {2: (...), 4: (...), 8: (...)}
-```
-
-约束 `bs*L ≤ cg_max_tokens`（默认 1536）双重作用：
-1. **限制捕获显存**：每个 piece 一个图，图越多 graph pool 越大。
-2. **限制收益区间**：>1536 token 的长 prefill 已 GPU-bound，padded CG 反而不如 eager，无需捕获。
-
-### 2.2 padding 语义（数值正确性的关键）
-
-piece 捕获固定 L，但真实请求长度可能 < L。真实 token 放 `[i*L, i*L+len_i)`，padding 行保持 0/`-1`：
-
-```python
-# replay() 里
-in_ids.zero_(); pos.zero_(); slot.fill_(-1)
-for i in range(bs):
-    n = seq_lens[i]
-    in_ids[i*L : i*L+n].copy_(input_ids[off:off+n])   # 真实 token
-    # padding 行：pos=0, slot=-1，FA2 对 position 0 的输入天然 causal 排除
-```
-
-piece CG 内走 **FA2 varlen**（连续 KV 直算，比 FlashInfer paged prefill 快），`cu_seqlens_k` 与 `cu_seqlens_q` 同为 token 粒度——**这是 bs>1 数值正确的关键修复**（早期 bug：误用页粒度的 `kv_indptr` 当 `cu_seqlens_k`，导致每条 K 序列被当成 1 个 token，跨序列污染）。
-
-### 2.3 收益判据（`can_use`）
-
-```python
-def can_use(self, bs, seq_lens):
-    piece = 覆盖批次的最小 (bs, L)       # 贪心找
-    if piece_gpu_ms(piece) < eager_floor_ms:   # CG 有益 ⇔ 比发射地板快
-        return piece
-    return None   # GPU-bound 区间主动放弃 CG
-```
-
-`_calibrate()` 用 n=512 的 eager forward wall 估 `eager_floor_ms`（CPU 发射地板）；`_measure_piece_replay()` 用 CUDA event 实测每个 piece 的纯 GPU 时间。**"CG 有益 ⇔ piece_gpu < S"** 自动吸收了不同模型规模/形状的 GEMM 效率差异（0.6B 上 ≤1500 token 有效，4B 上只有 ≤300 token 有效）。
-
-### 2.4 静态 buffer 与 workspace 共享
-
-所有输入输出预分配（`input_ids`/`positions`/`slot_mapping`/`qo_indptr`/`kv_indptr`/`kv_indices`/`kv_last_page`/`outputs`），重放时 `copy_` 覆盖。**FlashInfer workspace 全 runner 共享一块**（pieces 时序互斥），见 [09](./09-显存优化.md)。大模型 workspace 溢出时自动加倍重建（`_prepare_piece`）。
-
-### 2.5 适用边界
-
-| 场景 | piece CG | 原因 |
+| | 旧版 | 新版 |
 | --- | --- | --- |
-| 短 prompt 独立请求（≤1536 token） | ✅ | 命中网格，6× TTFT 收益 |
-| 长文本（>1536 token） | ❌ 回退 eager | 网格外 + GPU-bound 判据拒绝 |
-| 前缀命中续 chunk | ❌ | 不是首 chunk（走 eager，radix 已跳过 KV 重算） |
-| 长文本并发连续对话 | ❌ | 首轮并发 prefill 远超网格覆盖墙 |
+| 用不用图 | `can_use`：捕获时实测 wall，慢于 eager 就整桶禁用 | **永远用图**，`covers()` 只查 token 数是否 ≤ 网格上限 |
+| 覆盖范围 | 硬顶 `_MAX_CG_TOKENS=1536`，超长回退 eager | **网格 cap = CG 收益边界（4090 上 2048）**，≤cap 必进图、>cap 回退 eager（GPU-bound 区间不进图） |
+| 网格来源 | 由调度器 `max_num_batched_tokens` 驱动 | **固定网格** `(256,512,768,1024,1536,2048)`，与调度器解耦（调度仍可用 8192） |
+| 续 chunk | 只加速首 chunk，续 chunk 走 eager | 续 chunk（前缀命中）也走同一套图，attention 换 FlashInfer paged |
 
-> **真实场景结论**：piece CG 的收益集中在「短 prompt 独立请求」——聊天 API 的最常见形态，
-> eager TTFT ~20ms → CG 3~7ms（5-7×）。长文本连续对话场景它几乎不命中，此时
-> decode CG（每步恒定收益）与 radix 前缀缓存（跳过 KV 重算）才是主力。
+### 2.2 一份 max-T 静态 buffer，所有尺寸共用切片
+
+不再每桶一套 buffer：所有尺寸的图复用同一份 `max_tokens` 静态 buffer 的 `[:T]` 切片。
+图数量、显存占用与「token 桶」时代脱钩，显存只随最大尺寸线性增长。网格 cap=2048 时
+静态 buffer 约 29 MB，整个 prefill CG 足迹（workspace + 静态 buffer + graph pool）
+实测仅 ~0.11~0.13 GiB。
+
+### 2.3 复用 layer 算子（数值正确性关键）
+
+piece 的计算**直接复用模型层的 `pre_forward` / `post_forward`**（cuBLAS GEMM +
+flashinfer silu_and_mul + triton rope + F.rms_norm），与 eager 路径算子**完全同源**。
+「真实 token 数 == 捕获尺寸」时 piecewise 与 eager **bit 一致**。
+
+### 2.4 图 key 用 `(T, piece_idx)`
+
+不同尺寸的 piece 图独立（共享 graph pool 只复用临时激活显存），不能用 piece_idx
+单键——否则降序捕获时后捕获的尺寸会覆盖先捕获的图。
+
+### 2.5 数值说明（两个独立差异源）
+
+1. **GEMM M 敏感（固有，非 bug）**：token 尺寸网格把批次 pad 到捕获尺寸 `T`，
+   cuBLAS 的 bf16 GEMM 对 M 维度敏感（~0.004），叠加 Qwen3 极小的 k 通道 rms
+   （~0.007）经 k_norm 放大 ~140x，使有 padding 的 batch 在极小概率下与 eager
+   分叉。这是 bf16 推理中「batch 大小变化改变输出」的固有现象（continuous
+   batching 里本就存在）。精确尺寸（无 pad）bit 一致；同一 engine 内两次调用
+   不存在该差异，差异只出现在「eager / CG 两个独立进程」的跨进程对比中。
+
+2. **torch.compile 融合（已放弃，见下）**：compile 融合会额外改变数值，经实测无法与
+   eager 的 cuBLAS 分开调用 bit 一致。
+
+### 2.6 为什么放弃 torch.compile（实验结论）
+
+曾尝试对齐官方「torch.compile 融合非 attention 段」，但实测在 bf16 下无法同时满足
+「数值正确 + 性能收益」：
+
+| compile 策略 | 数值（无 pad vs eager） | 性能 |
+| --- | --- | --- |
+| `max-autotune` 融合 | diff=0.5（分叉） | 有收益 |
+| `default` + 可 trace rms_norm | diff=2.5（完整模型，仍分叉） | 有收益 |
+| 全 `@torch.compiler.disable`（silu/rope/rms_norm） | **diff=0.0（bit 一致）** | **0.56x（更慢）** |
+
+根因：bf16 下算子融合让中间结果不 round 回 bf16，改变数值；要 bit 一致只能禁用所有
+融合，但 graph break 使 compile 反而更慢。故放弃 compile，复用 layer 算子——这是
+「数值正确 + 性能最优」的唯一解。
 
 ---
 
-## 三、三个 CG runner 的分工
+## 三、实测（RTX 4090 D）
 
-| runner | 阶段 | 形状策略 | KV 更新 | workspace |
-| --- | --- | --- | --- | --- |
-| `cuda_graph.py` | decode | bs 网格 | replan（CSR 重组） | 私有 |
-| `prefill_cuda_graph.py` | prefill 首 chunk | (bs, L) 网格 + FA2 | 静态（dummy page） | **共享** |
+### 3.1 单请求 TTFT（`bench_prefill_cg.py`，enforce_eager 隔离 prefill CG 变量）
 
-> 早期 `continuation_cuda_graph.py`（prefill 续 chunk，q_len 网格 + replan paged）已移除。
+| prompt len | eager (ms) | prefill-CG (ms) | CG 加速 |
+| --- | ---: | ---: | ---: |
+| 128 | 17.22 | 5.44 | **3.17x** |
+| 256 | 18.92 | 5.86 | **3.23x** |
+| 512 | 17.03 | 7.12 | **2.39x** |
+| 1024 | 16.34 | 11.50 | **1.42x** |
+| 1536 | 18.50 | 16.75 | **1.10x** |
+| 2048 | 25.14 | 23.63 | **1.06x** |
+| 2560 | 31.72 | 29.53 | 1.07x（>cap 回退 eager） |
+| 3072 | 37.61 | 36.76 | 1.02x（>cap 回退 eager） |
+
+- 短 prompt 收益大（发射开销主导）；长 prompt 收敛到 ~1.0x（GPU-bound 物理边界）。
+- **>2048 回退 eager**：2560/3072 的「CG」配置与 eager 同路径，比值 ≈1.0 只余噪声——
+  超收益边界的批次不再 pad 进大图，这是与旧版「任意规模都 pad 进图」的本质区别。
+
+### 3.2 输出正确性（`bench_verify_output.py`，greedy 逐 token）
+
+| 场景 | 结果 |
+| --- | --- |
+| 精确网格尺寸（256/512/1024/1536/2048，无 pad） | **bit 一致** |
+| 网格边界邻近（255/257/511/513/700/1023/1535/2049） | 一致（3/3） |
+| 超网格（2049/3072/4096，回退 eager） | **与 eager 完全一致**（同代码路径） |
+| 大并发（32 请求 sum=1463） | 一致 |
+| 中大批（sum 600/1000/1413） | 一致 |
+| 重 pad 小 prompt（1/7/37/100→256、257/300→512） | 少量分叉（bf16 GEMM M 敏感固有，见 2.5） |
+
+总一致率 74/83（89.2%），分叉全部集中在重 pad 小 prompt 的早期 token（1~16），
+是 2.5 节所述 bf16 固有现象，不是路径错误。
+
+### 3.3 并发场景（`bench_prefill_cg_concurrent.py`）
+
+见 [02-实测证据](./02-实测证据.md) 2.1 节。
 
 **知识点总结**：
-1. CUDA Graph = 预分配静态 buffer + 覆盖数据 + 一次 replay，消除的是发射开销不是计算。
-2. 动态形状处理有两种：分片网格（piece）、钳制到有限域（cont，已移除）。
-3. "CG 有益"要实测判据，不是形状命中就用。
-4. workspace 类资源在时序互斥时共享（省显存），graph pool 因中间形状不同近似 sum（调网格权衡）。
+1. CUDA Graph 消除的是发射开销不是计算；收益集中在 CPU-bound 区间。
+2. 动态形状用 token 尺寸网格离散化；**网格 cap = CG 收益边界（2048），超过 cap 的
+   GPU-bound 大 batch 回退 eager**，避免 pad 负收益——网格与调度批次上限解耦。
+3. 复用 layer 算子保证 eager/piecewise 数值同源（精确尺寸 bit 一致）。
+4. 续 chunk 也进图（attention 换 paged），长 prompt 每一片都加速。
+5. torch.compile 在 bf16 下无法「数值正确 + 性能收益」两全（融合改变数值，禁用融合更慢）。
+6. prefill CG 显存足迹按实际捕获量预留（`Engine._probe_cg_footprint`），不依赖固定预留。

@@ -82,7 +82,7 @@ class KVManager:
         dtype: torch.dtype,
         device: torch.device,
         gpu_memory_utilization: float,
-        reserve_cg_headroom: bool,
+        reserve_bytes: int = 0,
     ) -> int:
         torch.cuda.empty_cache()
         torch.cuda.synchronize(device)
@@ -92,8 +92,8 @@ class KVManager:
         block_bytes = 2 * layers * block_size * nkv * hd * dtype.itemsize
         free, total = torch.cuda.mem_get_info(device)
         available = int(total * gpu_memory_utilization) - (total - free)
-        if reserve_cg_headroom:
-            available -= int(2.0 * 1024**3)
+        # 预留给 CG 的字节数由调用方按实际捕获足迹传入（见 Engine._probe_cg_footprint）。
+        available -= reserve_bytes
         return max(4, available // block_bytes)
 
     @property
@@ -172,11 +172,9 @@ class KVManager:
         published = set(seq.block_table[:n_full]) if n_full > 0 else set()
         for bid in list(seq.block_table):
             keep = bid in published and self.prefix_backend != "none"
+            # hash：释放前摘索引；radix：先降引用，零引用后再摘树叶。
             if not keep and self.prefix_backend == "hash":
                 self.index.invalidate(bid, self.blocks)
-            elif not keep and self.prefix_backend == "radix":
-                # Pages leaving cache: detach tree leaf if zero-ref after release.
-                pass
             self.blocks.release_to_cached_or_free(bid, keep_cached=keep)
             if not keep and self.prefix_backend == "radix":
                 self.index.invalidate(bid, self.blocks)

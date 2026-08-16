@@ -1,3 +1,5 @@
+"""CUDA Graph decode runner."""
+
 from __future__ import annotations
 
 from .cuda_graph import CUDAGraphRunner

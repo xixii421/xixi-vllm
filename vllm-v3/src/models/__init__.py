@@ -1,26 +1,8 @@
-"""Model layer: Qwen3 definition + weight loading.
-
-Download / verify helpers live in ``src.models.hub`` (imported lazily there
-to keep ``engine → models`` acyclic).
-"""
+"""Model layer: Qwen3 + weight loading."""
 
 from __future__ import annotations
 
-from .loader import default_weight_loader, load_model
-from .qwen3 import (
-    Qwen3Attention,
-    Qwen3DecoderLayer,
-    Qwen3ForCausalLM,
-    Qwen3MLP,
-    Qwen3Model,
-)
+from .loader import load_model
+from .qwen3 import Qwen3ForCausalLM
 
-__all__ = [
-    "Qwen3ForCausalLM",
-    "Qwen3Model",
-    "Qwen3DecoderLayer",
-    "Qwen3Attention",
-    "Qwen3MLP",
-    "load_model",
-    "default_weight_loader",
-]
+__all__ = ["Qwen3ForCausalLM", "load_model"]

@@ -26,13 +26,12 @@ class EngineConfig:
     prefix_backend: str = "hash"  # 前缀缓存后端: none / hash / radix
 
     #  算子 
-    enforce_eager: bool = True  # False=启用Decode CUDA Graph
-    prefill_cuda_graph: bool = False  # True=prefill 走 piecewise CUDA Graph（首 chunk）
-    prefill_cg_max_tokens: int = 1536  # 捕获的最大 piece token 数（CG 仅在该区间有收益，
-                                       # 且限制了 graph pool 显存：4B 上 8192 网格直接 OOM）
+    enforce_eager: bool = True  # False=启用 Decode CUDA Graph
+    torch_compile: bool = False  # True=prefill 首 chunk 走 torch.compile（全图编译，无 piecewise/静态 buffer copy）
+    compile_mode: str = "reduce-overhead"  # torch.compile mode: default / reduce-overhead / max-autotune
+    compile_dynamic: bool = True  # True=符号形状（一次编译覆盖任意长度，避免按长度重编译）；False=固定形状重放（仅离线固定长度，新长度会重编译 ~2-12s）
     dtype: str = "auto"
-    flashinfer_use_tensor_cores: bool = True  # FlashInfer启用Tensor Core
-    flashinfer_non_blocking: bool = True  # FlashInfer plan异步H2D
+    flashinfer_use_tensor_cores: bool = True  # FlashInfer 启用 Tensor Core
 
     #  运行时 
     hf_config: PretrainedConfig = field(init=False)

@@ -5,7 +5,18 @@ from torch import nn
 from transformers.models.qwen3 import Qwen3Config
 
 from ..layers import Attention, RMSNorm, RotaryEmbedding, SiluAndMul
+from ..layers.attention import AttnInputs
 from .loader import default_weight_loader
+
+
+def _rope_theta(config: Qwen3Config) -> float:
+    """读取 RoPE base：优先 ``rope_parameters``（transformers >= 5.x 的新字段），
+    兼容旧版顶层 ``rope_theta`` 字段，兜底 Qwen3 官方默认 1e6。
+    """
+    rp = getattr(config, "rope_parameters", None)
+    if isinstance(rp, dict) and rp.get("rope_theta") is not None:
+        return float(rp["rope_theta"])
+    return float(getattr(config, "rope_theta", 1_000_000))
 
 
 class Qwen3MLP(nn.Module):
@@ -20,10 +31,6 @@ class Qwen3MLP(nn.Module):
         x = self.gate_up_proj(x)
         return self.down_proj(self.act_fn(x))
 
-    def forward_gate_up(self, gate_up: torch.Tensor) -> torch.Tensor:
-        """gate_up_proj 输出已在外部融合计算完毕，此处只做 silu+down。"""
-        return self.down_proj(self.act_fn(gate_up))
-
 
 class Qwen3Attention(nn.Module):
     def __init__(
@@ -31,11 +38,11 @@ class Qwen3Attention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        max_position: int = 4096 * 32,
+        max_position: int = 32768,
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-6,
         qkv_bias: bool = False,
-        rope_theta: float = 10000,
+        rope_theta: float = 1_000_000,
         layer_id: int = 0,
     ):
         super().__init__()
@@ -53,32 +60,27 @@ class Qwen3Attention(nn.Module):
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
-            self.head_dim ** -0.5,
             self.num_kv_heads,
             layer_id=layer_id,
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
-    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor):
+    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, attn: AttnInputs):
         qkv = self.qkv_proj(hidden_states)
-        return self._forward_qkv(positions, qkv)
+        q, k, v = self._split_norm_rope(positions, qkv)
+        return self.o_proj(self.attn(q, k, v, attn))
 
-    def _forward_qkv(self, positions: torch.Tensor, qkv: torch.Tensor) -> torch.Tensor:
-        """从已投影的 qkv 开始完成注意力：split → q/k norm → rope → attn → o_proj。"""
+    def _split_norm_rope(self, positions, qkv):
+        """qkv → split → q/k norm → rope，产出 (q, k, v) 供 attention 使用。"""
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
         q = q.view(-1, self.num_heads, self.head_dim)
         k = k.view(-1, self.num_kv_heads, self.head_dim)
         v = v.view(-1, self.num_kv_heads, self.head_dim)
-
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-
+        q, _ = self.q_norm(q)
+        k, _ = self.k_norm(k)
         q, k = self.rotary_emb(positions, q, k)
-
-        out = self.attn(q, k, v)
-        return self.o_proj(out.flatten(1, -1))
+        return q, k, v
 
 
 class Qwen3DecoderLayer(nn.Module):
@@ -89,7 +91,7 @@ class Qwen3DecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             max_position=config.max_position_embeddings,
-            rope_theta=getattr(config, "rope_theta", 1_000_000),
+            rope_theta=_rope_theta(config),
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, "attention_bias", False),
             head_dim=getattr(config, "head_dim", None),
@@ -99,17 +101,9 @@ class Qwen3DecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def forward(self, positions, hidden_states, residual: torch.Tensor | None):
-        # 分离式：RMSNorm 与 Linear 各自独立（GEMM 交给 cuBLAS）。
-        # 曾用 fused_rmsnorm_gemm 融合 norm+linear，端到端实测无收益（4096-token
-        # prefill 52.60 vs 52.59ms），已删除。
-        # 保留 gate_up_proj 权重合并（官方 vLLM 同款 MergedColumnParallelLinear）。
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(positions, hidden_states)
+    def forward(self, positions, hidden_states, residual: torch.Tensor | None, attn: AttnInputs):
+        hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states = self.self_attn(positions, hidden_states, attn)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         return self.mlp(hidden_states), residual
 
@@ -123,10 +117,10 @@ class Qwen3Model(nn.Module):
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor):
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor, attn: AttnInputs):
         h, residual = self.embed_tokens(input_ids), None
         for layer in self.layers:
-            h, residual = layer(positions, h, residual)
+            h, residual = layer(positions, h, residual, attn)
         return self.norm(h, residual)[0]
 
 
@@ -136,8 +130,8 @@ class Qwen3ForCausalLM(nn.Module):
         self.model = Qwen3Model(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-    def forward(self, input_ids, positions):
-        return self.model(input_ids, positions)
+    def forward(self, input_ids, positions, attn: AttnInputs):
+        return self.model(input_ids, positions, attn)
 
     def compute_logits(self, hidden_states):
         return self.lm_head(hidden_states)
@@ -147,8 +141,9 @@ class Qwen3ForCausalLM(nn.Module):
         loaded = set()
         skipped = []
 
-        _q_size = self.model.layers[0].self_attn.num_heads * self.model.layers[0].self_attn.head_dim
-        _kv_size = self.model.layers[0].self_attn.num_kv_heads * self.model.layers[0].self_attn.head_dim
+        attn = self.model.layers[0].self_attn
+        _q_size = attn.q_size
+        _kv_size = attn.kv_size
         # Collect gate/up weights for fusion into gate_up_proj
         gate_up_bufs: dict[str, tuple] = {}
 
@@ -160,9 +155,9 @@ class Qwen3ForCausalLM(nn.Module):
                 ("v_proj", "qkv_proj", _q_size + _kv_size, _kv_size),
             ]:
                 if hf in name:
-                    p = params[name.replace(hf, our)]
-                    p.data[offset:offset + size].copy_(w)
-                    loaded.add(name.replace(hf, our))
+                    our_name = name.replace(hf, our)
+                    params[our_name].data[offset:offset + size].copy_(w)
+                    loaded.add(our_name)
                     break
             else:
                 # merge gate_proj + up_proj → gate_up_proj (fused MLP)
