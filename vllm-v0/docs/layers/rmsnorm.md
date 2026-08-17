@@ -4,7 +4,10 @@
 
 在模型架构中，RMSNorm 的主要作用是对每个 Token 的 Hidden States 沿最后一个维度（通道维度）进行归一化。
 其公式如下：
-$$\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum x_i^2 + \epsilon}} \cdot \gamma$$
+
+```math
+\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum x_i^2 + \epsilon}} \cdot \gamma
+```
 
 其中 $\gamma$ 是可学习的 scale 参数（`self.weight`），$\epsilon$ 防止除零（默认 `1e-6`）。
 
@@ -35,6 +38,7 @@ def forward(self, x, residual=None):
 `hidden_states`只代表上一个子层刚计算完的原始输出结果。
 
 ```
+
 1. 融合归一化
       norned_h, resiudal = self.rms(hidden_states, residual)
 2. Attention计算
@@ -48,4 +52,6 @@ def forward(self, x, residual=None):
 ```
 
 这种写法并没有显式的加号，而是不断更新residual变量，把累加和传递下去，这样节省了GPU显存中来回搬运中间加法结果的时间，速度更快。
+
+
 
