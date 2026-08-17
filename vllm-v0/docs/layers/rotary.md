@@ -14,22 +14,25 @@
 因此这也是RoPE的核心思想：**通过旋转变换为向量注入位置信息，使得两个向量的内积只依赖于它们的相对位置。**
 ![向量旋转图](../posts/向量旋转图.png)
 
-假设我们在二维平面上有一个向量`q=(x, y)`, 如果我想要把这个向量逆时针旋转一个角度$\theta$，在线性代数中，我们需要乘以一个二维旋转矩阵$R(\theta)$:
-$$
-R(\theta) = 
-\begin{pmatrix} 
-\cos\theta & -\sin\theta \\ 
-\sin\theta & \cos\theta 
+假设我们在二维平面上有一个向量`q=(x, y)`, 如果我想要把这个向量逆时针旋转一个角度 $\theta$ ，在线性代数中，我们需要乘以一个二维旋转矩阵$R(\theta)$:
+
+```math
+R(\theta) =
+\begin{pmatrix}
+\cos\theta & -\sin\theta \\
+\sin\theta & \cos\theta
 \end{pmatrix}
-$$
+```
+
 向量左乘这个矩阵，就可以得到旋转后的新的向量$q'$:
-$$
-q' = R(\theta) \cdot \begin{pmatrix} x \\ y \end{pmatrix} = 
-\begin{pmatrix} 
-x\cos\theta - y\sin\theta \\ 
-x\sin\theta + y\cos\theta 
+
+```math
+q' = R(\theta) \cdot \begin{pmatrix} x \\ y \end{pmatrix} =
+\begin{pmatrix}
+x\cos\theta - y\sin\theta \\
+x\sin\theta + y\cos\theta
 \end{pmatrix}
-$$
+```
 
 整个代码实现如下：
 ```py
@@ -44,13 +47,14 @@ RoPE 的做法是：**我在第 $m$ 个位置上，就把向量旋转 $m \cdot \
 也就是说，向量在这个句子中越靠后，它被旋转的角度就越大。
 
 此时，位置 $m$ 处的旋转矩阵变成了：
-$$
-R(m\theta) = 
-\begin{pmatrix} 
-\cos(m\theta) & -\sin(m\theta) \\ 
-\sin(m\theta) & \cos(m\theta) 
+
+```math
+R(m\theta) =
+\begin{pmatrix}
+\cos(m\theta) & -\sin(m\theta) \\
+\sin(m\theta) & \cos(m\theta)
 \end{pmatrix}
-$$
+```
 
 把 Query 向量放在位置 $m$ 旋转，把 Key 向量放在位置 $n$ 旋转：
 * $\tilde{q}_m = R(m\theta) \cdot q$
@@ -61,20 +65,24 @@ $$
 
 Transformer的核心是Attention，而Attention的核心是计算Query和Key的内积来决定注意力分数。
 我们算一下，带有绝对位置 $m$ 的 $\tilde{q}_m$ 和带有绝对位置 $n$ 的 $\tilde{k}_n$ 的内积是什么：
-$$
+
+```math
 \tilde{q}_m \cdot \tilde{k}_n = (R(m\theta) q)^T (R(n\theta) k) = q^T R(m\theta)^T R(n\theta) k
-$$
+```
 
 根据旋转矩阵的几何性质，**一个旋转矩阵的转置，等于反向旋转**，即 $R(m\theta)^T = R(-m\theta)$。
 而两个旋转矩阵相乘，等于它们的**角度相加**：
-$$
+
+```math
 R(-m\theta) \cdot R(n\theta) = R(n\theta - m\theta) = R((n-m)\theta)
-$$
+```
 
 所以，上面的内积公式化简为：
-$$
+
+```math
 \tilde{q}_m \cdot \tilde{k}_n = q^T \cdot R((n-m)\theta) \cdot k
-$$
+```
+
 可以看到，现在它们只和两个Token的相对距离有关。
 
 
@@ -90,9 +98,11 @@ RoPE 的做法非常简单粗暴但有效：**把 128 维切分成 64 个 2 维�
 
 **不同的维度，旋转的速度（频率）不一样**
 RoPE 借用了原版 Transformer的频率衰减公式：
-$$
+
+```math
 \theta_i = 10000^{-\frac{2i}{d}}
-$$
+```
+
 > 这就是代码里的 `inv_freq = 1.0 / (base ** (arange / rotary_dim))`。
 
 * **前面的维度（低维）**：频率高，转得极快。这就像时钟的**秒针**，稍微错开一个位置，角度就差很多，用来感知**局部、近距离**的依赖关系。
@@ -147,12 +157,14 @@ RoPE 的核心操作是：
 旋转一个二维向量 `(a, b)` 逆时针旋转角度 `θ` 的公式是：
 
 ```
+
 a' = a * cosθ - b * sinθ
 b' = a * sinθ + b * cosθ    （注意这里是 a*sin + b*cos，与标准逆时针旋转一致）
 ```
 
 如果用矩阵表示就是：
 ```
+
 [a']   [cosθ, -sinθ] [a]
 [b'] = [sinθ,  cosθ] [b]
 ```
@@ -268,6 +280,7 @@ return torch.cat((x1 * cos - x2 * sin, x2 * cos + x1 * sin), dim=-1)
 假设 `n_tokens=2`, `num_heads=3`, `rotary_dim=4`。
 
 ```
+
 x 形状: (2, 3, 4)
 cos/sin 原始: (2, 2)
 
@@ -313,6 +326,7 @@ cat -> (2, 3, 4)
 ```py
 positions = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1)
 ```
+
 **形状：`(batch_size, seq_len)`**，每个元素是对应 token 的绝对位置编号（从 0 开始）。
 
 而 `x` 是要注入位置信息的 query 或 key，来自注意力计算中的线性投影输出。在多头注意力中，它的典型形状是 4 维：
@@ -397,6 +411,7 @@ return x_out.reshape(x_shape)
 #### 整体数据流
 
 ```
+
 输入：
   x:        (B, S, H, D)
   positions: (B, S)
@@ -412,5 +427,8 @@ return x_out.reshape(x_shape)
 ```
 
 整个 `_rotary` 先根据 token 的位置编号查到对应的旋转角度，再将输入张量拆成偶数位和奇数位，用向量化公式一次性把所有 2D 平面旋转完毕，最后拼回去。
+
+
+
 
 
