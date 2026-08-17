@@ -30,7 +30,7 @@ def _make_index(backend: _PrefixBackend):
     if backend == "hash":
         return HashPrefixIndex()
     elif backend == "radix":
-        return HashPrefixIndex()
+        return RadixPrefixIndex()
     else:
         return NoopPrefixIndex()
 
