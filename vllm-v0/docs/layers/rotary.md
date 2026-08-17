@@ -1,7 +1,9 @@
 ## 2. RotaryEmbedding
 [RotaryEmbedding代码](../../src/layers/rotary.py)
 
-> [!NOTE] 参考阅读
+> [!NOTE]
+> **参考阅读**
+>
 > [苏神的RoPE blog](https://www.spaces.ac.cn/archives/8265) | [袁朝发的Blog](https://yuanchaofa.com/post/hands-on-rope-position-embedding) |
 
 我在博客中提到过，Attention机制本身是没有位置信息的，因此需要显式的注入位置信息。
@@ -208,8 +210,10 @@ sin = sin.unsqueeze(-2)   # 形状变为 (n_tokens, 1, rotary_dim//2)
 #### (2) 为什么需要Chunk？
 RoPE 并不是对整个 `head_size` 维的向量做一个整体的高维旋转，而是把它分解成若干对，**每一对独立地在其 2D 平面内旋转一个特定的角度**。
 
-> [!NOTE] 这里为什么要使用chunk拆分成为两瓣呢？
-为了**一次性对所有 2D 平面执行批量旋转**。
+> [!NOTE]
+> **这里为什么要使用chunk拆分成为两瓣呢？**
+>
+> 为了**一次性对所有 2D 平面执行批量旋转**。
 
 假设 `rotary_dim = 4`，里面的元素是 `[a0, b0, a1, b1]`，其中 `(a0, b0)` 是第一对 2D 向量，`(a1, b1)` 是第二对。
 
@@ -239,10 +243,10 @@ x2 * cos + x1 * sin   # 一次性算出了所有 b'： [b0', b1']
 RoPE 里的 `chunk` 就是这个 “把坐标分量分离到两个数组” 的操作。只不过每个点旋转的角度 `θ_i` 不同，所以我们使用了相同形状的数组 `cos` 和 `sin`，里面每个位置存储了对应点的旋转角度参数。
 
 
-> [!NOTE] 如果不用 chunk，代码会是什么样？
-
-
-你只能写一个低效的循环：
+> [!NOTE]
+> **如果不用 chunk，代码会是什么样？**
+>
+> 你只能写一个低效的循环：
 
 ```python
 for i in range(0, rotary_dim, 2):

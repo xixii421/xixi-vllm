@@ -103,14 +103,20 @@ def load_model(model: nn.Module, hf_folder: str) -> nn.Module:
 
 再来看流式加载`safetensors_weights_iterator`。
 
-> [!NOTE] 什么是 Safetensors 格式？
-传统的 `.bin(Pickle)` 格式在反序列化时存在安全漏洞（对我们来说可能没区别？），并且加载速度慢（这个是真的！）。而 `safetensors` 是一种纯数据格式，不仅安全，并且基于内存映射，加载速度很快。
+> [!NOTE]
+> **什么是 Safetensors 格式？**
+>
+> 传统的 `.bin(Pickle)` 格式在反序列化时存在安全漏洞（对我们来说可能没区别？），并且加载速度慢（这个是真的！）。而 `safetensors` 是一种纯数据格式，不仅安全，并且基于内存映射，加载速度很快。
 
-> [!NOTE] 什么是惰性加载与 mmap？
-`safe_open` 并不会一次性把整个文件读入内存，它利用操作系统的 `mmap` 技术，将硬盘的文件直接映射到虚拟内存，只有当调用 `f.get_tensor(name)` 时，才会触发磁盘 IO 读取这一部分数据。
+> [!NOTE]
+> **什么是惰性加载与 mmap？**
+>
+> `safe_open` 并不会一次性把整个文件读入内存，它利用操作系统的 `mmap` 技术，将硬盘的文件直接映射到虚拟内存，只有当调用 `f.get_tensor(name)` 时，才会触发磁盘 IO 读取这一部分数据。
 
-> [!NOTE] 这里为什么要用 yield？
-这里把函数写成了**生成器（Generator）**。`yield` 和 `return` 最大的区别在于：`return` 会一次性把所有结果打包返回；而 `yield` 每执行一次，就"吐"出一个 `(name, tensor)` 对，然后**暂停**在这里，等调用方消费完再继续。
+> [!NOTE]
+> **这里为什么要用 yield？**
+>
+> 这里把函数写成了**生成器（Generator）**。`yield` 和 `return` 最大的区别在于：`return` 会一次性把所有结果打包返回；而 `yield` 每执行一次，就"吐"出一个 `(name, tensor)` 对，然后**暂停**在这里，等调用方消费完再继续。
 
 这样做是防止**把几百 GB 的权重一次性塞进内存。**
 
