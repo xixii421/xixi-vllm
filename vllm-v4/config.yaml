@@ -1,6 +1,9 @@
 # ============================================================
-# vllm 统一配置文件（v4 — FlashInfer + CUDA Graph + 多模态）
+# vllm 统一配置文件（v3 — FA2 + CUDA Graph）
 # 命令行参数会覆盖此处的默认值
+#
+# 默认是「体验档」：eager 前向，启动快、稳定，适合首次跑通。
+# 追求吞吐时，把下面「性能档」两处开关打开（或加 --cg --compile）。
 # ============================================================
 
 # --- 模型 ---
@@ -14,10 +17,12 @@ top_p: 0.95
 top_k: 20
 
 # --- 引擎 ---
-enforce_eager: null    # null=auto（VL 默认开 CG，text 默认 eager）；true=强制 eager；false=强制 CG
-compile_prefill: null  # null=auto（CG 开启时自动 compile prefill）
-dtype: "auto"
-context_len: 8192
+enforce_eager: true   # true=eager（体验档默认）；false=启用 Decode CUDA Graph（性能档）
+torch_compile: false  # true=prefill 首 chunk 走 torch.compile（性能档）；false=不编译
+compile_mode: "reduce-overhead"  # default / reduce-overhead / max-autotune
+compile_dynamic: true   # true=符号形状（一次编译覆盖任意长度，在线服务推荐）；false=固定形状重放（新长度会重编译）
+dtype: "auto"           # 显式填 float16 / bfloat16 可覆盖；auto 通常落到 float16
+context_len: 4096
 
 # --- 调度器 ---
 max_num_seqs: 256
@@ -25,18 +30,15 @@ max_num_batched_tokens: 8192
 mix_prefill_decode: true
 
 # --- KV Cache ---
-kvcache_block_size: 256
-prefix_backend: "hash"
-gpu_memory_utilization: 0.9
-num_kvcache_blocks: 0  # 0=自动计算
+kvcache_block_size: 256  # FA2 paged 要求 256 的倍数
+prefix_backend: "hash"   # none / hash / radix
+gpu_memory_utilization: 0.85  # 开 CG+compile 时可调低至 0.8，避免小显存 OOM
+num_kvcache_blocks: 0    # 0=自动计算
 
-# --- FlashInfer ---
-flashinfer_use_tensor_cores: true
-flashinfer_non_blocking: true
-
-# --- 多模态 (v4 新增, 仅 VL 模型生效) ---
-image_max_side: 1024  # 图片长边最大像素，等比缩放（减少 visual token）
-enable_vit_cuda_graph: null  # null=auto（VL + CG 开启时自动启用）
-vit_cg_token_budgets: [64, 128, 256, 512, 1024, 2048]
-vit_cg_max_batch_size: 4
-encoder_compute_budget: 0    # 0=与 max_num_batched_tokens 相同
+# --- 并行（多机多卡）---
+tp_size: 1   # 张量并行度：机内 NVLink，切 head / 切权重
+pp_size: 1   # 流水线并行度：跨机低带宽，切层
+nccl_port: 29500   # 单机 spawn 时的 NCCL rendezvous 端口
+master_addr: "127.0.0.1"  # 多机 rendezvous 主节点地址
+master_port: 29500        # 多机 rendezvous 端口
+nccl_ifname: ""  # 多机网卡名（如 ib0/eth0）；空=自动探测

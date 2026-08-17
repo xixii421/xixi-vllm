@@ -1,57 +1,49 @@
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
 
 from transformers import AutoConfig, PretrainedConfig
 
 
-def _is_vl_config(cfg: PretrainedConfig) -> bool:
-    arch = getattr(cfg, "architectures", None) or []
-    name = type(cfg).__name__
-    return (
-        any("VL" in a or "Vision" in a for a in arch)
-        or "VL" in name
-        or hasattr(cfg, "vision_config")
-    )
-
-
 @dataclass
 class EngineConfig:
-    model: str
+    """引擎配置：调度器 / 内存 / 算子 / 采样参数。"""
+
+    #  模型 
+    model: str  # 本地模型路径
+
+    #  调度器 
     context_len: int = 4096
-    kvcache_block_size: int = 256
     max_num_seqs: int = 256
     max_num_batched_tokens: int = 8192
-    gpu_memory_utilization: float = 0.9
-    # None → text defaults to eager; VL defaults to Decode CUDA Graph on.
-    enforce_eager: bool | None = None
-    # Prefill torch.compile (inductor). None → on when Decode CG is on
-    # (``enforce_eager=False``). Decode still uses CUDA Graph; compile only
-    # accelerates the eager prefill forward (TTFT).
-    compile_prefill: bool | None = None
-    # Prefill piecewise CUDA Graph. None → same default as ``compile_prefill``.
-    # 捕获 (bs, L) 固定形状图重放首 chunk，省掉 prefill 每步的 kernel launch。
-    prefill_cuda_graph: bool | None = None
-    dtype: str = "auto"
-    # Prefix cache backend (v2-compatible). radix is completed beyond v2 (evict/invalidate/dedup).
-    prefix_backend: str = "hash"
-    # Decode-first + one prefill chunk per step (v2 fairness path). False = prefill-first.
-    mix_prefill_decode: bool = True
-    # 0 = auto-size from VRAM; >0 = fixed block count (bench override).
-    num_kvcache_blocks: int = 0
-    # FlashInfer decode: Tensor Cores (aligns with v7 / upstream vLLM when True).
-    flashinfer_use_tensor_cores: bool = True
-    # FlashInfer plan + CG indices H2D: async when True (hides copy behind compute).
-    flashinfer_non_blocking: bool = True
-    # Vision encoder CUDA Graph (budget replay). Default on for VL when not eager.
-    enable_vit_cuda_graph: bool | None = None
-    # Budgets double to 2048; >1 batch lets multi-image requests hit one graph.
-    vit_cg_token_budgets: tuple[int, ...] = (64, 128, 256, 512, 1024, 2048)
-    vit_cg_max_batch_size: int = 4
-    # Max merged vision tokens to encode in one step (0 = same as max_num_batched_tokens).
-    encoder_compute_budget: int = 0
+    mix_prefill_decode: bool = True  # True=decode优先混合调度，False=全prefill优先
 
+    #  内存 
+    kvcache_block_size: int = 256  # 必须是256的倍数（FA2 paged 约束）
+    gpu_memory_utilization: float = 0.9
+    num_kvcache_blocks: int = 0  # 0=自动按显存计算，>0=固定块数(基准测试用)
+    prefix_backend: str = "hash"  # 前缀缓存后端: none / hash / radix
+
+    #  算子 
+    enforce_eager: bool = True  # False=启用 Decode CUDA Graph
+    torch_compile: bool = False  # True=prefill 首 chunk 走 torch.compile（全图编译，无 piecewise/静态 buffer copy）
+    compile_mode: str = "reduce-overhead"  # torch.compile mode: default / reduce-overhead / max-autotune
+    compile_dynamic: bool = True  # True=符号形状（一次编译覆盖任意长度，避免按长度重编译）；False=固定形状重放（仅离线固定长度，新长度会重编译 ~2-12s）
+    dtype: str = "auto"
+
+    #  并行 
+    tp_size: int = 1  # 张量并行度（机内 NVLink）
+    pp_size: int = 1  # 流水线并行度（跨机低带宽）
+    nccl_port: int = 29500  # NCCL 单机 rendezvous 端口
+    master_addr: str = "127.0.0.1"  # 多机 NCCL rendezvous 主节点地址
+    master_port: int = 29500  # 多机 NCCL rendezvous 端口
+    device_ids: list[int] | None = None  # 每进程可见 GPU 列表（与 tp_size*pp_size 对齐）
+    nccl_ifname: str = ""  # 多机网卡名（如 ib0/eth0）；空=交由 NCCL 自动探测
+    pp_layer_counts: list[int] | None = None  # 不均分 PP 每 stage 层数（如 [12,28]）；None=等分
+
+    #  运行时 
     hf_config: PretrainedConfig = field(init=False)
-    is_multimodal: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         self.model = os.path.expanduser(self.model)
@@ -61,32 +53,17 @@ class EngineConfig:
                 "Use a local directory (e.g. ~/huggingface/Qwen3-0.6B)."
             )
         if self.kvcache_block_size % 256 != 0:
-            raise ValueError("kvcache_block_size must be a multiple of 256 (FlashInfer)")
+            raise ValueError("kvcache_block_size must be a multiple of 256 (FA2 paged)")
         if self.prefix_backend not in ("none", "hash", "radix"):
             raise ValueError(
                 f"prefix_backend must be none|hash|radix, got {self.prefix_backend!r}"
             )
         self.hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
-        self.is_multimodal = _is_vl_config(self.hf_config)
-        if self.enforce_eager is None:
-            # VL: decode CG on by default; text stays eager unless --compile.
-            self.enforce_eager = not self.is_multimodal
-        if self.compile_prefill is None:
-            self.compile_prefill = not bool(self.enforce_eager)
-        if self.prefill_cuda_graph is None:
-            self.prefill_cuda_graph = not bool(self.enforce_eager)
-        if self.enable_vit_cuda_graph is None:
-            self.enable_vit_cuda_graph = self.is_multimodal and not self.enforce_eager
-        if self.encoder_compute_budget <= 0:
-            self.encoder_compute_budget = self.max_num_batched_tokens
-        # For VL, lengths / heads live on text_config.
-        max_pos = getattr(self.text_config, "max_position_embeddings", self.context_len)
-        self.context_len = min(self.context_len, max_pos)
+        self.context_len = min(
+            self.context_len,
+            getattr(self.hf_config, "max_position_embeddings", self.context_len),
+        )
 
     @property
     def block_size(self) -> int:
         return self.kvcache_block_size
-
-    @property
-    def text_config(self) -> PretrainedConfig:
-        return getattr(self.hf_config, "text_config", self.hf_config)
