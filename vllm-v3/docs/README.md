@@ -20,7 +20,7 @@
 | [05-算子融合](./05-算子融合.md) | GEMM 融合 + FlashInfer RoPE/SiLU | 算子融合、`F.rms_norm` |
 | [06-CUDA-Graph](./06-CUDA-Graph.md) | Decode CUDA Graph 设计与实现 | 图捕获/重放、静态内存、非阻塞传输 |
 | [07-Prefill-torch.compile](./07-Prefill-torch.compile.md) | Prefill torch.compile 全图编译 | 动态形状、custom op、fullgraph |
-| [08-显存优化](./08-显存优化.md) | **CG / compile 显存治理** | 显存分解、graph pool、共享安全判据 |
+| [08-显存优化](./08-显存优化.md) | **CG / compile 显存治理** | KV Cache 口算、面试题、graph pool、共享安全判据 |
 | [09-输入管线](./09-输入管线.md) | 输入数据管线 | cu_seqlens、slot_mapping、pin_memory |
 | [10-Sampler](./10-Sampler.md) | 采样器 | 整批采样、Gumbel-max、同步开销 |
 | [11-模型加载](./11-模型加载.md) | 快速权重加载 | 分片读取、dtype 直落 |
