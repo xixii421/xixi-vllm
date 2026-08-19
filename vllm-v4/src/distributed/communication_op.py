@@ -127,6 +127,30 @@ def tensor_model_parallel_reduce_scatter(
 # --------------------------------------------------------------------------- #
 
 
+def send_tensor(tensor: torch.Tensor, dst: int, group: Group | None = None) -> None:
+    """定点发送单个张量（无元数据，形状双方约定）。
+
+    用于 CUDA Graph 捕获路径：decode 中间张量形状恒为 [bs, hidden]，
+    双方预先知道形状，直接 dist.send，可被图捕获。
+    """
+    group = get_world_group() if group is None else group
+    if group.size == 1:
+        return
+    dist.send(tensor, group_dst=dst, group=group.device_group)
+
+
+def recv_tensor(tensor: torch.Tensor, src: int, group: Group | None = None) -> torch.Tensor:
+    """定点接收单个张量到预分配 tensor（无元数据，形状双方约定）。
+
+    接收目标由调用方预先分配（通常为静态 buffer 的切片，保证图重放地址固定）。
+    """
+    group = get_world_group() if group is None else group
+    if group.size == 1:
+        return tensor
+    dist.recv(tensor, group_src=src, group=group.device_group)
+    return tensor
+
+
 def send_tensor_dict(
     tensor_dict: dict[str, torch.Tensor],
     dst: int | None = None,

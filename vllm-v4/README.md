@@ -61,7 +61,7 @@ torchrun --nnodes=2 --nproc_per_node=2 --node_rank=1 \
 | -------------------------------------- | ------------------------------------------------------------------------ |
 | `src/distributed/parallel_state.py`    | `Group`（NCCL+Gloo 双组）、`WORLD/TP/PP`、rank 映射、`set_nccl_env`               |
 | `src/distributed/communication_op.py`  | `all_gather/all_reduce/reduce_scatter`、TP 封装、PP `send/recv_tensor_dict`  |
-| `src/distributed/utils.py`             | `divide / get_pp_indices / IntermediateTensors / PPMissingLayer`         |
+| `src/distributed/utils.py`             | `divide / get_pp_indices / set_pp_layer_ranges / IntermediateTensors / PPMissingLayer` |
 | `src/compute/layers/linear.py`         | `Column/Row/QKV/MergedColumnParallelLinear`（TP 分片）                       |
 | `src/compute/layers/vocab_parallel.py` | `VocabParallelEmbedding` / `ParallelLMHead`                              |
 | `src/compute/models/qwen3.py`          | TP 分片层 + PP `make_layers`/`PPMissingLayer`/`IntermediateTensors`         |
@@ -107,6 +107,36 @@ $PY test/test_parallel.py --tp 2 --pp 2   # 需 4 张卡
 
 > 注意：NCCL 不允许两个 rank 复用同一张 GPU（`Duplicate GPU detected`），因此多卡
 > 路径必须各 rank 独占一张卡。
+
+---
+
+### 大模型 PP 切分验证（8B / 14B）
+
+`--model` 指定模型路径；`--pp-layer-counts` 指定**不均分 PP** 每 stage 层数（适配
+异卡显存，如 12GB + 24GB）。pp=2 纯层切分（中间只 send/recv hidden+residual，无算术
+重排），故 pp=1 与 pp=2 输出应 bit 级一致。
+
+```bash
+# 8B：单卡 4070(12G) 装不下，pp=2 各卡 ~7.8 GiB 一起跑
+$PY test/test_parallel.py --model ~/huggingface/Qwen3-8B --tp 1 --pp 1     # 4090 基线
+$PY test/test_parallel.py --model ~/huggingface/Qwen3-8B --tp 1 --pp 2     # 4070+4090
+
+# 14B（29.4G，任何单卡都装不下）：不均分 [12,28]，4070 扛 12 层、4090 扛 28 层
+$PY test/test_parallel.py --model <Qwen3-14B> --tp 1 --pp 2 --pp-layer-counts 12,28
+```
+
+实测（4070 SUPER 12GB + 4090 D 24GB，greedy decode）：
+
+| 模型 | 配置 | 单卡权重 | 输出 |
+| --- | --- | --- | --- |
+| 8B | tp=1 pp=1（4090） | ~15.6 GiB | `[198, 32313, 11, 1077, 752, ...]` |
+| 8B | tp=1 pp=2 | **7.80 GiB / 卡** | 与 pp=1 **bit 级一致** |
+| 14B | tp=1 pp=2 [12,28] | 8.95 / 18.95 GiB | `[198, 32313, 11, 1077, 594, 1490, ...]` |
+| 14B | tp=1 pp=2 [11,29] | 8.32 / 19.57 GiB | 与 [12,28] **逐 token 一致** |
+
+结论：PP 在异卡机器上把「单卡装不下的模型」按显存比例切分，层切分点不影响最终输出
+（[11,29] 与 [12,28] 一致），且 8B 的 pp=1/pp=2 输出 bit 级一致，证明 PP 通信与切分
+实现正确。
 
 ---
 

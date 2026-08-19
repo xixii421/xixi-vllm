@@ -38,7 +38,14 @@ num_kvcache_blocks: 0    # 0=自动计算
 # --- 并行（多机多卡）---
 tp_size: 1   # 张量并行度：机内 NVLink，切 head / 切权重
 pp_size: 1   # 流水线并行度：跨机低带宽，切层
+pp_layer_counts: null  # 不均分 PP 每 stage 层数（如 [12,28] 适配异卡显存）；null=等分
+device_ids: null  # 每进程可见 GPU 列表（如 [1,0]）；null=按 local_rank 自动映射
 nccl_port: 29500   # 单机 spawn 时的 NCCL rendezvous 端口
 master_addr: "127.0.0.1"  # 多机 rendezvous 主节点地址
 master_port: 29500        # 多机 rendezvous 端口
 nccl_ifname: ""  # 多机网卡名（如 ib0/eth0）；空=自动探测
+
+# --- 分布式 CG / compile（torchrun 多机路径同样生效，不再硬编码）---
+# enforce_eager: false 时启用 decode full-pipeline CUDA Graph；
+# torch_compile: true 时 prefill 走 torch.compile（分布式用 max-autotune-no-cudagraphs）。
+# 覆盖方式：命令行加 --cg / --compile。

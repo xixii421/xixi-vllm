@@ -7,8 +7,9 @@
     python test/test_parallel.py --tp 2 --pp 2                    # TP+PP（需 4 张卡）
     python test/test_parallel.py --model ~/huggingface/Qwen3-8B --tp 1 --pp 2
 
-对拍基准：默认 Qwen3-0.6B 用 fp32 HF 参考（GOLDEN）；其它模型只打印输出，
-由调用方对比 pp=1 与 pp=2 的逐 token 一致性（纯层切分应 bit 级一致）。
+对拍基准：默认 Qwen3-0.6B 用 bf16 HF 参考（GOLDEN，关闭低精度 reduction 与
+v4 的 matmul 精度一致）；其它模型只打印输出，由调用方对比 pp=1 与 pp=2 的逐
+token 一致性（纯层切分应 bit 级一致）。
 
 多机 torchrun 路径见 run_torchrun.py（rank0 兼调度器）。
 """
@@ -29,8 +30,9 @@ from src import Engine, EngineConfig, SamplingParams  # noqa: E402
 
 MODEL = str(Path.home() / "huggingface" / "Qwen3-0.6B")
 
-# fp32 HF 参考输出（Qwen3-0.6B，prompt_len=64, salt=7, temperature=0, max_tokens=16, ignore_eos）。
-GOLDEN = [271, 785, 1467, 374, 264, 6514, 315, 10916, 323, 1045, 1008, 15459, 11, 714, 432, 4977]
+# bf16 HF 参考输出（Qwen3-0.6B，prompt_len=64, salt=7, temperature=0, max_tokens=16,
+# ignore_eos；关闭 allow_bf16_reduced_precision_reduction 以匹配 v4 精度）。
+GOLDEN = [271, 40, 1184, 311, 1477, 279, 1372, 315, 56015, 315, 279, 3409, 330, 1782, 1, 304]
 
 
 def make_cfg(
@@ -41,13 +43,15 @@ def make_cfg(
     num_blocks: int = 32,
     device_ids: list[int] | None = None,
     pp_layer_counts: list[int] | None = None,
+    enforce_eager: bool = True,
+    torch_compile: bool = False,
 ) -> EngineConfig:
     return EngineConfig(
         model=model,
         tp_size=tp,
         pp_size=pp,
-        enforce_eager=True,
-        torch_compile=False,
+        enforce_eager=enforce_eager,
+        torch_compile=torch_compile,
         dtype="bfloat16",
         context_len=512,
         max_num_seqs=16,
@@ -74,6 +78,8 @@ def run_greedy(
     max_tokens: int = 16,
     device_ids: list[int] | None = None,
     pp_layer_counts: list[int] | None = None,
+    enforce_eager: bool = True,
+    torch_compile: bool = False,
 ) -> list[int]:
     engine = Engine(
         make_cfg(
@@ -82,6 +88,8 @@ def run_greedy(
             model=model,
             device_ids=device_ids,
             pp_layer_counts=pp_layer_counts,
+            enforce_eager=enforce_eager,
+            torch_compile=torch_compile,
         )
     )
     try:
@@ -113,6 +121,16 @@ def main() -> None:
         default=None,
         help="不均分 PP 每 stage 层数，逗号分隔（如 12,28）；默认等分",
     )
+    p.add_argument(
+        "--cg",
+        action="store_true",
+        help="启用 decode full-pipeline CUDA Graph（默认 eager）",
+    )
+    p.add_argument(
+        "--compile",
+        action="store_true",
+        help="启用 prefill torch.compile",
+    )
     args = p.parse_args()
 
     device_ids = None
@@ -133,8 +151,10 @@ def main() -> None:
         max_tokens=args.max_tokens,
         device_ids=device_ids,
         pp_layer_counts=pp_layer_counts,
+        enforce_eager=not args.cg,
+        torch_compile=args.compile,
     )
-    # 默认 0.6B 且并行配置时对拍 fp32 golden；其它模型仅打印，由调用方对比 pp=1/pp=2。
+    # 默认 0.6B 且并行配置时对拍 bf16 golden；其它模型仅打印，由调用方对比 pp=1/pp=2。
     is_06b = Path(model).name == "Qwen3-0.6B"
     use_golden = is_06b and (args.tp > 1 or args.pp > 1) and args.prompt_len == 64
     if use_golden:

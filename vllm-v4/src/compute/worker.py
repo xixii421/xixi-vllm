@@ -9,17 +9,13 @@ from __future__ import annotations
 import torch
 
 from ..config import EngineConfig
-from ..data import KVManager, ScheduledBatch
+from ..data import KVManager, SchedulerOutput
 from ..distributed import (
-    IntermediateTensors,
     destroy_distributed_environment,
     destroy_model_parallel,
     get_pp_group,
-    get_tp_group,
     init_distributed_environment,
     initialize_model_parallel,
-    recv_tensor_dict,
-    send_tensor_dict,
     set_pp_layer_ranges,
 )
 from .model_runner import ModelRunner
@@ -82,10 +78,6 @@ class Worker:
         model = self._load_model()
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
-        print(
-            f"[rank {self.rank}] model mem: "
-            f"{torch.cuda.memory_allocated(self.device) / 2**30:.2f} GiB"
-        )
         self.sampler = Sampler()
         self.kv = self._make_kv()
         self.model_runner = ModelRunner(
@@ -130,27 +122,13 @@ class Worker:
         assert self.kv is not None, "initialize() must be called first"
         return self.kv.num_blocks_total
 
-    def execute_model(self, sched: ScheduledBatch):
-        """执行一步。非 last PP 返回 None；last PP 返回 (prefill ids, decode ids)。"""
+    def execute_model(self, sched: SchedulerOutput):
+        """执行一步。入参为最小增量 SchedulerOutput；非 last PP 返回 None，last PP 返回采样 id。"""
         assert self.model_runner is not None
-        intermediate_tensors = None
-        if not get_pp_group().is_first_rank:
-            recv = recv_tensor_dict(
-                group=get_pp_group(), all_gather_group=get_tp_group()
-            )
-            assert recv is not None
-            intermediate_tensors = IntermediateTensors(recv)
-
-        out = self.model_runner.run(sched, intermediate_tensors)
-
+        result = self.model_runner.run_pipeline(sched)
         if not get_pp_group().is_last_rank:
-            assert isinstance(out, IntermediateTensors)
-            send_tensor_dict(
-                out, group=get_pp_group(), all_gather_group=get_tp_group()
-            )
             return None
-
-        n_p, n_d = out
+        n_p, n_d = result
         return self.model_runner.read_samples(n_p, n_d)
 
     def destroy_environment(self) -> None:

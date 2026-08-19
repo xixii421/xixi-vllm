@@ -6,12 +6,17 @@ import copy
 import gc
 import io
 import multiprocessing as mp
+import os
+import queue as _queue
+import threading
 from contextlib import redirect_stdout
 
+import msgspec
 import torch
+import zmq
 
 from ..config import EngineConfig
-from ..data import KVManager, ScheduledBatch
+from ..data import KVManager, ScheduledBatch, SchedulerOutput
 from ..distributed import (
     destroy_distributed_environment,
     destroy_model_parallel,
@@ -147,7 +152,7 @@ class ModelExecutor:
 
     def run(self, sched: ScheduledBatch) -> tuple[int, int]:
         assert self.runner is not None, "init_kv() must be called before run()"
-        return self.runner.run(sched)
+        return self.runner.run_pipeline(sched.to_wire())
 
     def read_samples(self, n_p: int, n_d: int) -> tuple[list, list]:
         assert self.runner is not None, "init_kv() must be called before read_samples()"
@@ -165,18 +170,50 @@ class ModelExecutor:
         destroy_distributed_environment()
 
 
+class WorkerRequest(msgspec.Struct):
+    """控制面 → worker 的请求。sched 为最小增量 SchedulerOutput，msgpack 序列化。"""
+
+    method: str
+    sched: SchedulerOutput | None = None
+
+
+def _sub_reader(sub: zmq.Socket, decoder, input_queue: "_queue.Queue") -> None:
+    """SUB 后台线程：把广播收进进程内队列，主循环无阻塞消费。
+
+    主循环 shutdown 时 ctx.term() 会使阻塞中的 recv() 抛 ZMQError（含
+    ContextTerminated），此处捕获后静默退出，避免关闭瞬间的噪声 traceback。
+    """
+    while True:
+        try:
+            data = sub.recv()
+        except zmq.ZMQError:
+            break
+        input_queue.put(decoder.decode(data))
+
+
 def _run_worker(
     config: EngineConfig,
     rank: int,
     tp_rank: int,
     pp_rank: int,
     is_driver: bool,
-    input_queue: mp.Queue,
+    broadcast_path: str,
     ready_queue: mp.Queue,
     output_queue: mp.Queue,
 ) -> None:
-    """worker 进程主循环：初始化环境与模型后，按主进程请求执行前向。"""
+    """worker 进程主循环：zmq SUB 收广播 → 执行前向 → driver 回传结果。"""
     from .worker import Worker
+
+    # 先建 SUB 并连接：模型加载耗时足以让 PUB/SUB 连接建立，规避 slow-joiner。
+    ctx = zmq.Context()
+    sub = ctx.socket(zmq.SUB)
+    sub.setsockopt(zmq.SUBSCRIBE, b"")
+    sub.connect(broadcast_path)
+    decoder = msgspec.msgpack.Decoder(WorkerRequest)
+    input_queue: "_queue.Queue" = _queue.Queue()
+    threading.Thread(
+        target=_sub_reader, args=(sub, decoder, input_queue), daemon=True
+    ).start()
 
     worker = Worker(config, rank, tp_rank, pp_rank)
     try:
@@ -185,11 +222,11 @@ def _run_worker(
         ready_queue.put(rank)
         while True:
             req = input_queue.get()
-            method = req["method"]
+            method = req.method
             if method == "shutdown":
                 break
             if method == "execute_model":
-                result = worker.execute_model(req["sched"])
+                result = worker.execute_model(req.sched)
                 if is_driver:
                     output_queue.put(result)
             elif method == "get_kv_cache_size":
@@ -199,13 +236,17 @@ def _run_worker(
                 raise ValueError(f"unknown worker method: {method}")
     finally:
         worker.destroy_environment()
+        sub.close()
+        ctx.term()
 
 
 class MultiWorkerClient:
     """多进程执行器：主进程持逻辑 KV（记账/前缀），每卡一个 worker 做前向。
 
+    广播走 zmq PUB/SUB + msgpack：一条消息发给所有 worker（而非 N 次 pickle
+    单播），只传最小增量 SchedulerOutput，CPU 序列化开销降到最低。
     与 ModelExecutor 暴露相同接口（init_kv / run / read_samples / destroy），
-    使 Engine 控制面无需区分单卡与并行。run 直接返回采样 id，read_samples 读取缓存。
+    使 Engine 控制面无需区分单卡与并行。
     """
 
     def __init__(self, config: EngineConfig, device: torch.device, dtype: torch.dtype):
@@ -215,12 +256,18 @@ class MultiWorkerClient:
         self.world_size = config.tp_size * config.pp_size
         self._ctx = mp.get_context("spawn")
         self._procs: list[mp.Process] = []
-        self._in_queues: list[mp.Queue] = []
         self._ready_queue: mp.Queue = self._ctx.Queue()
         self._out_queue: mp.Queue = self._ctx.Queue()
         self._last_p_ids: list[int] = []
         self._last_d_ids: list[int] = []
         self.kv: KVManager | None = None
+
+        # zmq PUB/SUB 广播 + msgpack 编码器。
+        self._zmq_ctx = zmq.Context()
+        self._broadcast_path = f"ipc:///tmp/vllm_v4_executor_{os.getpid()}"
+        self._pub = self._zmq_ctx.socket(zmq.PUB)
+        self._pub.bind(self._broadcast_path)
+        self._enc = msgspec.msgpack.Encoder()
 
         self._start_workers()
         self._wait_ready()
@@ -235,7 +282,6 @@ class MultiWorkerClient:
             for tp_rank in range(self.config.tp_size):
                 rank = pp_rank * self.config.tp_size + tp_rank
                 is_driver = tp_rank == 0 and pp_rank == self.config.pp_size - 1
-                q: mp.Queue = self._ctx.Queue()
                 p = self._ctx.Process(
                     target=_run_worker,
                     args=(
@@ -244,7 +290,7 @@ class MultiWorkerClient:
                         tp_rank,
                         pp_rank,
                         is_driver,
-                        q,
+                        self._broadcast_path,
                         self._ready_queue,
                         self._out_queue,
                     ),
@@ -252,16 +298,13 @@ class MultiWorkerClient:
                 )
                 p.start()
                 self._procs.append(p)
-                self._in_queues.append(q)
 
     def _wait_ready(self) -> None:
         for _ in range(self.world_size):
             self._ready_queue.get()
 
-    def _broadcast(self, method: str, **kwargs) -> None:
-        req = {"method": method, **kwargs}
-        for q in self._in_queues:
-            q.put(req)
+    def _broadcast(self, method: str, sched: SchedulerOutput | None = None) -> None:
+        self._pub.send(self._enc.encode(WorkerRequest(method=method, sched=sched)))
 
     def _query_kv_size(self) -> int:
         self._broadcast("get_kv_cache_size")
@@ -293,7 +336,7 @@ class MultiWorkerClient:
         return self.kv
 
     def run(self, sched: ScheduledBatch) -> tuple[int, int]:
-        self._broadcast("execute_model", sched=sched)
+        self._broadcast("execute_model", sched.to_wire())
         self._last_p_ids, self._last_d_ids = self._out_queue.get()
         return len(self._last_p_ids), len(self._last_d_ids)
 
@@ -309,10 +352,9 @@ class MultiWorkerClient:
             p.join(timeout=10)
             if p.is_alive():
                 p.terminate()
-        for q in self._in_queues:
-            q.close()
         self._procs.clear()
-        self._in_queues.clear()
+        self._pub.close()
+        self._zmq_ctx.term()
         self.kv = None
         gc.collect()
         torch.cuda.empty_cache()
@@ -378,8 +420,9 @@ class TorchrunExecutor:
         return self.kv
 
     def run(self, sched: ScheduledBatch) -> tuple[int, int]:
-        self.dist.broadcast_object_list([sched], src=0)
-        result = self.worker.execute_model(sched)
+        wire = sched.to_wire()
+        self.dist.broadcast_object_list([wire], src=0)
+        result = self.worker.execute_model(wire)
         sample = result if result is not None else ([], [])
         gathered = [None] * self.world_size
         self.dist.gather_object(sample, gathered, dst=0)

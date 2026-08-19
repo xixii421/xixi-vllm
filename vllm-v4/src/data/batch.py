@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import msgspec
 import torch
 
 from .sequence import Sequence, slots_for_range
@@ -16,6 +17,82 @@ class ScheduledBatch:
 
     def is_empty(self) -> bool:
         return not self.prefills and not self.decodes
+
+    def to_wire(self) -> "SchedulerOutput":
+        """转成最小增量 wire 结构：只携带本步真正需要的数据，丢弃 Sequence 全历史。"""
+        return SchedulerOutput(
+            prefills=[_prefill_schedule(s) for s in self.prefills],
+            decodes=[_decode_schedule(s) for s in self.decodes],
+        )
+
+
+def _sampling_fields(s: Sequence) -> tuple[float, float | None, int | None, float | None]:
+    return s.temperature, s.top_p, s.top_k, s.min_p
+
+
+def _decode_schedule(s: Sequence) -> "SeqSchedule":
+    """decode 每序列只发 [last_token]（1 个 id）+ 已缓存 token 数 + block_table。"""
+    assert len(s.token_ids) == s.num_cached_tokens + 1, (
+        f"decode invariant: len(token_ids)={len(s.token_ids)} vs "
+        f"num_cached_tokens+1={s.num_cached_tokens + 1}"
+    )
+    temperature, top_p, top_k, min_p = _sampling_fields(s)
+    return SeqSchedule(
+        seq_id=s.seq_id,
+        block_table=list(s.block_table),
+        num_cached_tokens=s.num_cached_tokens,
+        token_ids=[s.last_token],
+        need_sample=False,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        min_p=min_p,
+    )
+
+
+def _prefill_schedule(s: Sequence) -> "SeqSchedule":
+    """prefill 每序列只发本步 scheduled 的 token 切片，不含已缓存前缀与后续未调度部分。"""
+    start = s.num_cached_tokens
+    end = start + s.num_scheduled_tokens
+    temperature, top_p, top_k, min_p = _sampling_fields(s)
+    return SeqSchedule(
+        seq_id=s.seq_id,
+        block_table=list(s.block_table),
+        num_cached_tokens=s.num_cached_tokens,
+        token_ids=s.token_ids[start:end],
+        need_sample=s.need_sample,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        min_p=min_p,
+    )
+
+
+class SeqSchedule(msgspec.Struct):
+    """单条序列的调度增量（wire 格式）。
+
+    相对完整 Sequence，只保留 build_decode / build_prefill 真正读取的字段：
+    - token_ids：decode 为 [last_token]，prefill 为本步 scheduled 切片；
+    - num_cached_tokens：本步前已缓存的 token 数（同时用于推导 position / cache_seqlen）；
+    - block_table：完整块表（block 数远小于 token 数，不可再压缩）。
+    """
+
+    seq_id: int
+    block_table: list[int]
+    num_cached_tokens: int
+    token_ids: list[int]
+    need_sample: bool = False
+    temperature: float = 0.0
+    top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+
+
+class SchedulerOutput(msgspec.Struct):
+    """控制面 → 计算面的最小调度结果（wire 格式）。"""
+
+    prefills: list[SeqSchedule] = field(default_factory=list)
+    decodes: list[SeqSchedule] = field(default_factory=list)
 
 
 class Batch:
@@ -33,12 +110,14 @@ class Batch:
         max_blocks: int,
         vocab_size: int,
         device: torch.device,
+        block_size: int,
     ) -> None:
         self.max_bs = max_bs
         self.max_tokens = max_tokens
         self.max_blocks = max_blocks
         self.vocab_size = vocab_size
         self.device = device
+        self.block_size = block_size
 
         self.input_ids = torch.zeros(max_tokens, dtype=torch.int64, device=device)
         self.positions = torch.zeros(max_tokens, dtype=torch.int64, device=device)
@@ -68,22 +147,28 @@ class Batch:
         cpu = torch.tensor(data, dtype=dtype, pin_memory=True)
         dst.copy_(cpu, non_blocking=True)
 
-    def build_decode(self, seqs: list[Sequence]) -> None:
+    def build_decode(self, seqs: list[SeqSchedule]) -> None:
         bs = len(seqs)
-        block_size = seqs[0].block_size
-        self._cp(self.input_ids[:bs], [s.last_token for s in seqs], torch.int64)
-        self._cp(self.positions[:bs], [len(s) - 1 for s in seqs], torch.int64)
+        # decode 时 num_cached_tokens 已指向本步 token 的位置：position = num_cached_tokens，
+        # cache_seqlen = num_cached_tokens + 1（含本步写入的 KV）。
+        self._cp(self.input_ids[:bs], [s.token_ids[-1] for s in seqs], torch.int64)
+        self._cp(
+            self.positions[:bs], [s.num_cached_tokens for s in seqs], torch.int64
+        )
         self._cp(
             self.slot_mapping[:bs],
-            [self._decode_slot(s, block_size) for s in seqs],
+            [self._decode_slot(s) for s in seqs],
             torch.int32,
         )
-        self._cp(self.cache_seqlens[:bs], [len(s) for s in seqs], torch.int32)
+        self._cp(
+            self.cache_seqlens[:bs],
+            [s.num_cached_tokens + 1 for s in seqs],
+            torch.int32,
+        )
         self._fill_block_tables(seqs)
         self._fill_sampling(seqs)
 
-    def build_prefill(self, seqs: list[Sequence]) -> tuple[int, int, int, bool]:
-        block_size = seqs[0].block_size
+    def build_prefill(self, seqs: list[SeqSchedule]) -> tuple[int, int, int, bool]:
         ids: list[int] = []
         positions: list[int] = []
         slots: list[int] = []
@@ -93,11 +178,11 @@ class Batch:
         max_k = 0
         for s in seqs:
             start = s.num_cached_tokens
-            n = s.num_scheduled_tokens
+            n = len(s.token_ids)
             end = start + n
-            ids.extend(s.token_ids[start:end])
+            ids.extend(s.token_ids)
             positions.extend(range(start, end))
-            slots.extend(slots_for_range(s.block_table, start, end, block_size))
+            slots.extend(slots_for_range(s.block_table, start, end, self.block_size))
             cu_q.append(cu_q[-1] + n)
             cu_k.append(cu_k[-1] + end)
             max_q = max(max_q, n)
@@ -116,7 +201,7 @@ class Batch:
         self._fill_sampling(seqs)
         return n, max_q, max_k, has_cache
 
-    def _fill_block_tables(self, seqs: list[Sequence]) -> None:
+    def _fill_block_tables(self, seqs: list[SeqSchedule]) -> None:
         width = self.max_blocks
         flat: list[int] = []
         for s in seqs:
@@ -124,7 +209,7 @@ class Batch:
             flat.extend([-1] * (width - len(s.block_table)))
         self._cp(self.block_tables[: len(seqs)].reshape(-1), flat, torch.int32)
 
-    def _fill_sampling(self, seqs: list[Sequence]) -> None:
+    def _fill_sampling(self, seqs: list[SeqSchedule]) -> None:
         bs = len(seqs)
         vocab = self.vocab_size
         temps = [s.temperature for s in seqs]
@@ -147,7 +232,9 @@ class Batch:
         self.use_min_p = any(m > 0.0 for m in min_ps)
         self.max_top_k = max(top_ks) if self.use_top_k else 0
 
-    @staticmethod
-    def _decode_slot(seq: Sequence, block_size: int) -> int:
-        n = len(seq)
-        return seq.block_table[(n - 1) // block_size] * block_size + (n - 1) % block_size
+    def _decode_slot(self, seq: SeqSchedule) -> int:
+        n = seq.num_cached_tokens + 1
+        return (
+            seq.block_table[(n - 1) // self.block_size] * self.block_size
+            + (n - 1) % self.block_size
+        )

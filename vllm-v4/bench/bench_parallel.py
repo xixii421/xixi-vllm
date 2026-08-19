@@ -37,14 +37,16 @@ def dummy_ids(n: int, salt: int = 0) -> list[int]:
     return [((i * 7919 + 10007 + salt * 97) % 150000) + 100 for i in range(n)]
 
 
-def make_engine(tp: int, pp: int, model: str = MODEL) -> Engine:
+def make_engine(
+    tp: int, pp: int, model: str = MODEL, *, enforce_eager: bool = True, torch_compile: bool = False
+) -> Engine:
     return Engine(
         EngineConfig(
             model=model,
             tp_size=tp,
             pp_size=pp,
-            enforce_eager=True,
-            torch_compile=False,
+            enforce_eager=enforce_eager,
+            torch_compile=torch_compile,
             dtype="bfloat16",
             context_len=4096,
             max_num_seqs=16,
@@ -56,8 +58,18 @@ def make_engine(tp: int, pp: int, model: str = MODEL) -> Engine:
     )
 
 
-def run(tp: int, pp: int, tag: str, model: str = MODEL) -> None:
-    engine = make_engine(tp, pp, model)
+def run(
+    tp: int,
+    pp: int,
+    tag: str,
+    model: str = MODEL,
+    *,
+    enforce_eager: bool = True,
+    torch_compile: bool = False,
+) -> None:
+    engine = make_engine(
+        tp, pp, model, enforce_eager=enforce_eager, torch_compile=torch_compile
+    )
     rows: list[str] = []
 
     # 预热
@@ -126,8 +138,25 @@ def main() -> None:
     p.add_argument("--pp", type=int, required=True)
     p.add_argument("--tag", required=True)
     p.add_argument("--model", default=MODEL)
+    p.add_argument(
+        "--cg",
+        action="store_true",
+        help="启用 decode full-pipeline CUDA Graph（默认 eager）",
+    )
+    p.add_argument(
+        "--compile",
+        action="store_true",
+        help="启用 prefill torch.compile",
+    )
     args = p.parse_args()
-    run(args.tp, args.pp, args.tag, str(Path(args.model).expanduser()))
+    run(
+        args.tp,
+        args.pp,
+        args.tag,
+        str(Path(args.model).expanduser()),
+        enforce_eager=not args.cg,
+        torch_compile=args.compile,
+    )
 
 
 if __name__ == "__main__":

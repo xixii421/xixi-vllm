@@ -44,6 +44,12 @@ DEFAULTS = {
     "gpu_memory_utilization": 0.85,
     "num_kvcache_blocks": 0,
     "dtype": "auto",
+    "enforce_eager": True,
+    "torch_compile": False,
+    "compile_mode": "reduce-overhead",
+    "compile_dynamic": True,
+    "pp_layer_counts": None,
+    "device_ids": None,
     "nccl_port": 29500,
     "master_addr": "127.0.0.1",
     "master_port": 29500,
@@ -59,6 +65,11 @@ def _load_config(args: argparse.Namespace) -> EngineConfig:
             for k, v in (yaml.safe_load(f) or {}).items():
                 if k in cfg:
                     cfg[k] = v
+    # CLI 开关覆盖 config：--cg 开图、--compile 开编译。
+    if args.cg:
+        cfg["enforce_eager"] = False
+    if args.compile:
+        cfg["torch_compile"] = True
 
     model = Path(args.model or cfg["model"]).expanduser()
     if not model.is_dir():
@@ -66,12 +77,23 @@ def _load_config(args: argparse.Namespace) -> EngineConfig:
 
         model = DEFAULT_CACHE_DIR / (args.model or cfg["model"])
 
+    pp_layer_counts = cfg["pp_layer_counts"]
+    if args.pp_layer_counts is not None:
+        pp_layer_counts = [int(x) for x in args.pp_layer_counts.split(",")]
+    device_ids = cfg["device_ids"]
+    if args.device_ids is not None:
+        device_ids = [int(x) for x in args.device_ids.split(",")]
+
     return EngineConfig(
         model=str(model),
         tp_size=args.tp,
         pp_size=args.pp,
-        enforce_eager=True,
-        torch_compile=False,
+        enforce_eager=cfg["enforce_eager"],
+        torch_compile=cfg["torch_compile"],
+        compile_mode=cfg["compile_mode"],
+        compile_dynamic=cfg["compile_dynamic"],
+        pp_layer_counts=pp_layer_counts,
+        device_ids=device_ids,
         dtype=cfg["dtype"],
         context_len=cfg["context_len"],
         max_num_seqs=cfg["max_num_seqs"],
@@ -135,6 +157,28 @@ def main() -> None:
     p.add_argument("--temperature", type=float, default=0.0)
     p.add_argument("--top-p", type=float, default=None)
     p.add_argument("--top-k", type=int, default=None)
+    p.add_argument(
+        "--cg",
+        action="store_true",
+        help="启用 decode full-pipeline CUDA Graph（覆盖 config）",
+    )
+    p.add_argument(
+        "--compile",
+        action="store_true",
+        help="启用 prefill torch.compile（覆盖 config）",
+    )
+    p.add_argument(
+        "--pp-layer-counts",
+        type=str,
+        default=None,
+        help="不均分 PP 每 stage 层数（如 12,28）",
+    )
+    p.add_argument(
+        "--device-ids",
+        type=str,
+        default=None,
+        help="逗号分隔设备映射（覆盖 config）",
+    )
     args = p.parse_args()
 
     rank = int(os.environ.get("RANK", "0"))

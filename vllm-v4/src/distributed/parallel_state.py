@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+from contextlib import contextmanager
 
 import torch
 import torch.distributed as dist
@@ -157,6 +158,25 @@ def destroy_distributed_environment() -> None:
 
 def is_initialized() -> bool:
     return dist.is_initialized()
+
+
+@contextmanager
+def graph_capture(device: torch.device):
+    """跨 rank 同步进入 CUDA Graph 捕获。
+
+    NCCL 集合通信（TP all-reduce / PP send-recv）在捕获时要求所有 rank
+    在同一时刻同步进入，否则捕获阶段会因等待 peer 而死锁。进入前对 TP/PP
+    组各 barrier 一次，退出后再同步，保证各 rank 的捕获段对齐。
+    """
+    torch.cuda.synchronize(device)
+    get_tp_group().barrier()
+    get_pp_group().barrier()
+    try:
+        yield
+    finally:
+        torch.cuda.synchronize(device)
+        get_tp_group().barrier()
+        get_pp_group().barrier()
 
 
 def set_nccl_env(ifname: str = "", *, disable_ib: bool = False) -> None:

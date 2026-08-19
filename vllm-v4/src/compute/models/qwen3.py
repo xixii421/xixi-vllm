@@ -203,6 +203,10 @@ class Qwen3ForCausalLM(nn.Module):
     def compute_logits(self, hidden_states):
         return self.lm_head(hidden_states)
 
+    def argmax(self, hidden_states):
+        """贪心快速路径：直接取全局 argmax token id，省去全量 logits 的 all-gather。"""
+        return self.lm_head.argmax(hidden_states)
+
     def load_weights(self, weights):
         # 融合阵（qkv / gate_up）在加载时按 head 或输出维切分写入。
         stacked = [
@@ -247,9 +251,12 @@ class Qwen3ForCausalLM(nn.Module):
 
         # 权重绑定：lm_head 复用 embed_tokens（仅 pp=1 时两者同 rank；Qwen3 实际
         # 已在 checkpoint 中显式保存 lm_head.weight，此分支作为兜底）。
+        # 注意 embed 权重多一行"越界占位行"（VocabParallelEmbedding 的 +1 设计），
+        # 绑定到 lm_head 时需切片跳过，否则 shape 不匹配。
         unloaded = set(params) - loaded
         if "lm_head.weight" in unloaded and "model.embed_tokens.weight" in loaded:
-            params["lm_head.weight"].data.copy_(params["model.embed_tokens.weight"].data)
+            embed = params["model.embed_tokens.weight"].data
+            params["lm_head.weight"].data.copy_(embed[1:])
             loaded.add("lm_head.weight")
             unloaded.discard("lm_head.weight")
 

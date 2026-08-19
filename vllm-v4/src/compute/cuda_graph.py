@@ -1,70 +1,40 @@
 from __future__ import annotations
 
+from typing import Any, Callable
+
 import torch
 
-from .layers.attention import AttnInputs, AttnMetadata, attention_context
+from ..distributed import graph_capture
 
 
 class CUDAGraphRunner:
-    """decode CUDA Graph：静态 buffer 来自 Batch，捕获后仅 memcpy 重放。"""
-
-    def __init__(
-        self,
-        model,
-        batch,
-        meta: AttnMetadata,
-        *,
-        max_batch_size: int,
-        hidden_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> None:
-        self.model = model
-        self.batch = batch
-        self._meta = meta
+    def __init__(self, bs_list: list[int], device: torch.device):
         self.device = device
-        self.max_bs = max_batch_size
-        self.bs_list = self._make_bs_list(max_batch_size)
+        # 保持升序：_pad_bs 需找「最小 >= bs」的图；capture 内部再降序捕获。
+        self.bs_list = sorted(bs_list)
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self.outputs: dict[int, Any] = {}
         self._graph_pool = None
-        self.outputs = torch.zeros(
-            max_batch_size, hidden_size, dtype=dtype, device=device
-        )
 
-    def capture(self) -> None:
+    def capture(self, body: Callable[[int], Any]) -> None:
         torch.cuda.synchronize(self.device)
         torch.cuda.empty_cache()
-        self.batch.slot_mapping.fill_(-1)
         for bs in sorted(self.bs_list, reverse=True):
-            attn = AttnInputs(
-                slot_mapping=self.batch.slot_mapping[:bs],
-                is_prefill=False,
-                cache_seqlens=self.batch.cache_seqlens[:bs],
-                block_tables=self.batch.block_tables[:bs],
-            )
-            with attention_context(self._meta):
-                self.outputs[:bs] = self.model(
-                    self.batch.input_ids[:bs], self.batch.positions[:bs], attn
-                )
+            body(bs)  # warmup：初始化算子与 NCCL 集合通信顺序
             graph = torch.cuda.CUDAGraph()
-            with attention_context(self._meta):
+            with graph_capture(self.device):
                 with torch.cuda.graph(graph, pool=self._graph_pool):
-                    self.outputs[:bs] = self.model(
-                        self.batch.input_ids[:bs], self.batch.positions[:bs], attn
-                    )
+                    self.outputs[bs] = body(bs)
             if self._graph_pool is None:
                 self._graph_pool = graph.pool()
             self.graphs[bs] = graph
-        self.batch.slot_mapping.fill_(-1)
         torch.cuda.synchronize(self.device)
 
-    def can_use(self, bs: int) -> bool:
-        return bs <= self.max_bs
-
-    def replay(self, bs: int) -> torch.Tensor:
+    def replay(self, bs: int) -> tuple[Any, int]:
+        """重放后返回 (静态输出句柄, 实际 padded bs)。调用方切片到 bs。"""
         pbs = self._pad_bs(bs)
         self.graphs[pbs].replay()
-        return self.outputs[:bs]
+        return self.outputs[pbs], pbs
 
     def _pad_bs(self, bs: int) -> int:
         for b in self.bs_list:
@@ -72,15 +42,15 @@ class CUDAGraphRunner:
                 return b
         return bs
 
+    def destroy(self) -> None:
+        self.graphs.clear()
+        self.outputs.clear()
+        self._graph_pool = None
+
     @staticmethod
-    def _make_bs_list(max_bs: int) -> list[int]:
+    def make_bs_list(max_bs: int) -> list[int]:
         bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
         bs = [b for b in bs if b <= max_bs]
         if max_bs not in bs:
             bs.append(max_bs)
         return bs
-
-    def destroy(self) -> None:
-        self.graphs.clear()
-        self._graph_pool = None
-        del self.outputs

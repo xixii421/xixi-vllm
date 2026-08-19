@@ -55,6 +55,7 @@ DEFAULTS = {
     "num_kvcache_blocks": 0,
     "tp_size": 1,
     "pp_size": 1,
+    "pp_layer_counts": None,
     "nccl_port": 29500,
     "master_addr": "127.0.0.1",
     "master_port": 29500,
@@ -102,6 +103,7 @@ def _make_engine(cfg: dict) -> Engine:
             num_kvcache_blocks=cfg["num_kvcache_blocks"],
             tp_size=cfg["tp_size"],
             pp_size=cfg["pp_size"],
+            pp_layer_counts=cfg["pp_layer_counts"],
             nccl_port=cfg["nccl_port"],
             master_addr=cfg["master_addr"],
             master_port=cfg["master_port"],
@@ -290,6 +292,12 @@ def main() -> None:
     p.add_argument("--max-num-seqs", type=int, default=None)
     p.add_argument("--tp", type=int, default=None, help="张量并行度（机内多卡）")
     p.add_argument("--pp", type=int, default=None, help="流水线并行度（跨机/多卡）")
+    p.add_argument(
+        "--pp-layer-counts",
+        type=str,
+        default=None,
+        help="不均分 PP 每 stage 层数（逗号分隔，如 12,28）",
+    )
     p.add_argument("--batch", action="store_true", help="运行批量推理演示")
     p.add_argument("--download", action="store_true")
     p.add_argument("--list", action="store_true")
@@ -320,6 +328,8 @@ def main() -> None:
         cfg["tp_size"] = args.tp
     if args.pp is not None:
         cfg["pp_size"] = args.pp
+    if args.pp_layer_counts is not None:
+        cfg["pp_layer_counts"] = [int(x) for x in args.pp_layer_counts.split(",")]
     if args.cg:
         cfg["enforce_eager"] = False
     if args.eager:
