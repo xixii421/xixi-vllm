@@ -27,6 +27,36 @@ Engine(Scheduler, rank0 兼 driver)  Worker(PP stage1, TP0)
 
 
 
+## 多机部署（代码同步 + 环境配置）
+
+同一套代码跑多台机器，代码走 git、环境走脚本，不要手动拷文件。
+
+```bash
+git clone git@github.com:dzzy-team/dzyy-vllm.git
+cd dzyy-vllm/vllm-v4
+bash setup_env.sh          # 自动探测 CUDA 版本并装好环境
+```
+
+之后每次更新只需 `git pull` 和 `source .venv/bin/activate`。完整工作流见 `docs/多机部署.md`。
+
+---
+
+## 文档
+
+并行相关的教材拆成几篇，入口是 `docs/并行环境.md`。
+
+| 文档 | 内容 |
+| --- | --- |
+| [docs/并行环境.md](docs/并行环境.md) | 三类并行策略、代价、决策树 |
+| [docs/硬件互联.md](docs/硬件互联.md) | 卡数、异构、NVLink 与 PCIe |
+| [docs/服务器测量.md](docs/服务器测量.md) | 带宽测量、三台真实机器剖析 |
+| [docs/集合通信.md](docs/集合通信.md) | NCCL 原语、进程组、控制面通信 |
+| [docs/linear.md](docs/linear.md) | TP 线性层 |
+| [docs/词表.md](docs/词表.md) | 词表并行 |
+| [docs/多机部署.md](docs/多机部署.md) | git 同步与环境脚本 |
+
+---
+
 ## 快速开始
 
 ```bash
