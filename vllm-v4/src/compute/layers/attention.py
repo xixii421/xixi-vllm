@@ -8,8 +8,7 @@ import torch
 import torch.nn as nn
 from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
-from ...data.kv_ops import store_kvcache
-
+from ..kv_ops import store_kvcache
 
 class AttnInputs(NamedTuple):
     slot_mapping: torch.Tensor

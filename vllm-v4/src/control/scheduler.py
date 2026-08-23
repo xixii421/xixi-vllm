@@ -1,6 +1,6 @@
 from __future__ import annotations
 from collections import deque
-from ..data import KVManager, ScheduledBatch, Sequence, SequenceStatus
+from ..data import EngineCoreOutput, KVManager, ScheduledBatch, Sequence, SequenceStatus
 
 
 class Scheduler:
@@ -231,31 +231,39 @@ class Scheduler:
         self.kv.deallocate(seq, publish=False)
         self.waiting.appendleft(seq)
 
-    def postprocess(
+    def update(
+        self, sched: ScheduledBatch, p_ids: list[int], d_ids: list[int]
+    ) -> list[EngineCoreOutput]:
+        """前向结束后推进序列状态，返回本步的结构化输出。
+
+        与 vLLM 的 ``Scheduler.update_from_output`` 对齐：对每条调度到的序列
+        原地推进缓存游标、追加采样 token、判断完成并回收 KV，最后产出
+        ``EngineCoreOutput`` 增量（seq_id + 新 token + 是否完成）。
+
+        Args:
+            sched: 本步调度的批次（prefill 与 decode 两组）。
+            p_ids: prefill 序列的采样 token id（与 sched.prefills 对齐）。
+            d_ids: decode 序列的采样 token id（与 sched.decodes 对齐）。
+
+        Returns:
+            list[EngineCoreOutput]: 本步每条采样序列的输出增量。
+        """
+        outputs: list[EngineCoreOutput] = []
+        if sched.decodes:
+            outputs.extend(self._update_batch(sched.decodes, d_ids, is_prefill=False))
+        if sched.prefills:
+            outputs.extend(self._update_batch(sched.prefills, p_ids, is_prefill=True))
+        return outputs
+
+    def _update_batch(
         self,
         seqs: list[Sequence],
         token_ids: list[int],
         *,
         is_prefill: bool,
-    ) -> list[Sequence]:
-        """前向结束后更新序列状态。
-
-        主要工作包括：
-            1. 推进每个序列的已缓存 token 数。
-            2. 同步前缀缓存。
-            3. 对完成 prompt 的序列追加采样 token。
-            4. 判断是否命中 EOS 或达到最大生成长度。
-            5. 回收已完成序列的 KV cache。
-
-        Args:
-            seqs: 本步参与前向计算的序列。
-            token_ids: 与 seqs 一一对应的采样 token id。
-            is_prefill: 本批是否为 prefill。
-
-        Returns:
-            list[Sequence]: 本步完成的序列列表。
-        """
-        finished: list[Sequence] = []
+    ) -> list[EngineCoreOutput]:
+        finished: set[int] = set()
+        outputs: list[EngineCoreOutput] = []
 
         for seq, token_id in zip(seqs, token_ids):
             # 被调度的序列本步一定有 num_scheduled_tokens 大于 0。
@@ -267,13 +275,15 @@ class Scheduler:
 
             # 未完成 prompt 的 prefill chunk 本步不采样，也不判断是否完成。
             if is_prefill and seq.num_cached_tokens < seq.num_prompt_tokens:
+                outputs.append(EngineCoreOutput(seq_id=seq.seq_id))
                 continue
 
             # max_tokens 小于等于 0 表示只需要处理 prompt，不生成新 token。
             if seq.max_tokens <= 0:
                 seq.status = SequenceStatus.FINISHED
                 self.kv.deallocate(seq, publish=True)
-                finished.append(seq)
+                finished.add(seq.seq_id)
+                outputs.append(EngineCoreOutput(seq_id=seq.seq_id, is_finished=True))
                 continue
 
             # 追加本步采样得到的 token，并判断是否完成。
@@ -283,15 +293,20 @@ class Scheduler:
 
             if hit_eos or hit_len:
                 seq.status = SequenceStatus.FINISHED
-
                 # 完成序列释放 KV cache，并发布前缀供后续请求复用。
                 self.kv.deallocate(seq, publish=True)
-                finished.append(seq)
+                finished.add(seq.seq_id)
+
+            outputs.append(
+                EngineCoreOutput(
+                    seq_id=seq.seq_id,
+                    new_token_ids=[token_id],
+                    is_finished=seq.seq_id in finished,
+                )
+            )
 
         # 已完成序列需要从运行队列中移除。
-        # 未完成的 partial prefill 已在上面跳过，不会出现在 finished 中。
         if finished:
-            done = {s.seq_id for s in finished}
-            self.running = deque(s for s in self.running if s.seq_id not in done)
+            self.running = deque(s for s in self.running if s.seq_id not in finished)
 
-        return finished
+        return outputs

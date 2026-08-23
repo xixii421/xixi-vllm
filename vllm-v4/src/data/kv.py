@@ -1,107 +1,38 @@
-"""Unified KV resource layer (v2-aligned): pages + GPU pool + prefix backends."""
+"""KVManager：driver 侧纯逻辑账本（块表 + 前缀索引，不占 GPU、不依赖 torch/distributed）。
+
+GPU KV 张量（KVPool）已迁到 ``compute/kv_pool.py``。调度器只通过本类管理
+「逻辑块分配 / 前缀命中 / 释放」，与 worker 侧的显存分配完全解耦。
+"""
 
 from __future__ import annotations
 
-from typing import Literal
-
-import torch
-from transformers import PretrainedConfig
-
-from ..distributed import all_gather, get_pp_group, get_pp_indices, get_tp_group
 from .block_manager import BlockManager
 from .prefix import PrefixBackend, RadixPrefixIndex, make_prefix_index
 from .sequence import Sequence
 
 
-def get_kv_dims(hf: PretrainedConfig) -> tuple[int, int, int]:
-    """当前 rank 的 KV 分片维度：(本地层数, 本地 kv 头数, head_dim)。"""
-    tp = get_tp_group()
-    pp = get_pp_group()
-    num_kv_heads = max(1, hf.num_key_value_heads // tp.size)
-    start, end = get_pp_indices(hf.num_hidden_layers, pp.group_rank, pp.size)
-    head_dim = getattr(hf, "head_dim", hf.hidden_size // hf.num_attention_heads)
-    return end - start, num_kv_heads, head_dim
-
-
 class KVManager:
+    """块表 + 前缀索引的逻辑账本。"""
+
     def __init__(
         self,
-        hf_config: PretrainedConfig,
         *,
         num_blocks: int,
         block_size: int,
-        device: torch.device,
-        dtype: torch.dtype,
         prefix_backend: PrefixBackend = "hash",
-        allocate_pool: bool = True,
     ) -> None:
         if num_blocks <= 0:
             raise ValueError(f"num_blocks must be > 0, got {num_blocks}")
-
         self.block_size = block_size
-        self.device = device
-        self.dtype = dtype
-        self.hf_config = hf_config
         self.prefix_backend: PrefixBackend = prefix_backend
         self.num_blocks_total = num_blocks
         self.num_blocks_schedulable = num_blocks
-
         self.blocks = BlockManager(self.num_blocks_schedulable, block_size)
         self.index = make_prefix_index(prefix_backend)
-        # Hash: page-pool LRU + invalidate. Radix: tree leaf LRU reclaim first.
         self.blocks.on_evict = lambda bid: self.index.invalidate(bid, self.blocks)
         if isinstance(self.index, RadixPrefixIndex):
             self.blocks.reclaim_fn = lambda n: self.index.reclaim_pages(n, self.blocks)
-        # 调度器（主进程）只需逻辑块管理，可跳过 GPU 池分配（池在 worker 侧）。
-        if allocate_pool:
-            self.kv_cache = self._alloc_pool(
-                hf_config, num_blocks, block_size, device, dtype
-            )
-        else:
-            self.kv_cache = torch.empty(0, device=device)
         self.last_num_cached_tokens = 0
-
-    @staticmethod
-    def _alloc_pool(
-        hf: PretrainedConfig,
-        num_blocks: int,
-        block_size: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        layers, nkv, hd = get_kv_dims(hf)
-        block_bytes = 2 * layers * block_size * nkv * hd * dtype.itemsize
-        kv = torch.empty(
-            2, layers, num_blocks, block_size, nkv, hd, dtype=dtype, device=device
-        )
-        print(
-            f"KV pool: {num_blocks} blocks × {block_size} tok "
-            f"({num_blocks * block_bytes / (1024**3):.2f} GiB)"
-        )
-        return kv
-
-    @classmethod
-    def auto_num_blocks(
-        cls,
-        hf: PretrainedConfig,
-        *,
-        block_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-        gpu_memory_utilization: float,
-        reserve_bytes: int = 0,
-    ) -> int:
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize(device)
-        layers, nkv, hd = get_kv_dims(hf)
-        block_bytes = 2 * layers * block_size * nkv * hd * dtype.itemsize
-        free, total = torch.cuda.mem_get_info(device)
-        available = int(total * gpu_memory_utilization) - (total - free)
-        # 预留给 CG 的字节数由调用方按实际捕获足迹传入（见 Engine._probe_cg_footprint）。
-        available -= reserve_bytes
-        num_blocks = max(4, available // block_bytes)
-        # 各卡显存余量不同，all_gather 取最小，保证所有卡容量一致、调度器全局记账。
-        return int(all_gather(torch.tensor([num_blocks], device=device), dim=0).min().item())
 
     @property
     def num_free(self) -> int:
@@ -159,7 +90,6 @@ class KVManager:
         self.blocks.may_append(seq)
 
     def sync_prefix(self, seq: Sequence) -> None:
-        """只把本步新填满的块写入前缀索引；未满块或未跨块边界则直接返回。"""
         if self.prefix_backend == "none" or seq.num_scheduled_tokens <= 0:
             return
         prev = seq.num_cached_tokens - seq.num_scheduled_tokens
@@ -179,7 +109,6 @@ class KVManager:
         published = set(seq.block_table[:n_full]) if n_full > 0 else set()
         for bid in list(seq.block_table):
             keep = bid in published and self.prefix_backend != "none"
-            # hash：释放前摘索引；radix：先降引用，零引用后再摘树叶。
             if not keep and self.prefix_backend == "hash":
                 self.index.invalidate(bid, self.blocks)
             self.blocks.release_to_cached_or_free(bid, keep_cached=keep)

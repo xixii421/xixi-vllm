@@ -1,6 +1,8 @@
-# vllm-v4 — 多机多卡并行（TP + PP）
+# vllm-v4 — 多机多卡并行（DP + TP + PP）
 
-> 以 v3 为基底迁移，实现**张量并行 TP** 与**流水线并行 PP**，补齐 `torchrun` 多机启动与 NCCL 网络配置。
+> 以 v3 为基底迁移，实现**数据并行 DP**、**张量并行 TP** 与**流水线并行 PP**，
+> 控制面按 vLLM V1 的 `EngineCore / Executor / EngineCoreClient` 分层重构，补齐
+> `torchrun` 多机启动与 NCCL 网络配置。
 
 ---
 
@@ -9,6 +11,7 @@
 
 | 维度  | 切分对象              | 通信                      | 布局             |
 | --- | ----------------- | ----------------------- | -------------- |
+| DP  | 请求副本              | ZMQ（门面↔EngineCoreProc） | 跨副本独立引擎       |
 | TP  | head / 权重 / vocab | all-reduce / all-gather | 机内（NVLink 高带宽） |
 | PP  | 隐藏层               | send / recv 中间张量        | 跨机（低带宽需求）      |
 
@@ -84,26 +87,38 @@ torchrun --nnodes=2 --nproc_per_node=2 --node_rank=1 \
 
 ## 架构
 
-沿用 v3 的「控制面 / 数据面 / 计算面」分层，新增一层 `distributed` 基座：
+收敛为「三个核心平面 + 一个分布式基座」，依赖单向无环：
+`data`（纯 CPU）→ `compute`（依赖 data + distributed）→ `control`（依赖 data + compute + distributed）；
+`distributed` 只依赖 torch。
+
+| 文件 | 职责 |
+| --- | --- |
+| `src/control/engine.py` | `Engine`：用户门面（tokenizer / 输入输出 / 流式） |
+| `src/control/core.py` | `EngineCore`：与传输/进程模型无关的纯控制循环（调度→前向→采样→更新） |
+| `src/control/scheduler.py` | `Scheduler`：请求队列、prefill/decode 调度、KV 块分配 |
+| `src/control/client.py` | `EngineCoreClient` 抽象 + `InprocClient`（dp=1） |
+| `src/control/mp_client.py` | `MPClient`：dp>1 副本 spawn + ZMQ 路由 + 输出汇总（含 `run_engine_core_proc`） |
+| `src/control/executor.py` | `Executor` 抽象 + `UniprocExecutor` / `MultiprocExecutor` + `create_executor` |
+| `src/compute/worker.py` | 单 rank 运行时：`init_environment / initialize / execute_model / read_samples` |
+| `src/compute/model_runner.py` | `ModelRunner`：组装 Batch、驱动模型、采样 |
+| `src/compute/kv_pool.py` | `KVPool`：Worker 侧 GPU KV 张量 + `get_kv_dims` / `auto_num_blocks` |
+| `src/compute/batch.py` | `Batch`：常驻 GPU 输入缓冲（prefill / decode / CUDA Graph 共用） |
+| `src/compute/kv_ops.py` | Triton `store_kvcache` 内核 |
+| `src/data/kv.py` | `KVManager`：driver 侧纯逻辑 KV 账本（块表 + 前缀索引，不占 GPU） |
+| `src/data/sequence.py` / `batch.py` | `Sequence` 与 wire 结构（`ScheduledBatch / SchedulerOutput / EngineCoreOutput`） |
+| `src/distributed/parallel_state.py` | `Group`（NCCL+Gloo 双组）、`WORLD/TP/PP`、rank 映射、`set_nccl_env` |
+| `src/distributed/communication_op.py` | `all_gather/all_reduce/reduce_scatter`、TP 封装、PP `send/recv_tensors` |
+| `src/distributed/utils.py` | `divide / get_pp_indices / set_pp_layer_ranges / IntermediateTensors / PPMissingLayer` |
+| `src/distributed/control_channel.py` | 控制面 Gloo：广播调度、回收采样 counts + token ids |
 
 
-| 文件                                     | 职责                                                                       |
-| -------------------------------------- | ------------------------------------------------------------------------ |
-| `src/distributed/parallel_state.py`    | `Group`（NCCL+Gloo 双组）、`WORLD/TP/PP`、rank 映射、`set_nccl_env`               |
-| `src/distributed/communication_op.py`  | `all_gather/all_reduce/reduce_scatter`、TP 封装、PP `send/recv_tensor_dict`  |
-| `src/distributed/utils.py`             | `divide / get_pp_indices / set_pp_layer_ranges / IntermediateTensors / PPMissingLayer` |
-| `src/compute/layers/linear.py`         | `Column/Row/QKV/MergedColumnParallelLinear`（TP 分片）                       |
-| `src/compute/layers/vocab_parallel.py` | `VocabParallelEmbedding` / `ParallelLMHead`                              |
-| `src/compute/models/qwen3.py`          | TP 分片层 + PP `make_layers`/`PPMissingLayer`/`IntermediateTensors`         |
-| `src/compute/worker.py`                | 单 rank 的 `init_environment / execute_model / destroy`                    |
-| `src/compute/executor.py`              | `ModelExecutor`(单卡) / `MultiWorkerClient`(单机多卡) / `TorchrunExecutor`(多机) |
-| `src/control/engine.py`                | 调度器只跑在主进程；通过 executor 驱动前向                                               |
-
-
-- **单机多卡**：`MultiWorkerClient` 用 `multiprocessing` 每卡一 worker，`mp.Queue` 传
-`ScheduledBatch`，只收 last-PP tp0 的采样结果。
-- **多机**：`run_torchrun.py` 交给 `torchrun` 拉起，控制面（调度广播 + 采样回收）走
-gloo，计算面（TP/PP 集合通信）走 NCCL。
+- **控制面 = vLLM V1 形状**：`Engine`（门面）→ `EngineCoreClient` → `EngineCore`（纯循环）
+  → `Executor`（`collective_rpc` 广播到各 worker）。
+- **DP**：每个 `dp_size` 副本一个 `EngineCoreProc` 进程，各自持有一份独立引擎并发前向，
+  门面通过 ZMQ `PUSH/PULL` 做 round-robin 路由与输出汇总（对齐 vLLM `MPClient`）。
+- **TP×PP**：每副本内每卡一进程、rank0 兼 driver；单机 `run.py --tp/--pp` spawn 子进程，
+  多机 `run_torchrun.py` 由 torchrun 拉起。控制面走 Gloo `ControlChannel`，计算面走 NCCL。
+- **PP 是同步切层**，不是 1F1B 流水线。要装更大模型继续同步 PP + 不均分；要多卡吞吐用 DP。
 
 ---
 
@@ -117,6 +132,9 @@ $PY test/test_parallel.py --tp 1 --pp 1
 $PY test/test_parallel.py --tp 2 --pp 1
 $PY test/test_parallel.py --tp 1 --pp 2
 $PY test/test_parallel.py --tp 2 --pp 2   # 需 4 张卡
+
+# 数据并行（dp_size 个独立引擎副本并发，需 >= dp_size 张卡）
+$PY test/test_dp.py --dp 2 --n-reqs 4
 ```
 
 `test_parallel.py` 以 **fp32 的 HF 参考输出**为 golden 断言逐 token 一致（而非 bf16

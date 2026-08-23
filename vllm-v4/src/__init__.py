@@ -1,4 +1,4 @@
-"""vllm-v3 public API: ``from src import Engine, EngineConfig, SamplingParams``."""
+"""vllm-v4 public API: ``from src import Engine, EngineConfig, SamplingParams``."""
 
 from __future__ import annotations
 

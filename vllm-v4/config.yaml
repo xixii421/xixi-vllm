@@ -38,6 +38,7 @@ num_kvcache_blocks: 0    # 0=自动计算
 # --- 并行（多机多卡）---
 tp_size: 1   # 张量并行度：机内 NVLink，切 head / 切权重
 pp_size: 1   # 流水线并行度：跨机低带宽，切层
+dp_size: 1   # 数据并行副本数：多卡吞吐优先起独立引擎副本（每副本 tp*pp 张卡）
 pp_layer_counts: null  # 不均分 PP 每 stage 层数（如 [12,28] 适配异卡显存）；null=等分
 device_ids: null  # 每进程可见 GPU 列表（如 [1,0]）；null=按 local_rank 自动映射
 nccl_port: 29500   # 单机 spawn 时的 NCCL rendezvous 端口

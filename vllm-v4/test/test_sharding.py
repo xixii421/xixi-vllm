@@ -91,9 +91,8 @@ def test_row_parallel() -> bool:
     layer.weight_loader(layer.weight, w)
 
     ref = torch.nn.functional.linear(x, w)
-    per = in_size // TP
-    x_local = x[:, _rank() * per : (_rank() + 1) * per]
-    got = layer(x_local)
+    # input_is_parallel=False：forward 内 scatter 全量输入。
+    got = layer(x)
     return _check("RowParallelLinear", torch.allclose(got, ref, atol=1e-10))
 
 

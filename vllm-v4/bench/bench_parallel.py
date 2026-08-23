@@ -1,19 +1,25 @@
-"""v4 并行性能对比：单卡 vs TP=2 vs PP=2（greedy decode，enforce_eager）。
+"""v4 并行性能对比：单卡 vs TP=2 vs PP=2（greedy decode）。
 
-统一 enforce_eager=True / torch_compile=False，隔离 TP/PP 通信开销：
+指标：
 - 单请求 TTFT（prompt=256）
 - 单请求 decode tok/s
 - batch=8 聚合吞吐 tok/s
 
+开关：--cg（decode CUDA Graph）、--compile（prefill torch.compile）。
+大模型支持：--model、--device-ids、--pp-layer-counts、--num-kvcache-blocks。
+
 用法（在 vllm-v4/ 下）:
     ../.venv2/bin/python bench/bench_parallel.py --tp 1 --pp 1 --tag "tp1pp1"
-    ../.venv2/bin/python bench/bench_parallel.py --tp 2 --pp 1 --tag "tp2pp1"
-    ../.venv2/bin/python bench/bench_parallel.py --tp 1 --pp 2 --tag "tp1pp2"
+    ../.venv2/bin/python bench/bench_parallel.py --model ~/shared/models/Qwen3-8B --tp 1 --pp 1 --device-ids 1 --cg --tag "8b-tp1-cg"
+    ../.venv2/bin/python bench/bench_parallel.py --model ~/shared/models/Qwen3-14B --tp 1 --pp 2 --pp-layer-counts 12,28 --tag "14b-pp2"
+
+结果同时写入 bench/out/bench_parallel.txt（人类可读）与 bench/out/bench.jsonl（结构化，供绘图）。
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -28,6 +34,7 @@ from src import Engine, EngineConfig, SamplingParams  # noqa: E402
 
 MODEL = str(Path.home() / "huggingface" / "Qwen3-0.6B")
 OUT = Path(__file__).resolve().parent / "out"
+JSONL = OUT / "bench.jsonl"
 PROMPT_LEN = 256
 MAX_TOKENS = 128
 
@@ -37,8 +44,22 @@ def dummy_ids(n: int, salt: int = 0) -> list[int]:
     return [((i * 7919 + 10007 + salt * 97) % 150000) + 100 for i in range(n)]
 
 
+def _mode(enforce_eager: bool, torch_compile: bool) -> str:
+    if torch_compile:
+        return "cg+compile" if not enforce_eager else "compile"
+    return "cg" if not enforce_eager else "eager"
+
+
 def make_engine(
-    tp: int, pp: int, model: str = MODEL, *, enforce_eager: bool = True, torch_compile: bool = False
+    tp: int,
+    pp: int,
+    model: str = MODEL,
+    *,
+    enforce_eager: bool = True,
+    torch_compile: bool = False,
+    device_ids: list[int] | None = None,
+    pp_layer_counts: list[int] | None = None,
+    num_kvcache_blocks: int = 64,
 ) -> Engine:
     return Engine(
         EngineConfig(
@@ -53,9 +74,17 @@ def make_engine(
             max_num_batched_tokens=4096,
             prefix_backend="none",
             gpu_memory_utilization=0.6,
-            num_kvcache_blocks=64,
+            num_kvcache_blocks=num_kvcache_blocks,
+            device_ids=device_ids,
+            pp_layer_counts=pp_layer_counts,
         )
     )
+
+
+def _write_jsonl(record: dict) -> None:
+    OUT.mkdir(parents=True, exist_ok=True)
+    with JSONL.open("a") as f:
+        f.write(json.dumps(record) + "\n")
 
 
 def run(
@@ -66,9 +95,19 @@ def run(
     *,
     enforce_eager: bool = True,
     torch_compile: bool = False,
+    device_ids: list[int] | None = None,
+    pp_layer_counts: list[int] | None = None,
+    num_kvcache_blocks: int = 64,
 ) -> None:
     engine = make_engine(
-        tp, pp, model, enforce_eager=enforce_eager, torch_compile=torch_compile
+        tp,
+        pp,
+        model,
+        enforce_eager=enforce_eager,
+        torch_compile=torch_compile,
+        device_ids=device_ids,
+        pp_layer_counts=pp_layer_counts,
+        num_kvcache_blocks=num_kvcache_blocks,
     )
     rows: list[str] = []
 
@@ -116,7 +155,8 @@ def run(
     torch.cuda.synchronize()
     wall = time.perf_counter() - t0
     n = sum(s.num_completion_tokens for s in seqs)
-    rows.append(f"{tag} | {b} | - | {n / wall:.1f}")
+    batch_tps = n / wall
+    rows.append(f"{tag} | {b} | - | {batch_tps:.1f}")
 
     header = "config | batch | TTFT (ms) | decode tok/s"
     OUT.mkdir(parents=True, exist_ok=True)
@@ -129,6 +169,19 @@ def run(
             f.write(r + "\n")
             print(r)
     print(f"→ {path}")
+
+    _write_jsonl(
+        {
+            "engine": "v4",
+            "model": Path(model).name,
+            "tp": tp,
+            "pp": pp,
+            "mode": _mode(enforce_eager, torch_compile),
+            "ttft_ms": round(ttft * 1000, 2),
+            "decode_tps": round(decode_tps, 1),
+            "batch_tps": round(batch_tps, 1),
+        }
+    )
     engine.destroy()
 
 
@@ -148,7 +201,18 @@ def main() -> None:
         action="store_true",
         help="启用 prefill torch.compile",
     )
+    p.add_argument("--device-ids", type=str, default=None, help="逗号分隔设备映射，如 1 或 0,1")
+    p.add_argument("--pp-layer-counts", type=str, default=None, help="不均分 PP 层数，如 12,28")
+    p.add_argument("--num-kvcache-blocks", type=int, default=64)
     args = p.parse_args()
+
+    device_ids = None
+    if args.device_ids is not None:
+        device_ids = [int(x) for x in args.device_ids.split(",")]
+    pp_layer_counts = None
+    if args.pp_layer_counts is not None:
+        pp_layer_counts = [int(x) for x in args.pp_layer_counts.split(",")]
+
     run(
         args.tp,
         args.pp,
@@ -156,6 +220,9 @@ def main() -> None:
         str(Path(args.model).expanduser()),
         enforce_eager=not args.cg,
         torch_compile=args.compile,
+        device_ids=device_ids,
+        pp_layer_counts=pp_layer_counts,
+        num_kvcache_blocks=args.num_kvcache_blocks,
     )
 
 

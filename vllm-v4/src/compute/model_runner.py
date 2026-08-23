@@ -3,15 +3,17 @@ from __future__ import annotations
 import torch
 
 from ..config import EngineConfig
-from ..data import Batch, KVManager, SchedulerOutput, SeqSchedule
+from ..data import SchedulerOutput, SeqSchedule
 from ..distributed import (
     IntermediateTensors,
     get_pp_group,
     get_tp_group,
-    recv_tensor,
-    send_tensor,
+    recv_tensors,
+    send_tensors,
 )
+from .batch import Batch
 from .cuda_graph import CUDAGraphRunner
+from .kv_pool import KVPool
 from .layers.attention import AttnInputs, AttnMetadata, attention_context
 from .sampler import Sampler
 
@@ -20,7 +22,7 @@ class ModelRunner:
     def __init__(
         self,
         model,
-        kv: KVManager,
+        kv: KVPool,
         sampler: Sampler,
         *,
         config: EngineConfig,
@@ -39,6 +41,7 @@ class ModelRunner:
 
         pp = get_pp_group()
         tp = get_tp_group()
+        self._pp_group = pp
         self.is_first_pp = pp.is_first_rank
         self.is_last_pp = pp.is_last_rank
         # 只有 last PP stage 的 tp rank 0 采样并回报，避免各 tp rank 随机采样不一致。
@@ -88,44 +91,36 @@ class ModelRunner:
     # ------------------------------------------------------------------ #
 
     def _make_pp_buffer(self, n: int) -> IntermediateTensors:
+        # 接收 buffer：recv 会整体覆盖，torch.empty 省去无用的 memset。
         return IntermediateTensors(
-            hidden_states=torch.zeros(
+            hidden_states=torch.empty(
                 n, self.hidden_size, dtype=self.dtype, device=self.device
             ),
-            residual=torch.zeros(
+            residual=torch.empty(
                 n, self.hidden_size, dtype=self.dtype, device=self.device
             ),
         )
 
     def _pp_dst(self) -> int:
-        return (get_pp_group().group_rank + 1) % get_pp_group().size
+        return self._pp_group.next_group_rank
 
     def _pp_src(self) -> int:
-        return (get_pp_group().group_rank - 1) % get_pp_group().size
+        return self._pp_group.prev_group_rank
 
     def _send_intermediate(self, out: IntermediateTensors) -> None:
-        group = get_pp_group()
-        send_tensor(out["hidden_states"], self._pp_dst(), group)
-        send_tensor(out["residual"], self._pp_dst(), group)
-
-    def _recv_intermediate(self, n: int) -> IntermediateTensors:
-        """eager 路径：接收中间张量到新建张量（形状随 token 数变化）。"""
-        group = get_pp_group()
-        buf = self._make_pp_buffer(n)
-        recv_tensor(buf["hidden_states"], self._pp_src(), group)
-        recv_tensor(buf["residual"], self._pp_src(), group)
-        return buf
-
-    def _recv_intermediate_static(self, bs: int) -> IntermediateTensors:
-        """CG 路径：接收进静态 buffer 的切片（固定地址供图重放）。"""
-        group = get_pp_group()
-        buf = self._pp_recv
-        recv_tensor(buf["hidden_states"][:bs], self._pp_src(), group)
-        recv_tensor(buf["residual"][:bs], self._pp_src(), group)
-        return IntermediateTensors(
-            hidden_states=buf["hidden_states"][:bs],
-            residual=buf["residual"][:bs],
+        send_tensors(
+            (out["hidden_states"], out["residual"]),
+            self._pp_dst(),
+            self._pp_group,
         )
+
+    def _recv_intermediate(self, n: int, *, static: bool = False) -> IntermediateTensors:
+        """接收中间张量：static=True 时进静态 buffer 切片（CG 固定地址），否则新建张量。"""
+        buf = self._pp_recv if static else self._make_pp_buffer(n)
+        h = buf["hidden_states"][:n]
+        r = buf["residual"][:n]
+        recv_tensors((h, r), self._pp_src(), self._pp_group)
+        return IntermediateTensors(hidden_states=h, residual=r)
 
     # ------------------------------------------------------------------ #
     # 一步执行
@@ -162,7 +157,7 @@ class ModelRunner:
 
     def _decode_body(self, bs: int):
         """decode 图体：recv → model → send，末 stage 写静态 out buffer。"""
-        it = self._recv_intermediate_static(bs) if not self.is_first_pp else None
+        it = self._recv_intermediate(bs, static=True) if not self.is_first_pp else None
         with attention_context(self._meta):
             out = self.model(
                 self.batch.input_ids[:bs],
@@ -201,16 +196,7 @@ class ModelRunner:
                 return None
 
         # compute_logits 含 all-gather，所有 tp rank 都必须调用完成集合通信。
-        # all_greedy 走 argmax 快路径：只聚合局部最大/索引，跳过全量 logits 通信。
-        if self.batch.all_greedy:
-            ids = self.model.argmax(hidden)
-            if not self.is_driver:
-                return None
-            return ids
-        logits = self.model.compute_logits(hidden)
-        if not self.is_driver:
-            return None
-        return self._sample(bs, logits)
+        return self._sample_logits(hidden, bs)
 
     # ------------------------------------------------------------------ #
     # prefill
@@ -270,20 +256,27 @@ class ModelRunner:
                 return None
             return torch.zeros(bs, dtype=torch.int64, device=self.device)
         last = self.batch.cu_seqlens_q[1 : bs + 1] - 1
-        # 与 decode 一致：all_greedy 走 argmax 快路径。
-        if self.batch.all_greedy:
-            ids = self.model.argmax(hidden[last])
-            if not self.is_driver:
-                return None
-            return ids
-        logits = self.model.compute_logits(hidden[last])
-        if not self.is_driver:
-            return None
-        return self._sample(bs, logits)
+        return self._sample_logits(hidden[last], bs)
 
     # ------------------------------------------------------------------ #
     # 采样
     # ------------------------------------------------------------------ #
+
+    def _sample_logits(self, hidden: torch.Tensor, bs: int) -> torch.Tensor | None:
+        """末 stage 采样：all_greedy 走 argmax 快路径（只聚合局部 max/索引）。
+
+        compute_logits 含 all-gather，所有 tp rank 都必须调用以完成集合通信，
+        故 is_driver 判断在其之后；非 driver 返回 None。
+        """
+        if self.batch.all_greedy:
+            ids = self.model.argmax(hidden)
+            if not self.is_driver:
+                return None
+            return ids
+        logits = self.model.compute_logits(hidden)
+        if not self.is_driver:
+            return None
+        return self._sample(bs, logits)
 
     def _sample(self, bs: int, logits: torch.Tensor) -> torch.Tensor:
         return self.sampler(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from typing import Any, Callable
 
 import torch
@@ -37,10 +38,7 @@ class CUDAGraphRunner:
         return self.outputs[pbs], pbs
 
     def _pad_bs(self, bs: int) -> int:
-        for b in self.bs_list:
-            if b >= bs:
-                return b
-        return bs
+        return self.bs_list[bisect_left(self.bs_list, bs)]
 
     def destroy(self) -> None:
         self.graphs.clear()

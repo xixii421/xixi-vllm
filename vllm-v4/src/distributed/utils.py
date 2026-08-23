@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import torch
 
-# 不均分 PP 时各 rank 的 (start_layer, end_layer)。由 worker 在 init_environment
-# 里按 config.pp_layer_counts 写入；None 时回退到等分。放在模块级而非 parallel_state，
-# 避免循环 import，且 get_pp_indices 是本模块纯函数、便于单测。
 _PP_LAYER_RANGES: list[tuple[int, int]] | None = None
 
 

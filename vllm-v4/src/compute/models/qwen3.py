@@ -26,8 +26,8 @@ from ...distributed import (
 
 
 def _rope_theta(config: Qwen3Config) -> float:
-    """读取 RoPE base：优先 ``rope_parameters``（transformers >= 5.x 的新字段），
-    兼容旧版顶层 ``rope_theta`` 字段，兜底 Qwen3 官方默认 1e6。
+    """读取 RoPE base：优先 rope_parameters（transformers >= 5.x 的新字段），
+    兼容旧版顶层 rope_theta 字段，兜底 Qwen3 官方默认 1e6。
     """
     rp = getattr(config, "rope_parameters", None)
     if isinstance(rp, dict) and rp.get("rope_theta") is not None:
@@ -36,7 +36,7 @@ def _rope_theta(config: Qwen3Config) -> float:
 
 
 def _parse_layer_idx(name: str) -> int | None:
-    """从 HF 权重名解析全局层下标，如 ``model.layers.15.self_attn...`` -> 15。"""
+    """从 HF 权重名解析全局层下标，如 model.layers.15.self_attn... -> 15。"""
     prefix = "model.layers."
     if not name.startswith(prefix):
         return None
@@ -55,7 +55,10 @@ class Qwen3MLP(nn.Module):
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size, [intermediate_size, intermediate_size], bias=False
         )
-        self.down_proj = RowParallelLinear(intermediate_size, hidden_size, bias=False)
+        # gate_up 列并行已切分 intermediate，down 输入已是分片，不再 scatter。
+        self.down_proj = RowParallelLinear(
+            intermediate_size, hidden_size, bias=False, input_is_parallel=True
+        )
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
@@ -88,8 +91,12 @@ class Qwen3Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
 
         # attention 输出已按 head 切分（每 rank 只算自己 head），输入维不再二次切分。
+        # in_size 传全量 q 维 = 总头数 × head_dim（Qwen3 的 head_dim 可能 ≠ hidden/heads），
+        # RowParallelLinear 内部按 tp 切分权重列。
         self.o_proj = RowParallelLinear(
-            self.num_heads * self.head_dim, hidden_size, input_is_parallel=True
+            self.qkv_proj.num_heads_total * self.head_dim,
+            hidden_size,
+            input_is_parallel=True,
         )
         self.rotary_emb = RotaryEmbedding(
             self.head_dim, self.head_dim, max_position, rope_theta

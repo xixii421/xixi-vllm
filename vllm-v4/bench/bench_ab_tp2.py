@@ -60,25 +60,11 @@ def _load_config(args) -> "EngineConfig":
     )
 
 
-def _worker_loop(worker) -> None:
-    import torch.distributed as dist
-
-    while True:
-        sched_list = [None]
-        dist.broadcast_object_list(sched_list, src=0)
-        sched = sched_list[0]
-        if sched is None:
-            break
-        result = worker.execute_model(sched)
-        sample = result if result is not None else ([], [])
-        dist.gather_object(sample, None, dst=0)
-
-
 def _run_driver(config, worker, args) -> None:
     from src import Engine, SamplingParams  # noqa: E402
-    from src.compute.executor import TorchrunExecutor  # noqa: E402
+    from src.control.executor import MultiprocExecutor  # noqa: E402
 
-    executor = TorchrunExecutor(config, worker.device, worker.dtype, worker)
+    executor = MultiprocExecutor(config, worker.device, worker.dtype, worker)
     engine = Engine(config, executor=executor)
     try:
         # 预热（compile + CG 录图不计时）
@@ -124,6 +110,7 @@ def main() -> None:
         Qwen3ForCausalLM.argmax = lambda self, h: self.compute_logits(h).argmax(-1)
 
     from src.compute.worker import Worker  # noqa: E402
+    from src.control.executor import worker_loop  # noqa: E402
     from src.distributed import set_nccl_env  # noqa: E402
 
     rank = int(os.environ["RANK"])
@@ -139,7 +126,7 @@ def main() -> None:
         if rank == 0:
             _run_driver(config, worker, args)
         else:
-            _worker_loop(worker)
+            worker_loop(worker)
     finally:
         worker.destroy_environment()
 

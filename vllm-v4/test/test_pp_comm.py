@@ -2,8 +2,8 @@
 
 用法：python test/test_pp_comm.py
 
-验证 send_tensor_dict / recv_tensor_dict 的 send-allgather 优化：
-first PP stage 的每个 tp rank 只发自己切片，last stage 经 tp all-gather 还原完整张量。
+验证生产路径 send_tensors / recv_tensors：相邻 PP stage 按约定顺序
+收发 hidden_states 与 residual，接收端写入预分配 buffer。
 """
 
 from __future__ import annotations
@@ -20,15 +20,13 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from src.distributed import (  # noqa: E402
-    IntermediateTensors,
     destroy_distributed_environment,
     destroy_model_parallel,
     get_pp_group,
-    get_tp_group,
     init_distributed_environment,
     initialize_model_parallel,
-    recv_tensor_dict,
-    send_tensor_dict,
+    recv_tensors,
+    send_tensors,
 )
 
 TP, PP = 2, 2
@@ -45,26 +43,21 @@ def _worker(rank: int, q: mp.Queue) -> None:
     initialize_model_parallel(TP, PP, tp_rank=rank % TP, pp_rank=rank // TP)
     try:
         pp = get_pp_group()
-        # 所有 rank 用同一种子生成相同张量，last stage 据此校验接收结果。
         g = torch.Generator().manual_seed(1234)
         h = torch.randn(2, 4, dtype=torch.float64, generator=g)
         r = torch.randn(2, 4, dtype=torch.float64, generator=g)
 
         if pp.is_first_rank:
-            send_tensor_dict(
-                IntermediateTensors(hidden_states=h, residual=r),
-                group=pp,
-                all_gather_group=get_tp_group(),
-            )
+            send_tensors((h, r), (pp.group_rank + 1) % pp.size, pp)
             q.put(True)
         elif pp.is_last_rank:
-            recv = recv_tensor_dict(group=pp, all_gather_group=get_tp_group())
-            assert recv is not None
-            ok = torch.allclose(recv["hidden_states"], h, atol=1e-10)
-            ok &= torch.allclose(recv["residual"], r, atol=1e-10)
+            rh, rr = torch.empty_like(h), torch.empty_like(r)
+            recv_tensors((rh, rr), (pp.group_rank - 1) % pp.size, pp)
+            ok = torch.allclose(rh, h, atol=1e-10)
+            ok &= torch.allclose(rr, r, atol=1e-10)
             print(f"  [rank {rank} recv] {'PASS' if ok else 'FAIL'}")
             q.put(bool(ok))
-        else:  # pp 中段（pp>2 时）透传；此处 pp=2 不触发
+        else:
             q.put(True)
     except Exception:  # noqa: BLE001
         traceback.print_exc()

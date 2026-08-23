@@ -55,6 +55,7 @@ DEFAULTS = {
     "num_kvcache_blocks": 0,
     "tp_size": 1,
     "pp_size": 1,
+    "dp_size": 1,
     "pp_layer_counts": None,
     "nccl_port": 29500,
     "master_addr": "127.0.0.1",
@@ -103,6 +104,7 @@ def _make_engine(cfg: dict) -> Engine:
             num_kvcache_blocks=cfg["num_kvcache_blocks"],
             tp_size=cfg["tp_size"],
             pp_size=cfg["pp_size"],
+            dp_size=cfg["dp_size"],
             pp_layer_counts=cfg["pp_layer_counts"],
             nccl_port=cfg["nccl_port"],
             master_addr=cfg["master_addr"],
@@ -117,7 +119,7 @@ def _sync() -> None:
 
 
 def _drain(engine: Engine) -> None:
-    while not engine.scheduler.is_finished():
+    while engine.has_unfinished():
         engine.step()
 
 
@@ -231,7 +233,7 @@ def run_batch(cfg: dict) -> None:
     _sync()
     t0 = time.perf_counter()
     t_first = None
-    while not engine.scheduler.is_finished():
+    while engine.has_unfinished():
         engine.step()
         if t_first is None and any(s.num_completion_tokens > 0 for s in seqs):
             _sync()
@@ -292,6 +294,7 @@ def main() -> None:
     p.add_argument("--max-num-seqs", type=int, default=None)
     p.add_argument("--tp", type=int, default=None, help="张量并行度（机内多卡）")
     p.add_argument("--pp", type=int, default=None, help="流水线并行度（跨机/多卡）")
+    p.add_argument("--dp", type=int, default=None, help="数据并行副本数（多卡吞吐）")
     p.add_argument(
         "--pp-layer-counts",
         type=str,
@@ -328,6 +331,8 @@ def main() -> None:
         cfg["tp_size"] = args.tp
     if args.pp is not None:
         cfg["pp_size"] = args.pp
+    if args.dp is not None:
+        cfg["dp_size"] = args.dp
     if args.pp_layer_counts is not None:
         cfg["pp_layer_counts"] = [int(x) for x in args.pp_layer_counts.split(",")]
     if args.cg:

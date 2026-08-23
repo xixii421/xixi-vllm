@@ -1,13 +1,13 @@
-"""Data plane: KV cache, sequences, batch buffers, prefix cache."""
+"""Data plane: sequences, KV logical ledger, and wire structures (pure CPU)."""
 
 from __future__ import annotations
 
-from .batch import Batch, ScheduledBatch, SchedulerOutput, SeqSchedule
-from .manager import KVManager
+from .batch import EngineCoreOutput, ScheduledBatch, SchedulerOutput, SeqSchedule
+from .kv import KVManager
 from .sequence import Sequence, SequenceStatus
 
 __all__ = [
-    "Batch",
+    "EngineCoreOutput",
     "ScheduledBatch",
     "SchedulerOutput",
     "SeqSchedule",

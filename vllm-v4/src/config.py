@@ -34,7 +34,8 @@ class EngineConfig:
 
     #  并行 
     tp_size: int = 1  # 张量并行度（机内 NVLink）
-    pp_size: int = 1  # 流水线并行度（跨机低带宽）
+    pp_size: int = 1  # 流水线并行度（跨机低带宽）；本引擎是同步切层，不是 1F1B
+    dp_size: int = 1  # 数据并行副本数。多卡吞吐优先起独立 Engine 副本，而不是加深 PP。
     nccl_port: int = 29500  # NCCL 单机 rendezvous 端口
     master_addr: str = "127.0.0.1"  # 多机 NCCL rendezvous 主节点地址
     master_port: int = 29500  # 多机 NCCL rendezvous 端口
@@ -58,11 +59,17 @@ class EngineConfig:
             raise ValueError(
                 f"prefix_backend must be none|hash|radix, got {self.prefix_backend!r}"
             )
+        if self.dp_size < 1:
+            raise ValueError("dp_size must be >= 1")
         self.hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
         self.context_len = min(
             self.context_len,
             getattr(self.hf_config, "max_position_embeddings", self.context_len),
         )
+
+    @property
+    def world_size(self) -> int:
+        return self.tp_size * self.pp_size * self.dp_size
 
     @property
     def block_size(self) -> int:

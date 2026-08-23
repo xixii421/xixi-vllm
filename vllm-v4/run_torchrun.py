@@ -22,7 +22,6 @@ import sys
 from pathlib import Path
 
 import torch
-import torch.distributed as dist
 import yaml
 
 ROOT = Path(__file__).resolve().parent
@@ -30,9 +29,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src import Engine, EngineConfig, SamplingParams  # noqa: E402
-from src.compute.executor import TorchrunExecutor  # noqa: E402
 from src.compute.worker import Worker  # noqa: E402
 from src.distributed import set_nccl_env  # noqa: E402
+from src.control.executor import MultiprocExecutor, worker_loop  # noqa: E402
 
 DEFAULTS = {
     "model": "Qwen3-0.6B",
@@ -109,22 +108,9 @@ def _load_config(args: argparse.Namespace) -> EngineConfig:
     )
 
 
-def _worker_loop(worker: Worker) -> None:
-    """非 rank0 进程：反复接收调度、执行一步、回报采样。"""
-    while True:
-        sched_list = [None]
-        dist.broadcast_object_list(sched_list, src=0)
-        sched = sched_list[0]
-        if sched is None:  # rank0 发来的关停信号
-            break
-        result = worker.execute_model(sched)
-        sample = result if result is not None else ([], [])
-        dist.gather_object(sample, None, dst=0)
-
-
 def _run_driver(config: EngineConfig, worker: Worker, args: argparse.Namespace) -> None:
     """rank0：调度器 + 广播/gather 控制面 + 输出。"""
-    executor = TorchrunExecutor(config, torch.device("cuda:0"), worker.dtype, worker)
+    executor = MultiprocExecutor(config, torch.device("cuda:0"), worker.dtype, worker)
     engine = Engine(config, executor=executor)
     try:
         prompt = args.prompt or "Hello, my name is"
@@ -205,7 +191,7 @@ def main() -> None:
         if rank == 0:
             _run_driver(config, worker, args)
         else:
-            _worker_loop(worker)
+            worker_loop(worker)
     finally:
         worker.destroy_environment()
 

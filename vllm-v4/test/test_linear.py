@@ -94,7 +94,7 @@ def _check_rank(rank: int, tp: int) -> None:
     x_row_local = x_row_full[
         :, rank * per_in : (rank + 1) * per_in
     ]
-    out_row = row(x_row_local)
+    out_row = row(x_row_full)
     assert torch.allclose(
         out_row, ref_row, atol=1e-2, rtol=1e-2
     ), f"rank{rank} tp={tp}: Row 不一致"
