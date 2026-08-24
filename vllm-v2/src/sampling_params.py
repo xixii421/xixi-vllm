@@ -1,13 +1,14 @@
+"""Re-export utils.sampling_params."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+import sys
+from pathlib import Path
 
+_ROOT = Path(__file__).resolve().parents[2]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
-@dataclass
-class SamplingParams:
-    temperature: float = 0.0
-    top_p: float | None = None
-    top_k: int | None = None
-    min_p: float | None = None
-    max_tokens: int = 128
-    ignore_eos: bool = False
+from utils._loader import export_module  # noqa: E402
+
+export_module(globals(), Path(__file__), "sampling_params", depth=2)

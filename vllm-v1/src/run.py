@@ -22,6 +22,7 @@ from model_hub import (
     QWEN3_REGISTRY,
     download_models,
     gpu_memory_gb,
+    resolve_model_path,
     select_models_for_vram,
 )
 
@@ -57,13 +58,8 @@ def load_config(path: Path) -> dict:
 # 核心逻辑
 # ---------------------------------------------------------------------------
 
-def _resolve_model(name: str) -> Path:
-    """解析模型名字，得到模型本地真实路径"""
-    path = Path(name).expanduser() # 本地真实路径
-    return path if path.exists() else DEFAULT_CACHE_DIR / name
-
 def run(cfg: dict) -> None:
-    model_path = _resolve_model(cfg["model"])
+    model_path = resolve_model_path(cfg["model"])
     print(f"Loading {model_path} (prefix={cfg['prefix_backend']}) ...")
     engine = Engine(
         EngineConfig(

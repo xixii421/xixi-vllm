@@ -13,23 +13,17 @@ import sys
 import time
 from pathlib import Path
 
-import yaml
-
-from src.config import EngineConfig
-from src.engine import Engine
-from src.model_hub import (
-    DEFAULT_CACHE_DIR,
-    QWEN3_REGISTRY,
-    download_models,
-    gpu_memory_gb,
-    select_models_for_vram,
-)
-
-# ---------------------------------------------------------------------------
-# 配置加载
-# ---------------------------------------------------------------------------
-
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+sys.path.insert(0, str(HERE / "src"))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from utils.run_utils import handle_hub_cli, load_config, merge_cli  # noqa: E402
+
+from config import EngineConfig  # noqa: E402
+from engine import Engine  # noqa: E402
+from model_hub import resolve_model_path  # noqa: E402
 
 DEFAULTS = {
     "model": "Qwen3-0.6B",
@@ -45,27 +39,8 @@ DEFAULTS = {
 }
 
 
-def load_config(path: Path) -> dict:
-    if path.is_file():
-        with open(path, encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-    else:
-        cfg = {}
-    return {k: cfg.get(k, v) for k, v in DEFAULTS.items()}
-
-
-# ---------------------------------------------------------------------------
-# 核心逻辑
-# ---------------------------------------------------------------------------
-
-
-def _resolve_model(name: str) -> Path:
-    path = Path(name).expanduser()
-    return path if path.exists() else DEFAULT_CACHE_DIR / name
-
-
 def run(cfg: dict) -> None:
-    model_path = _resolve_model(cfg["model"])
+    model_path = resolve_model_path(cfg["model"])
     print(f"Loading {model_path} (prefix={cfg['prefix_backend']}) ...")
     engine = Engine(
         EngineConfig(
@@ -95,11 +70,6 @@ def run(cfg: dict) -> None:
     print(f"\n\n{n} tokens in {elapsed:.2f}s ({n / elapsed:.1f} tok/s) | cached={cached}")
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-
 def main() -> None:
     p = argparse.ArgumentParser(description="vllm-v1 KV Cache + 前缀缓存")
     p.add_argument("--config", default=None, help="YAML 配置文件路径")
@@ -115,29 +85,16 @@ def main() -> None:
     p.add_argument("--list", action="store_true")
     args = p.parse_args()
 
-    # 管理命令
-    if args.list:
-        vram = gpu_memory_gb() or 24.0
-        selected = select_models_for_vram(vram_gb=vram)
-        print(f"Cache: {DEFAULT_CACHE_DIR}")
-        print(f"VRAM:  {vram:.1f} GB")
-        print(f"All:   {', '.join(s.local_name for s in QWEN3_REGISTRY)}")
-        print(f"Fit:   {', '.join(s.local_name for s in selected)}")
-        return
-    if args.download:
-        print(f"Downloading to {DEFAULT_CACHE_DIR} ...")
-        download_models()
-        print("Done.")
+    if handle_hub_cli(args):
         return
 
-    # 加载配置并合并 CLI
     config_path = Path(args.config) if args.config else HERE / "config.yaml"
-    cfg = load_config(config_path)
-    for key in ("model", "prompt", "max_new_tokens", "temperature", "top_p", "top_k",
-                "block_size", "prefix_backend"):
-        if (v := getattr(args, key)) is not None:
-            cfg[key] = v
-
+    cfg = load_config(config_path, DEFAULTS)
+    merge_cli(
+        cfg,
+        args,
+        ("model", "prompt", "max_new_tokens", "temperature", "top_p", "top_k", "block_size", "prefix_backend"),
+    )
     run(cfg)
 
 

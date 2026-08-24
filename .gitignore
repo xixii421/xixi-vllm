@@ -10,6 +10,8 @@
 # --- keep git meta / series docs ---
 !.gitignore
 !README.md
+!/utils/
+!/utils/**
 # only the helper under scripts/git/ (not other local scripts/)
 !/scripts/
 /scripts/*

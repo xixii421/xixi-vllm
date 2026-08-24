@@ -1,26 +1,34 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import torch
 from torch import nn
 
+_ROOT = Path(__file__).resolve().parents[3]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
-def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
-    param.data.copy_(loaded_weight)
+from utils.model_loader import (  # noqa: E402
+    default_dtype_context,
+    default_weight_loader,
+)
 
-
-@contextmanager
-def default_dtype_context(dtype: torch.dtype):
-    """Construct modules under a target floating dtype (ullm / vLLM style)."""
-    prev = torch.get_default_dtype()
-    torch.set_default_dtype(dtype)
-    try:
-        yield
-    finally:
-        torch.set_default_dtype(prev)
+__all__ = [
+    "default_dtype_context",
+    "default_weight_loader",
+    "move_module",
+    "load_stacked_weight",
+    "load_plain_or_tied",
+    "finish_tied_embeddings",
+    "assert_weights_loaded",
+    "STACKED_QKV",
+    "STACKED_GATE_UP",
+]
 
 
 STACKED_QKV = (

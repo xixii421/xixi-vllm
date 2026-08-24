@@ -1,4 +1,4 @@
-"""vllm-v3 统一入口 — FlashAttention + CUDA Graph + Continuous Batching。
+"""vllm-v4 统一入口 — FlashAttention + CUDA Graph + Continuous Batching。
 
 用法:
     python run.py                                    # 单条推理（使用 config.yaml）
@@ -12,26 +12,27 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from pathlib import Path
 
-import torch
-import yaml
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from src import Engine, EngineConfig, SamplingParams
-from hub import (
-    DEFAULT_CACHE_DIR,
-    QWEN3_REGISTRY,
-    download_models,
-    gpu_memory_gb,
-    select_models_for_vram,
+from utils.run_utils import (  # noqa: E402
+    cuda_sync,
+    drain_engine,
+    handle_hub_cli,
+    load_config,
+    merge_cli,
+    print_bench_report,
+    warmup_engine,
 )
 
-# ---------------------------------------------------------------------------
-# 配置加载
-# ---------------------------------------------------------------------------
-
-HERE = Path(__file__).resolve().parent
+from src import Engine, EngineConfig, SamplingParams  # noqa: E402
+from model_hub import resolve_model_path  # noqa: E402
 
 DEFAULTS = {
     "model": "Qwen3-0.6B",
@@ -64,27 +65,8 @@ DEFAULTS = {
 }
 
 
-def load_config(path: Path) -> dict:
-    if path.is_file():
-        with open(path, encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-    else:
-        cfg = {}
-    return {k: cfg.get(k, v) for k, v in DEFAULTS.items()}
-
-
-# ---------------------------------------------------------------------------
-# 核心逻辑
-# ---------------------------------------------------------------------------
-
-
-def _resolve_model(name: str) -> Path:
-    path = Path(name).expanduser()
-    return path if path.exists() else DEFAULT_CACHE_DIR / name
-
-
 def _make_engine(cfg: dict) -> Engine:
-    model_path = _resolve_model(cfg["model"])
+    model_path = resolve_model_path(cfg["model"])
     print(f"Loading {model_path} ...")
     return Engine(
         EngineConfig(
@@ -114,64 +96,15 @@ def _make_engine(cfg: dict) -> Engine:
     )
 
 
-def _sync() -> None:
-    torch.cuda.synchronize()
-
-
-def _drain(engine: Engine) -> None:
-    while engine.has_unfinished():
-        engine.step()
-
-
-# reduce-overhead 对同一形状：1) 编译 2) CUDA Graph 录制 3) 重放。
-# 预热必须把前两次付完，计时才是稳态 TTFT。
-_WARMUP_ITERS = 3
-
-
-def _dummy_ids(n: int, salt: int = 0) -> list[int]:
-    """与真实 prompt 等长、每轮内容不同，避免前缀命中把预热/TTFT 短路。"""
-    n = max(1, n)
-    return [((i * 7919 + 10007 + salt * 97) % 100000) + 100 for i in range(n)]
-
-
 def _warmup(engine: Engine, prompt_lens: list[int]) -> float:
-    """把本形状的 compile + 录图跑完，不计入后续 TTFT / Decode / E2E。
-
-    多条 lens 会作为同一批 prefill（对齐 --batch 的合批形状）。
-    不用 reset_kv（会拆 runner 并重新编译）。
-    """
     warm_sp = SamplingParams(temperature=0.0, max_tokens=2, ignore_eos=True)
-    _sync()
-    t0 = time.perf_counter()
-    for it in range(_WARMUP_ITERS):
-        for n in prompt_lens:
-            engine.add_request(_dummy_ids(n, salt=it * 31 + n), warm_sp)
-        _drain(engine)
-    _sync()
-    return time.perf_counter() - t0
-
-
-def _report(
-    ttft_s: float | None,
-    n: int,
-    e2e_s: float,
-    *,
-    decode_s: float | None = None,
-    warmup_s: float | None = None,
-) -> None:
-    """TTFT / Decode 均为预热后的稳态数字；warmup 单独打印。"""
-    print()
-    if warmup_s is not None:
-        print(f"Warmup: {warmup_s:.2f}s  (compile + CUDA Graph capture, excluded)")
-    if ttft_s is not None:
-        print(f"TTFT:   {ttft_s * 1000:.1f} ms  (steady prefill + first token)")
-    n_dec = max(0, n - 1)
-    if decode_s is not None and decode_s > 0 and n_dec > 0:
-        print(f"Decode: {n_dec} tokens in {decode_s:.3f}s ({n_dec / decode_s:.1f} tok/s)")
-    elif n_dec == 0:
-        print("Decode: (no tokens after the first; raise max_new_tokens)")
-    if e2e_s > 0:
-        print(f"E2E:    {n} tokens in {e2e_s:.3f}s ({n / e2e_s:.1f} tok/s)")
+    return warmup_engine(
+        prompt_lens,
+        add_request=engine.add_request,
+        drain=lambda: drain_engine(engine.has_unfinished, engine.step),
+        sync=cuda_sync,
+        sampling_params=warm_sp,
+    )
 
 
 def run_single(cfg: dict) -> None:
@@ -191,22 +124,22 @@ def run_single(cfg: dict) -> None:
     )
     seq = engine.add_request(token_ids, sp)
 
-    _sync()
+    cuda_sync()
     t0 = time.perf_counter()
     t_first = None
     while not seq.is_finished:
         engine.step()
         if t_first is None and seq.num_completion_tokens > 0:
-            _sync()
+            cuda_sync()
             t_first = time.perf_counter()
-    _sync()
+    cuda_sync()
     t_end = time.perf_counter()
 
     completion = seq.token_ids[seq.num_prompt_tokens :]
     text = engine.tokenizer.decode(completion)
     print(f"Prompt: {prompt}")
     print(f"{prompt}{text}")
-    _report(
+    print_bench_report(
         (t_first - t0) if t_first is not None else None,
         len(completion),
         t_end - t0,
@@ -230,15 +163,15 @@ def run_batch(cfg: dict) -> None:
     sp = SamplingParams(temperature=0.0, max_tokens=cfg["max_new_tokens"])
     seqs = [engine.add_request(ids, sp) for ids in encoded]
 
-    _sync()
+    cuda_sync()
     t0 = time.perf_counter()
     t_first = None
     while engine.has_unfinished():
         engine.step()
         if t_first is None and any(s.num_completion_tokens > 0 for s in seqs):
-            _sync()
+            cuda_sync()
             t_first = time.perf_counter()
-    _sync()
+    cuda_sync()
     t_end = time.perf_counter()
 
     n = 0
@@ -246,7 +179,7 @@ def run_batch(cfg: dict) -> None:
         ids = seq.token_ids[seq.num_prompt_tokens :]
         n += len(ids)
         print(f"\n>>> {p}\n{engine.tokenizer.decode(ids)}")
-    _report(
+    print_bench_report(
         (t_first - t0) if t_first is not None else None,
         n,
         t_end - t0,
@@ -256,14 +189,9 @@ def run_batch(cfg: dict) -> None:
     print(f"Batch:  {len(prompts)} reqs, {n} completion tokens")
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="vllm-v3 FlashAttention + CUDA Graph + Continuous Batching"
+        description="vllm-v4 FlashAttention + CUDA Graph + Continuous Batching"
     )
     p.add_argument("--config", default=None, help="YAML 配置文件路径")
     p.add_argument("--model", default=None)
@@ -306,27 +234,16 @@ def main() -> None:
     p.add_argument("--list", action="store_true")
     args = p.parse_args()
 
-    # 管理命令
-    if args.list:
-        vram = gpu_memory_gb() or 24.0
-        selected = select_models_for_vram(vram_gb=vram)
-        print(f"Cache: {DEFAULT_CACHE_DIR}")
-        print(f"VRAM:  {vram:.1f} GB")
-        print(f"All:   {', '.join(s.local_name for s in QWEN3_REGISTRY)}")
-        print(f"Fit:   {', '.join(s.local_name for s in selected)}")
-        return
-    if args.download:
-        print(f"Downloading to {DEFAULT_CACHE_DIR} ...")
-        download_models(list(QWEN3_REGISTRY))
-        print("Done.")
+    if handle_hub_cli(args):
         return
 
     config_path = Path(args.config) if args.config else HERE / "config.yaml"
-    cfg = load_config(config_path)
-    for key in ("model", "prompt", "max_new_tokens", "temperature", "top_p", "top_k",
-                "prefix_backend", "max_num_seqs"):
-        if (v := getattr(args, key)) is not None:
-            cfg[key] = v
+    cfg = load_config(config_path, DEFAULTS)
+    merge_cli(
+        cfg,
+        args,
+        ("model", "prompt", "max_new_tokens", "temperature", "top_p", "top_k", "prefix_backend", "max_num_seqs"),
+    )
     if args.tp is not None:
         cfg["tp_size"] = args.tp
     if args.pp is not None:

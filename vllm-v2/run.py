@@ -9,21 +9,21 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from pathlib import Path
 
-import yaml
-
-from src.config import EngineConfig
-from src.engine import Engine
-from src.model_hub import DEFAULT_CACHE_DIR
-from src.sampling_params import SamplingParams
-
-# ---------------------------------------------------------------------------
-# 配置加载
-# ---------------------------------------------------------------------------
-
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from utils.run_utils import load_config, merge_cli  # noqa: E402
+
+from src.config import EngineConfig  # noqa: E402
+from src.engine import Engine  # noqa: E402
+from src.model_hub import resolve_model_path  # noqa: E402
+from src.sampling_params import SamplingParams  # noqa: E402
 
 DEFAULTS = {
     "model": "Qwen3-0.6B",
@@ -42,27 +42,8 @@ DEFAULTS = {
 }
 
 
-def load_config(path: Path) -> dict:
-    if path.is_file():
-        with open(path, encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-    else:
-        cfg = {}
-    return {k: cfg.get(k, v) for k, v in DEFAULTS.items()}
-
-
-# ---------------------------------------------------------------------------
-# 核心逻辑
-# ---------------------------------------------------------------------------
-
-
-def _resolve_model(name: str) -> Path:
-    path = Path(name).expanduser()
-    return path if path.exists() else DEFAULT_CACHE_DIR / name
-
-
 def run_single(cfg: dict) -> None:
-    model_path = _resolve_model(cfg["model"])
+    model_path = resolve_model_path(cfg["model"])
     print(f"Loading {model_path} (prefix={cfg['prefix_backend']}) ...")
     engine = Engine(
         EngineConfig(
@@ -93,7 +74,7 @@ def run_single(cfg: dict) -> None:
 
 
 def run_batch(cfg: dict) -> None:
-    model_path = _resolve_model(cfg["model"])
+    model_path = resolve_model_path(cfg["model"])
     print(f"Loading {model_path} for continuous batching ...")
     engine = Engine(
         EngineConfig(
@@ -121,11 +102,6 @@ def run_batch(cfg: dict) -> None:
     print(f"\n{len(prompts)} requests, ~{total_tok} toks in {dt:.2f}s")
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-
 def main() -> None:
     p = argparse.ArgumentParser(description="vllm-v2 Continuous Batching")
     p.add_argument("--config", default=None, help="YAML 配置文件路径")
@@ -142,11 +118,12 @@ def main() -> None:
     args = p.parse_args()
 
     config_path = Path(args.config) if args.config else HERE / "config.yaml"
-    cfg = load_config(config_path)
-    for key in ("model", "prompt", "max_new_tokens", "temperature", "top_p", "top_k",
-                "block_size", "prefix_backend", "max_num_seqs"):
-        if (v := getattr(args, key)) is not None:
-            cfg[key] = v
+    cfg = load_config(config_path, DEFAULTS)
+    merge_cli(
+        cfg,
+        args,
+        ("model", "prompt", "max_new_tokens", "temperature", "top_p", "top_k", "block_size", "prefix_backend", "max_num_seqs"),
+    )
 
     if args.batch:
         run_batch(cfg)

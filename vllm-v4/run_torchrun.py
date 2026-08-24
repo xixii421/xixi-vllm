@@ -71,11 +71,9 @@ def _load_config(args: argparse.Namespace) -> EngineConfig:
     if args.compile:
         cfg["torch_compile"] = True
 
-    model = Path(args.model or cfg["model"]).expanduser()
-    if not model.is_dir():
-        from hub import DEFAULT_CACHE_DIR  # noqa: E402
+    from model_hub import resolve_model_path  # noqa: E402
 
-        model = DEFAULT_CACHE_DIR / (args.model or cfg["model"])
+    model = resolve_model_path(args.model or cfg["model"])
 
     pp_layer_counts = cfg["pp_layer_counts"]
     if args.pp_layer_counts is not None:

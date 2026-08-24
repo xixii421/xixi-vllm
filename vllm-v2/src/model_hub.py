@@ -1,13 +1,14 @@
-"""Qwen3 权重缓存路径辅助。"""
+"""Re-export utils.model_hub."""
 
 from __future__ import annotations
 
-import os
+import sys
 from pathlib import Path
 
-# 缓存根目录：优先环境变量，其次退回 ~/huggingface
-DEFAULT_CACHE_DIR = Path(
-    os.environ.get("HF_HOME")
-    or os.environ.get("HUGGINGFACE_HUB_CACHE")
-    or Path.home() / "huggingface"
-)
+_ROOT = Path(__file__).resolve().parents[2]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from utils._loader import export_module  # noqa: E402
+
+export_module(globals(), Path(__file__), "model_hub", depth=2)
