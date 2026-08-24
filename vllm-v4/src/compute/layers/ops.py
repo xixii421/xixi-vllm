@@ -58,7 +58,10 @@ def _rotary_embedding_fake(q, k, positions, cos_sin_cache, head_size):
 
 @torch.library.custom_op("vllm::rmsnorm", mutates_args=())
 def rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-    return _flashinfer_rmsnorm(x, weight, eps, enable_pdl=False)
+    orig = x.shape
+    x2 = x.reshape(-1, weight.shape[0])
+    out = _flashinfer_rmsnorm(x2, weight, eps, enable_pdl=False)
+    return out.view(orig)
 
 
 @rmsnorm.register_fake
