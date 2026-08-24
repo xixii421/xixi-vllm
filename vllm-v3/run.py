@@ -1,4 +1,4 @@
-"""vllm-v3 统一入口 — FlashInfer + CUDA Graph + Continuous Batching。
+"""vllm-v3 统一入口 — FlashAttention + CUDA Graph + Continuous Batching。
 
 用法:
     python run.py                                    # 单条推理（使用 config.yaml）
@@ -180,7 +180,7 @@ def run_batch(cfg: dict) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="vllm-v3 FlashInfer + CUDA Graph + Continuous Batching"
+        description="vllm-v3 FlashAttention + CUDA Graph + Continuous Batching"
     )
     p.add_argument("--config", default=None, help="YAML 配置文件路径")
     p.add_argument("--model", default=None)

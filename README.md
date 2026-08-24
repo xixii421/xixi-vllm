@@ -52,7 +52,8 @@ uv pip install torch==2.13.0 torchvision torchaudio \
 
 # FlashInfer 三合一（零编译）
 uv pip install flashinfer-python flashinfer-cubin \
-    --index-url https://flashinfer.ai/whl
+    --index-url https://flashinfer.ai/whl \
+    --extra-index-url https://pypi.org/simple
 
 # 非必要
 uv pip install flashinfer-jit-cache \
@@ -124,7 +125,7 @@ PYTHONPATH=vllm-v4 python vllm-v4/run.py \
 | [vllm-v0](vllm-v0/README.md) | 最小自回归推理 | 裸模型加载、Naive 逐 token 生成 |
 | [vllm-v1](vllm-v1/README.md) | KV Cache + PagedAttention + 前缀缓存 | KV Cache 复用、PagedAttention 显存管理、Hash/Radix 前缀缓存 |
 | [vllm-v2](vllm-v2/README.md) | Continuous Batching | 动态组批、三面架构（Scheduler/KVManager/ModelRunner）、torch.compile |
-| [vllm-v3](vllm-v3/README.md) | 算子级性能提升 | FlashInfer paged attention、Decode CUDA Graph、Triton RMSNorm、Gumbel-Max 采样 |
+| [vllm-v3](vllm-v3/README.md) | 算子级性能提升 | FlashAttention paged attention、Decode CUDA Graph、`F.rms_norm`、Gumbel-Max 采样 |
 | [vllm-v4](vllm-v4/README.md) | 多模态（Qwen3-VL） | DeepStack、MRoPE、EncoderCache、ViT CUDA Graph、Vision Token 管理 |
 | [vllm-v5](vllm-v5/README.md) | TP、PP、MoE | 文档待完善 |
 | [vllm-v6]()| 若干量化方案 | 计划中 | 

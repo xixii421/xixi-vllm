@@ -1,6 +1,5 @@
-"""生成并行系列文档的两张插图：
-1. three_machines_topology.png  三台机器拓扑对照（docs/服务器测量.md）
-2. collectives.png              集合通信原语示意（docs/04-控制与并行.md）
+"""生成并行系列文档插图：
+1. three_machines_topology.png  三台机器拓扑对照（docs/02-服务器通信测量.md）
 """
 
 from __future__ import annotations
@@ -99,72 +98,5 @@ def draw_topology() -> None:
     print("saved", OUT / "three_machines_topology.png")
 
 
-def draw_collectives() -> None:
-    fig, axes = plt.subplots(2, 2, figsize=(10.4, 8.0), dpi=160)
-    BLUE = "#2b6cb0"
-    RED = "#d14d4d"
-    GRN = "#38a169"
-
-    def nodes(ax, ys, labels):
-        for x, (y, l) in enumerate(zip(ys, labels), start=1):
-            ax.add_patch(mpatches.Circle((x, y), 0.38, fc="#cfe8ff",
-                                         ec=BLUE, lw=1.4, zorder=3))
-            ax.text(x, y, l, ha="center", va="center", fontsize=8, zorder=4)
-
-    def arr(ax, x1, y1, x2, y2, color=GRN, lw=1.6):
-        ax.annotate("", xy=(x2, y2), xytext=(x1, y1),
-                    arrowprops=dict(arrowstyle="-|>", color=color, lw=lw,
-                                    shrinkA=8, shrinkB=8), zorder=2)
-
-    # ---- all-reduce ----
-    ax = axes[0][0]
-    ax.set_title("all-reduce  每卡贡献一段，全部拿到和", fontsize=9.5)
-    nodes(ax, [1, 2, 3], ["A", "B", "C"])
-    for i, y1 in enumerate([1, 2, 3], start=1):
-        for y2 in [1, 2, 3]:
-            if y1 != y2:
-                arr(ax, i, y1, (i + 1) % 4 or 1, y2 if abs(y1 - y2) < 2 else 3)
-    ax.text(2.5, 0.15, "结果 = A+B+C，每个节点都有完整和", ha="center", fontsize=8)
-    ax.set_xlim(0.2, 3.8); ax.set_ylim(0, 3.8); ax.axis("off")
-
-    # ---- all-gather ----
-    ax = axes[0][1]
-    ax.set_title("all-gather  每卡提供一段，拼接后全部拥有", fontsize=9.5)
-    nodes(ax, [1, 2, 3], ["a", "b", "c"])
-    for i, y in enumerate([1, 2, 3], start=1):
-        arr(ax, i, y, i + 0.9, y, color=RED)
-    for x in [2, 3]:
-        pass
-    ax.text(2.5, 0.15, "拼接 [a|b|c]，每卡持完整段", ha="center", fontsize=8)
-    ax.set_xlim(0.2, 3.8); ax.set_ylim(0, 3.8); ax.axis("off")
-
-    # ---- reduce-scatter ----
-    ax = axes[1][0]
-    ax.set_title("reduce-scatter  求和后按段分给各卡", fontsize=9.5)
-    nodes(ax, [1, 2, 3], ["a", "b", "c"])
-    arr(ax, 1, 1, 1, 3, color=BLUE)
-    arr(ax, 2, 2, 2, 3, color=BLUE)
-    arr(ax, 1, 1, 1, 1, color=BLUE)
-    ax.text(2.5, 0.15, "卡0 得 Σa，卡1 得 Σb，卡2 得 Σc", ha="center", fontsize=8)
-    ax.set_xlim(0.2, 3.8); ax.set_ylim(0, 3.8); ax.axis("off")
-
-    # ---- broadcast ----
-    ax = axes[1][1]
-    ax.set_title("broadcast  一张卡发给组内所有卡", fontsize=9.5)
-    nodes(ax, [1, 2, 3], ["src", "dst", "dst"])
-    arr(ax, 1, 2, 1, 1, color=RED)
-    arr(ax, 1, 2, 1, 3, color=RED)
-    ax.text(2.5, 0.15, "源卡数据复制到所有卡", ha="center", fontsize=8)
-    ax.set_xlim(0.2, 3.8); ax.set_ylim(0, 3.8); ax.axis("off")
-
-    fig.suptitle("集合通信四种原语的数据流", fontsize=12)
-    fig.tight_layout()
-    OUT.mkdir(parents=True, exist_ok=True)
-    fig.savefig(OUT / "collectives.png", bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    print("saved", OUT / "collectives.png")
-
-
 if __name__ == "__main__":
     draw_topology()
-    draw_collectives()

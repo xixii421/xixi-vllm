@@ -13,6 +13,8 @@ from __future__ import annotations
 import torch
 from flashinfer import apply_rope_with_cos_sin_cache as _flashinfer_rope
 from flashinfer.activation import silu_and_mul as _flashinfer_silu_and_mul
+from flashinfer.norm import fused_add_rmsnorm as _flashinfer_fused_rmsnorm
+from flashinfer.norm import rmsnorm as _flashinfer_rmsnorm
 
 
 @torch.library.custom_op("vllm::silu_and_mul", mutates_args=())
@@ -52,3 +54,30 @@ def rotary_embedding(
 @rotary_embedding.register_fake
 def _rotary_embedding_fake(q, k, positions, cos_sin_cache, head_size):
     return q, k
+
+
+@torch.library.custom_op("vllm::rmsnorm", mutates_args=())
+def rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    return _flashinfer_rmsnorm(x, weight, eps, enable_pdl=False)
+
+
+@rmsnorm.register_fake
+def _rmsnorm_fake(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+@torch.library.custom_op("vllm::fused_add_rmsnorm", mutates_args=("x", "residual"))
+def fused_add_rmsnorm(
+    x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float
+) -> None:
+    # flashinfer fused 是 inplace：x 变为 norm 输出，residual 变为残差和。
+    # 声明 mutates_args 让 torch.compile 正确做别名推断（否则 fake 认为输出是新的，
+    # 与 CUDA Graph 捕获的实际写入冲突）。
+    _flashinfer_fused_rmsnorm(x, residual, weight, eps, enable_pdl=False)
+
+
+@fused_add_rmsnorm.register_fake
+def _fused_add_rmsnorm_fake(
+    x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float
+) -> None:
+    pass

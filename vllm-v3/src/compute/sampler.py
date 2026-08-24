@@ -3,9 +3,14 @@ import torch
 from torch import nn
 
 
-@torch.compile
 def _gumbel_sample(logits: torch.Tensor, temperatures: torch.Tensor) -> torch.Tensor:
-    """温度采样：Gumbel-max，全程 GPU，无 host 分支。"""
+    """温度采样：Gumbel-max，全程 GPU，无 host 分支。
+
+    注意：本函数不能加 @torch.compile。连续批处理中 decode 的 batch size
+    随请求陆续完成而动态递减，torch.compile 默认按形状特化，每个新 batch
+    都会触发一次重编译，编译开销(秒级)被计入稳态吞吐，反而比 eager 慢一个
+    量级。采样器每步只跑几个轻量 kernel，融合收益远小于重编译代价。
+    """
     scaled = logits.float() / temperatures.unsqueeze(1)
     probs = torch.softmax(scaled, dim=-1)
     gumbel = torch.empty_like(probs).exponential_().clamp_min_(1e-10)

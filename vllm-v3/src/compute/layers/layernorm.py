@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 from torch import nn
+
+from .ops import fused_add_rmsnorm as _fused_add_rmsnorm
+from .ops import rmsnorm as _rmsnorm
 
 
 class RMSNorm(nn.Module):
@@ -12,5 +14,7 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(hidden_size))
 
     def forward(self, x: torch.Tensor, residual: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-        residual = x if residual is None else x + residual
-        return F.rms_norm(residual, self.weight.shape, self.weight, self.eps), residual
+        if residual is None:
+            return _rmsnorm(x, self.weight, self.eps), x
+        _fused_add_rmsnorm(x, residual, self.weight, self.eps)
+        return x, residual

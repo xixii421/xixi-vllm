@@ -1,14 +1,15 @@
-"""跨引擎连续批处理吞吐：v3 / nano-vllm / 官方 vLLM。
+"""跨引擎连续批处理吞吐：v2 / v3 / nano-vllm / 官方 vLLM。
 
-三个引擎不能混在同一进程（包名与依赖冲突），按 --engine 分开跑。
-nano 禁止 greedy，所以三边统一 temperature=0.6 + ignore_eos。
+四个引擎不能混在同一进程（包名与依赖冲突），按 --engine 分开跑。
+nano 禁止 greedy，所以统一 temperature=0.6 + ignore_eos。
 
-v3 / nano 走仓库根目录 .venv2；官方 vLLM 走 .venv-vllm。
+v2 / v3 / nano 走仓库根目录 .venv2；官方 vLLM 走 .venv-vllm。
 
 同一 workload：16 条，prompt 100~400，out 50~150，seed=0。
 dummy token 公式与 bench_e2e / common.dummy_ids 对齐。
 
 用法（在 vllm-v3/ 下）:
+    ../.venv2/bin/python bench/bench_compare.py --engine v2
     ../.venv2/bin/python bench/bench_compare.py --engine v3
     ../.venv2/bin/python bench/bench_compare.py --engine nano
     ../.venv-vllm/bin/python bench/bench_compare.py --engine vllm
@@ -26,6 +27,7 @@ import torch
 BENCH = Path(__file__).resolve().parent
 V3_ROOT = BENCH.parent
 REPO = V3_ROOT.parent
+V2_ROOT = REPO / "vllm-v2"
 NANO_ROOT = REPO / "nano-vllm"
 OUT = BENCH / "out"
 MODEL = str(Path.home() / "huggingface" / "Qwen3-0.6B")
@@ -60,6 +62,50 @@ def _append(engine: str, tag: str, wall: float, n_out: int, want: int) -> None:
         f"output_tokens={n_out}/{want} throughput={n_out / wall if wall > 0 else 0:.1f} tok/s"
     )
     print(f"→ {path}")
+
+
+def run_v2(prompts, max_tokens, device: str) -> tuple[float, int, str]:
+    if str(V2_ROOT) not in sys.path:
+        sys.path.insert(0, str(V2_ROOT))
+    from src.config import EngineConfig  # noqa: E402
+    from src.engine import Engine  # noqa: E402
+    from src.sampling_params import SamplingParams  # noqa: E402
+
+    torch.cuda.set_device(device)
+    engine = Engine(
+        EngineConfig(
+            model=MODEL,
+            dtype="auto",
+            context_len=4096,
+            block_size=16,
+            prefix_backend="none",
+            max_num_seqs=max(16, len(prompts)),
+            max_num_batched_tokens=4096,
+            mix_prefill_decode=True,
+        )
+    )
+    for it in range(3):
+        seq = engine.add_request(
+            [7, 13, 29, 31],
+            SamplingParams(temperature=0.6, max_tokens=4, ignore_eos=True),
+        )
+        while not seq.is_finished:
+            engine.step()
+    torch.cuda.synchronize()
+    seqs = [
+        engine.add_request(
+            p, SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=mt)
+        )
+        for p, mt in zip(prompts, max_tokens)
+    ]
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    while not engine.scheduler.is_finished():
+        engine.step()
+    torch.cuda.synchronize()
+    wall = time.perf_counter() - t0
+    n_out = sum(s.num_completion_tokens for s in seqs)
+    return wall, n_out, "eager"
 
 
 def run_v3(prompts, max_tokens, device: str) -> tuple[float, int, str]:
@@ -164,7 +210,7 @@ def run_vllm(prompts, max_tokens) -> tuple[float, int, str]:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--engine", choices=("v3", "nano", "vllm"), required=True)
+    p.add_argument("--engine", choices=("v2", "v3", "nano", "vllm"), required=True)
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--num-seqs", type=int, default=16)
     args = p.parse_args()
@@ -176,7 +222,9 @@ def main() -> None:
         f"target_out≈{want}  T=0.6\n"
     )
 
-    if args.engine == "v3":
+    if args.engine == "v2":
+        wall, n_out, tag = run_v2(prompts, max_tokens, args.device)
+    elif args.engine == "v3":
         wall, n_out, tag = run_v3(prompts, max_tokens, args.device)
     elif args.engine == "nano":
         wall, n_out, tag = run_nano(prompts, max_tokens)
