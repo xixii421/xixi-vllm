@@ -1,4 +1,8 @@
-"""控制面通道：调度广播与采样回收走 Gloo，与 NCCL 计算面分离。"""
+"""控制面通道：单 Engine 内 TP×PP 的调度广播与采样回收（Gloo）。
+
+与 DP 的 ZMQ 通道正交：ZMQ 连「门面 ↔ 多 EngineCore」；本通道连「driver ↔ 同 world workers」。
+``src`` / ``dst`` 是全局 rank（WORLD cpu_group），不是 TP/PP 组内 rank。
+"""
 
 from __future__ import annotations
 
@@ -7,11 +11,7 @@ import torch.distributed as dist
 
 
 class ControlChannel:
-    """WORLD cpu_group 上的字节广播 / 点对点。
-
-    单机 spawn 与 torchrun 共用这一条通道，不再用 ZMQ。
-    ``src`` / ``dst`` 是全局 rank（Gloo 默认组语义），不是 TP/PP 组内 rank。
-    """
+    """WORLD cpu_group 上的字节广播 / 点对点。"""
 
     def __init__(self, group) -> None:
         self.group = group

@@ -1,7 +1,7 @@
-"""Engine：面向用户的推理门面（对齐 vLLM V1 的 ``LLMEngine``）。
+"""Engine：面向用户的推理门面（对齐 vLLM V1 ``LLMEngine``）。
 
-负责 tokenizer、输入预处理（文本 → token ids、截断、max_tokens 收敛）与输出
-组装（token ids → 文本、增量流式）。真正的调度与执行委托给 ``EngineCoreClient``。
+并行对用户透明：``make_client`` 按 dp 选 Inproc / MPClient；tp/pp 在 Executor 内展开。
+dp>1 时本进程只有请求镜像 ``_seqs``，真正的 Sequence 在各副本 Scheduler 内。
 """
 
 from __future__ import annotations

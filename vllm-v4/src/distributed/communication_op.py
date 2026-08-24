@@ -88,25 +88,12 @@ def send_tensors(
     dst: int,
     group: Group | None = None,
 ) -> None:
-    """点对点发送。``dst`` 必须是组内 rank（``group_peer``），不是 global rank。
+    """阻塞点对点发送。``dst`` 为组内 rank（``group_peer``），不是 global rank。
 
-    线性 PP 请传 ``group.next_group_rank``；``tp>1`` 时 global rank 会越出组大小。
+    线性 PP 传 ``group.next_group_rank``。piecewise CG 下在图外调用。
     """
-    group = get_world_group() if group is None else group
-    if group.size == 1:
-        return
-    if not 0 <= dst < group.size:
-        raise ValueError(
-            f"send_tensors dst={dst} is not a group-local rank in [0, {group.size})"
-        )
-    ops = [
-        dist.P2POp(dist.isend, t, group=group.device_group, group_peer=dst)
-        for t in tensors
-        if t.numel() > 0
-    ]
-    if not ops:
-        return
-    for work in dist.batch_isend_irecv(ops):
+    works = _isend_tensors(tensors, dst, group)
+    for work in works:
         work.wait()
 
 
@@ -115,13 +102,45 @@ def recv_tensors(
     src: int,
     group: Group | None = None,
 ) -> None:
-    """点对点接收。``src`` 必须是组内 rank（``group_peer``），不是 global rank。"""
+    """阻塞点对点接收。``src`` 为组内 rank（``group_peer``），不是 global rank。"""
+    works = _irecv_tensors(tensors, src, group)
+    for work in works:
+        work.wait()
+
+
+def _isend_tensors(
+    tensors: tuple[torch.Tensor, ...] | list[torch.Tensor],
+    dst: int,
+    group: Group | None = None,
+) -> list:
     group = get_world_group() if group is None else group
     if group.size == 1:
-        return
+        return []
+    if not 0 <= dst < group.size:
+        raise ValueError(
+            f"send dst={dst} is not a group-local rank in [0, {group.size})"
+        )
+    ops = [
+        dist.P2POp(dist.isend, t, group=group.device_group, group_peer=dst)
+        for t in tensors
+        if t.numel() > 0
+    ]
+    if not ops:
+        return []
+    return list(dist.batch_isend_irecv(ops))
+
+
+def _irecv_tensors(
+    tensors: tuple[torch.Tensor, ...] | list[torch.Tensor],
+    src: int,
+    group: Group | None = None,
+) -> list:
+    group = get_world_group() if group is None else group
+    if group.size == 1:
+        return []
     if not 0 <= src < group.size:
         raise ValueError(
-            f"recv_tensors src={src} is not a group-local rank in [0, {group.size})"
+            f"recv src={src} is not a group-local rank in [0, {group.size})"
         )
     ops = [
         dist.P2POp(dist.irecv, t, group=group.device_group, group_peer=src)
@@ -129,6 +148,5 @@ def recv_tensors(
         if t.numel() > 0
     ]
     if not ops:
-        return
-    for work in dist.batch_isend_irecv(ops):
-        work.wait()
+        return []
+    return list(dist.batch_isend_irecv(ops))

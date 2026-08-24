@@ -1,17 +1,12 @@
 # 线性层并行 从原理到实现
 
-这篇文档完整讲解 vllm-v4 里张量并行线性层的设计与实现。我将从宏观的设计出发，最终讲解到代码的具体实现，并且把本实现和 vLLM 官方的实现方案进行对比，通过实测数据说明每一项设计选择的代价和收益。
-
-- [1] 讲解线性层和矩阵乘的基本概念，以及 Qwen3 解码层里的线性层全景。
-- [2] 给出模块的整体架构。
-- [3] 四到五章分别讲权重加载、前向计算、评审方案的逐项验证。
-- [4] 第六章把全部性能实测汇总。
+这篇文档完整讲解 vllm-v4 里张量并行线性层的设计与实现。我将从宏观设计出发，一直讲解到代码的具体实现。并且把 v4 版本实现和 vLLM 官方进行对比，通过实测数据说明每一项设计选择的代价和收益。
 
 ## 1. 线性层为什么要并行？
 
 ### 1.1 线性层与矩阵乘
 
-模型处理文本时最频繁的基本运算，是把一个向量变换成另一个向量。变换由一个权重矩阵完成，数学形式是 y 等于 x 乘 W 的转置再加 b。这个运算在代码里就是 `torch.nn.functional.linear(x, w, b)`，在 GPU 上对应一次矩阵乘，也就是 GEMM。
+模型处理文本时最频繁的基本运算就是把一个向量变换成另一个向量。变换由一个权重矩阵完成，数学形式是 y 等于 x 乘 W 的转置再加 b。这个运算在代码里就是 `torch.nn.functional.linear(x, w, b)`，在 GPU 上对应一次矩阵乘，也就是 GEMM。
 
 线性层的形状由输入维和输出维决定。输入 x 的形状是 `[token 数, in_size]`，权重 W 的形状是 `[out_size, in_size]`，输出 y 的形状是 `[token 数, out_size]`。
 一次前向把 in_size 维的向量映射成 out_size 维的向量。
@@ -33,13 +28,13 @@ Transformer 的每一层里，绝大多数参数和算力都花在线性层上�
 $$
 \begin{aligned}
 Y &= X \cdot W^T
-
+\\
 &= X \cdot \begin{bmatrix} W_0  W_1 \end{bmatrix}^T 
-
+\\
 &= X \cdot \begin{bmatrix} W_0^T & W_1^T \end{bmatrix}
-
+\\
 &= \begin{bmatrix} X \cdot W_0^T & X \cdot W_1^T \end{bmatrix}
-
+\\
 &= \begin{bmatrix} Y_0 & Y_1 \end{bmatrix}
 \end{aligned}
 $$
@@ -63,20 +58,24 @@ $$
 $$
 \begin{aligned}
 Y &= X \cdot W^T 
+\\
 &= \begin{bmatrix} X_0 & X_1 \end{bmatrix} \cdot \begin{bmatrix} W_0 & W_1 \end{bmatrix}^T 
+\\
 &= \begin{bmatrix} X_0 & X_1 \end{bmatrix} \cdot \begin{bmatrix} W_0^T  W_1^T \end{bmatrix} 
+\\
 &= X_0 \cdot W_0^T + X_1 \cdot W_1^T 
+\\
 &= Y_0 + Y_1 
 \end{aligned}
 $$
 
-问题来了。列并行拼起来的是不同段的输出，而这里每张卡算的 `[token 数, out_size]` 覆盖的是同一段输出范围，只是各自由输入的不同段贡献。要得到正确结果，必须把多张卡的局部结果按位置相加。这个相加操作叫 all-reduce。
+问题来了。列并行拼起来的是不同段的输出，而这里每张卡算的 `[token 数, out_size]` 覆盖的是同一段输出范围，只是各自由输入的不同段贡献。要得到正确结果，必须把多张卡的局部结果按位置相加。这个相加操作叫 **all-reduce**。
 
-这种切法叫行并行。它把输入维切碎喂给多张卡，最后用一次 all-reduce 把部分和聚合成完整输出。代码里的 `RowParallelLinear` 就是这个形态。
+这种切法叫行并行。它把输入维切碎分给多张卡，最后用一次 all-reduce 把部分和聚合成完整输出。代码里的 `RowParallelLinear` 就是这个形态。
 
 列并行和行并行是一对对偶的切法，前者切输出、后者切输入，通信原语恰好互为相反操作。下图是 Megatron-LM 论文里的 MLP 块张量并行示意图，第一层 GEMM 沿输出维列切分，每卡独立做完 GeLU 后，第二层 GEMM 沿输入维行切分，最后由 all-reduce 汇总，正好把两种切法放在一起对照。
 
-Megatron-LM 论文 Figure 3(a)：MLP 块的列并行与行并行切分（Shoeybi et al., 2019）
+![Megatron-LM 论文 Figure 3(a)：MLP 块的列并行与行并行切分（Shoeybi et al., 2019）](./posts/megatron_mlp_tp.png)
 
 ### 1.4 张量并行的适用边界
 

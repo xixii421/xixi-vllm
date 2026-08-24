@@ -124,7 +124,7 @@ def main() -> None:
     p.add_argument(
         "--cg",
         action="store_true",
-        help="启用 decode full-pipeline CUDA Graph（默认 eager）",
+        help="启用 decode piecewise CUDA Graph（PP 时 recv/send 在图外）",
     )
     p.add_argument(
         "--compile",

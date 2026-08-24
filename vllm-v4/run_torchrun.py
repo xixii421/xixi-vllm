@@ -11,7 +11,8 @@
         --master_addr=10.0.0.1 --master_port=29500 run_torchrun.py --tp 2 --pp 2
 
 rank 布局：global rank = pp_rank * tp_size + tp_rank；rank 0 兼调度器（Scheduler）。
-控制面（调度广播 + 采样回收）走 gloo；计算面（TP all-reduce / PP 传中间张量）走 NCCL。
+本入口只服务 **TP×PP**（WORLD = tp×pp）。**DP 请用 `run.py --dp`**（MPClient 多 Engine），不要与 torchrun 混用。
+控制面（调度广播 + 采样回收）走 gloo；计算面（TP all-reduce / PP 中间张量）走 NCCL。
 """
 
 from __future__ import annotations
@@ -146,7 +147,7 @@ def main() -> None:
     p.add_argument(
         "--cg",
         action="store_true",
-        help="启用 decode full-pipeline CUDA Graph（覆盖 config）",
+        help="启用 decode piecewise CUDA Graph（覆盖 config）",
     )
     p.add_argument(
         "--compile",

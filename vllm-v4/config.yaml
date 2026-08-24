@@ -46,7 +46,8 @@ master_addr: "127.0.0.1"  # 多机 rendezvous 主节点地址
 master_port: 29500        # 多机 rendezvous 端口
 nccl_ifname: ""  # 多机网卡名（如 ib0/eth0）；空=自动探测
 
-# --- 分布式 CG / compile（torchrun 多机路径同样生效，不再硬编码）---
-# enforce_eager: false 时启用 decode full-pipeline CUDA Graph；
-# torch_compile: true 时 prefill 走 torch.compile（分布式用 max-autotune-no-cudagraphs）。
+# --- 分布式 CG / compile（torchrun 多机路径同样生效）---
+# enforce_eager: false → decode piecewise CUDA Graph（PP 时 recv/send 图外）；
+# torch_compile: true → prefill torch.compile（含 TP 时用 max-autotune-no-cudagraphs）。
 # 覆盖方式：命令行加 --cg / --compile。
+# 并行语义：dp=独立 Engine 副本；tp/pp=同 Engine NCCL（见 docs/07-控制面与并行.md）。

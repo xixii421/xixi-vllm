@@ -1,8 +1,11 @@
-"""单个 rank 的 worker：负责进程组初始化、模型/KV 装配与一步前向。
+"""单 rank Worker：一张卡上的 TP×PP 运行时。
 
-每个 worker 进程对应一张卡，rank = pp_rank * tp_size + tp_rank。
-PP 的中间张量（hidden_states + residual）通过 NCCL 点对点在相邻 stage 间传递。
-本类即 RankRuntime：加载 / CG 探测 / KV 池 / 执行 只在这里实现一份。
+rank 布局（单 Engine，与 ``parallel_state`` 一致）::
+
+    global_rank = pp_rank * tp_size + tp_rank
+
+职责：建 NCCL/Gloo 组 → 加载本 stage 模型切片 → KV 池 → ``ModelRunner.run_forward``。
+DP 不在此处理：``MPClient`` 为每个副本单独 spawn Engine，副本内 ``dp_size=1``。
 """
 
 from __future__ import annotations
@@ -74,7 +77,6 @@ class Worker:
             self.pp_size,
             self.tp_rank,
             self.pp_rank,
-            dp_size=self.config.dp_size,
         )
         self.is_last_pp = get_pp_group().is_last_rank
         # 不均分 PP：按 config.pp_layer_counts 覆盖等分层区间（如 12/28 适配 12G+24G 异卡）。
@@ -187,7 +189,7 @@ class Worker:
     def execute_model(self, sched: SchedulerOutput) -> tuple[int, int] | None:
         """只发射前向 + 异步 D2H，不等待采样结果。"""
         assert self.model_runner is not None
-        result = self.model_runner.run_pipeline(sched)
+        result = self.model_runner.run_forward(sched)
         if not self.is_last_pp:
             return None
         return result

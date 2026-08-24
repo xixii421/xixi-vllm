@@ -1,10 +1,11 @@
-"""EngineCoreClient：Engine 门面与 EngineCore 之间的抽象。
+"""EngineCoreClient：Engine 门面与 EngineCore 之间的传输抽象。
 
-- ``InprocClient``：EngineCore 跑在本进程，直接调用（对应 vLLM 的 InprocClient）。
-- ``MPClient``：DP 多副本场景，通过 ZMQ 与各 EngineCore 进程通信（见 mp_client.py）。
+并行决策树（先 DP，再 TP/PP）::
 
-对齐 vLLM V1 的 ``v1/engine/core_client.py``：客户端只关心「加请求 / 取输出」，
-不关心 EngineCore 的调度与执行细节。
+    dp_size == 1  → InprocClient：EngineCore 在本进程
+    dp_size  > 1  → MPClient：spawn dp 个独立 EngineCoreProc（ZMQ）
+
+每个副本内部再用 ``create_executor`` 处理 tp/pp（Gloo + NCCL）。
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ class EngineCoreClient(ABC):
 
 
 class InprocClient(EngineCoreClient):
-    """单副本（dp=1）客户端：EngineCore 与本进程共享调度器与 Sequence 对象。"""
+    """单副本（dp=1）：EngineCore 与门面共享调度器与 Sequence 对象。"""
 
     def __init__(self, engine_core: EngineCore) -> None:
         self.engine_core = engine_core
@@ -61,16 +62,14 @@ def make_client(
     dtype: torch.dtype,
     executor=None,
 ) -> EngineCoreClient:
-    """按并行度构造客户端。
-
-    - dp=1：InprocClient（EngineCore 本进程）。
-    - dp>1：MPClient（spawn dp 个 EngineCore 进程，ZMQ 路由）。
-
-    ``executor`` 用于注入已初始化好的执行器（torchrun 多机路径）。
-    """
+    """按 ``dp_size`` 构造客户端；``executor`` 供 torchrun 注入已就绪的 rank0 执行器。"""
     if config.dp_size > 1:
         from .mp_client import MPClient
 
+        if executor is not None:
+            raise ValueError(
+                "dp_size>1 uses MPClient replicas; cannot inject a shared executor"
+            )
         return MPClient(
             config, eos_token_id=eos_token_id, device=device, dtype=dtype
         )

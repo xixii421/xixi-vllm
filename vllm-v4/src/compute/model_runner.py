@@ -44,7 +44,6 @@ class ModelRunner:
         self._pp_group = pp
         self.is_first_pp = pp.is_first_rank
         self.is_last_pp = pp.is_last_rank
-        # 只有 last PP stage 的 tp rank 0 采样并回报，避免各 tp rank 随机采样不一致。
         self.is_driver = self.is_last_pp and tp.group_rank == 0
 
         max_bs = min(config.max_num_seqs, 256)
@@ -59,21 +58,21 @@ class ModelRunner:
             block_size=self.block_size,
         )
 
-        # PP 静态中间张量 buffer：decode CUDA Graph 要求固定地址，非首 stage 才需要。
+        # piecewise CUDA Graph（对齐 vLLM #35162）：
+        #   图外 recv → 图内 forward（读写静态 buffer）→ 图外 send
+        # 与「整段 recv+层+send 录进一张图」相比：P2P 更稳，调度可与图解耦。
         self._pp_recv = self._make_pp_buffer(max_bs) if not self.is_first_pp else None
-        # 末 stage 的 decode 输出写到静态 buffer，图重放后切片读取。
+        self._pp_send = self._make_pp_buffer(max_bs) if not self.is_last_pp else None
         self._decode_out = (
             torch.zeros(max_bs, self.hidden_size, dtype=self.dtype, device=device)
             if self.is_last_pp
             else None
         )
 
-        # 采样结果异步 D2H：独立 copy stream + pinned buffer，采样 kernel 与拷贝解耦。
         self._copy_stream = torch.cuda.Stream(device=device)
         self._copy_event = torch.cuda.Event()
-        self._sample_cpu = torch.empty(2 * max_bs, dtype=torch.int64, pin_memory=True)
+        self._sample_cpu = torch.empty(max_bs * 2, dtype=torch.int64, pin_memory=True)
 
-        # decode full-pipeline CUDA Graph：recv → model(含 TP 通信) → send 整段捕获。
         self.cuda_graph_runner: CUDAGraphRunner | None = None
         if not config.enforce_eager:
             self.cuda_graph_runner = CUDAGraphRunner(
@@ -81,17 +80,11 @@ class ModelRunner:
             )
             self.cuda_graph_runner.capture(self._decode_body)
 
-        # prefill torch.compile：仅包 model forward，recv/send 保持 eager。
         self.prefill_fn = None
         if config.torch_compile:
             self.prefill_fn = self._build_compiled_prefill()
 
-    # ------------------------------------------------------------------ #
-    # PP 中间张量
-    # ------------------------------------------------------------------ #
-
     def _make_pp_buffer(self, n: int) -> IntermediateTensors:
-        # 接收 buffer：recv 会整体覆盖，torch.empty 省去无用的 memset。
         return IntermediateTensors(
             hidden_states=torch.empty(
                 n, self.hidden_size, dtype=self.dtype, device=self.device
@@ -115,37 +108,23 @@ class ModelRunner:
         )
 
     def _recv_intermediate(self, n: int, *, static: bool = False) -> IntermediateTensors:
-        """接收中间张量：static=True 时进静态 buffer 切片（CG 固定地址），否则新建张量。"""
         buf = self._pp_recv if static else self._make_pp_buffer(n)
         h = buf["hidden_states"][:n]
         r = buf["residual"][:n]
         recv_tensors((h, r), self._pp_src(), self._pp_group)
         return IntermediateTensors(hidden_states=h, residual=r)
 
-    # ------------------------------------------------------------------ #
-    # 一步执行
-    # ------------------------------------------------------------------ #
-
     @torch.inference_mode()
-    def run_pipeline(self, sched: SchedulerOutput):
-        """执行一步前向（含 PP 编排）。
+    def run_forward(self, sched: SchedulerOutput):
+        """一步 sync 前向：decode 再 prefill；PP 为 lockstep 切层，非 1F1B。
 
-        入参为最小增量 SchedulerOutput（wire 格式），由 executor 在边界处
-        从 ScheduledBatch 转换而来；单卡与多卡走同一消费路径。
-
-        返回：
-            - 非末 PP rank：None（中间张量已在图内 / eager 发出）。
-            - 末 PP rank：(prefill 数, decode 数)，配合 read_samples 读取结果。
+        非末 PP stage 只做本段计算 + P2P，返回 None；末 stage 异步 D2H 采样 id。
         """
         d = self._run_decode(sched.decodes) if sched.decodes else None
         p = self._run_prefill(sched.prefills) if sched.prefills else None
         if not self.is_last_pp:
             return None
         return self._stage_samples(p, d)
-
-    # ------------------------------------------------------------------ #
-    # decode
-    # ------------------------------------------------------------------ #
 
     def _decode_attn(self, bs: int) -> AttnInputs:
         return AttnInputs(
@@ -156,8 +135,14 @@ class ModelRunner:
         )
 
     def _decode_body(self, bs: int):
-        """decode 图体：recv → model → send，末 stage 写静态 out buffer。"""
-        it = self._recv_intermediate(bs, static=True) if not self.is_first_pp else None
+        """仅本地 compute；PP recv/send 在 replay 前后执行。"""
+        it = None
+        if not self.is_first_pp:
+            assert self._pp_recv is not None
+            it = IntermediateTensors(
+                hidden_states=self._pp_recv["hidden_states"][:bs],
+                residual=self._pp_recv["residual"][:bs],
+            )
         with attention_context(self._meta):
             out = self.model(
                 self.batch.input_ids[:bs],
@@ -168,7 +153,9 @@ class ModelRunner:
         if self.is_last_pp:
             self._decode_out[:bs] = out
             return self._decode_out[:bs]
-        self._send_intermediate(out)
+        assert self._pp_send is not None
+        self._pp_send["hidden_states"][:bs].copy_(out["hidden_states"])
+        self._pp_send["residual"][:bs].copy_(out["residual"])
         return out
 
     def _run_decode(self, seqs: list[SeqSchedule]):
@@ -178,8 +165,16 @@ class ModelRunner:
         bs = len(seqs)
 
         if self.cuda_graph_runner is not None and bs <= self.max_bs:
+            if not self.is_first_pp:
+                self._recv_intermediate(bs, static=True)
             hidden, _ = self.cuda_graph_runner.replay(bs)
             if not self.is_last_pp:
+                self._send_intermediate(
+                    IntermediateTensors(
+                        hidden_states=self._pp_send["hidden_states"][:bs],
+                        residual=self._pp_send["residual"][:bs],
+                    )
+                )
                 return None
             hidden = hidden[:bs]
         else:
@@ -195,12 +190,7 @@ class ModelRunner:
                 self._send_intermediate(hidden)
                 return None
 
-        # compute_logits 含 all-gather，所有 tp rank 都必须调用完成集合通信。
         return self._sample_logits(hidden, bs)
-
-    # ------------------------------------------------------------------ #
-    # prefill
-    # ------------------------------------------------------------------ #
 
     def _prefill_attn(
         self,
@@ -258,16 +248,7 @@ class ModelRunner:
         last = self.batch.cu_seqlens_q[1 : bs + 1] - 1
         return self._sample_logits(hidden[last], bs)
 
-    # ------------------------------------------------------------------ #
-    # 采样
-    # ------------------------------------------------------------------ #
-
     def _sample_logits(self, hidden: torch.Tensor, bs: int) -> torch.Tensor | None:
-        """末 stage 采样：all_greedy 走 argmax 快路径（只聚合局部 max/索引）。
-
-        compute_logits 含 all-gather，所有 tp rank 都必须调用以完成集合通信，
-        故 is_driver 判断在其之后；非 driver 返回 None。
-        """
         if self.batch.all_greedy:
             ids = self.model.argmax(hidden)
             if not self.is_driver:
@@ -298,6 +279,9 @@ class ModelRunner:
     ) -> tuple[int, int]:
         n_p = 0 if p is None else p.numel()
         n_d = 0 if d is None else d.numel()
+        need = n_p + n_d
+        if need > self._sample_cpu.numel():
+            self._sample_cpu = torch.empty(need, dtype=torch.int64, pin_memory=True)
         cur = torch.cuda.current_stream()
         self._copy_stream.wait_stream(cur)
         with torch.cuda.stream(self._copy_stream):
@@ -314,14 +298,9 @@ class ModelRunner:
         d_ids = self._sample_cpu[:n_d].tolist() if n_d else []
         return p_ids, d_ids
 
-    # ------------------------------------------------------------------ #
-    # prefill torch.compile
-    # ------------------------------------------------------------------ #
-
     def _resolve_compile_mode(self) -> str:
-        # 分布式下禁用 inductor 自带 cudagraph，避免与 NCCL 集合通信冲突；
-        # 单卡保持 config 指定的 mode（如 reduce-overhead）。
-        if get_tp_group().size == 1 and get_pp_group().size == 1:
+        """单卡 / 仅 PP 用用户 mode；含 TP 时用 max-autotune-no-cudagraphs。"""
+        if get_tp_group().size == 1:
             return self.config.compile_mode
         return "max-autotune-no-cudagraphs"
 

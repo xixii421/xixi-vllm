@@ -1,11 +1,12 @@
-"""MPClient：DP 多副本客户端（对齐 vLLM V1 的 ``v1/engine/core_client.py``）。
+"""MPClient：DP 多副本（独立 Engine），不是 NCCL 数据并行组。
 
-每个副本是一个独立 ``EngineCoreProc``（跑在各自进程 / 各卡上，自主前向），
-门面通过 ZMQ PUSH/PULL 与它们通信，从而让 dp_size 个副本并发推理。
+与 TP/PP 的本质区别::
 
-- 请求线格式：``RequestWire``（请求序列化）/ ``CoreRequest``（入站）/ ``CoreOutput``（出站）。
-- ``run_engine_core_proc``：EngineCoreProc 进程入口 + 忙循环（排空输入 → 有活 step → 空闲让出）。
-- ``MPClient``：spawn 副本 + round-robin 路由 + 输出汇总 + 销毁。
+    TP/PP  — 同一次 step、同一 schedule、多 rank 协同算一份模型
+    DP     — dp_size 份完整 Engine，各有 Scheduler / KV / Worker，门面只做路由
+
+每副本经 ``_replica_config`` 把 ``dp_size`` 归 1，并切出自己的 ``device_ids`` 与
+``nccl_port``，再走与单副本相同的 ``EngineCore → Executor → Worker`` 路径。
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from .core import EngineCore
 
 
 class RequestWire(msgspec.Struct):
-    """一条请求的最小可序列化表示（对齐 vLLM 的 EngineCoreRequest 思路）。"""
+    """门面 → 副本：可序列化的最小请求。"""
 
     seq_id: int
     token_ids: list[int]
@@ -53,7 +54,6 @@ class RequestWire(msgspec.Struct):
         )
 
     def to_sequence(self) -> Sequence:
-        """在 EngineCore 进程中重建一条等价的 Sequence（seq_id 保持一致）。"""
         return Sequence(
             token_ids=list(self.token_ids),
             block_size=self.block_size,
@@ -70,15 +70,11 @@ class RequestWire(msgspec.Struct):
 
 
 class CoreRequest(msgspec.Struct):
-    """门面 → EngineCoreProc：加请求或关停。"""
-
     op: str  # "add" | "shutdown"
     req: RequestWire | None = None
 
 
 class CoreOutput(msgspec.Struct):
-    """EngineCoreProc → 门面：一步的增量输出 + token 指标。"""
-
     outputs: list[EngineCoreOutput]
     metric: int = 0
 
@@ -91,9 +87,10 @@ def run_engine_core_proc(
     dtype: torch.dtype,
     in_addr: str,
     out_addr: str,
-    ready,  # multiprocessing.Event：绑定完成后置位，避免门面提前 connect
+    ready,  # multiprocessing.Event
 ) -> None:
-    """EngineCoreProc 进程入口：构建 EngineCore 并进入服务忙循环。"""
+    """单个 DP 副本进程：独立 EngineCore + ZMQ 服务循环。"""
+    assert config.dp_size == 1, "replica config must flatten dp_size to 1"
     core = EngineCore(
         config, eos_token_id=eos_token_id, device=torch.device(device), dtype=dtype
     )
@@ -111,7 +108,6 @@ def run_engine_core_proc(
     ready.set()
     try:
         while True:
-            # 1) 排空所有待处理的输入（非阻塞）。
             shutdown = False
             while True:
                 socks = dict(poller.poll(0))
@@ -126,7 +122,6 @@ def run_engine_core_proc(
             if shutdown:
                 break
 
-            # 2) 有活就前进一步；空闲让出 CPU，等新请求或关停。
             if core.has_unfinished():
                 outputs, metric = core.step()
                 out_sock.send(enc.encode(CoreOutput(outputs=outputs, metric=metric)))
@@ -140,7 +135,7 @@ def run_engine_core_proc(
 
 
 class MPClient(EngineCoreClient):
-    """spawn dp_size 个 EngineCoreProc 进程，ZMQ 路由 + 汇总输出。"""
+    """spawn ``dp_size`` 个 EngineCoreProc，ZMQ round-robin 路由 + 汇总输出。"""
 
     def __init__(
         self,
@@ -161,7 +156,7 @@ class MPClient(EngineCoreClient):
         self._out: list[zmq.Socket] = []
         self._poller = zmq.Poller()
         self._procs: list[mp.Process] = []
-        self._pending: set[int] = set()  # 未观察到 finished 的 seq_id
+        self._pending: set[int] = set()
         self._next = 0
 
         ctx = mp.get_context("spawn")
@@ -199,18 +194,16 @@ class MPClient(EngineCoreClient):
             self._out.append(out_sock)
             self._poller.register(out_sock, zmq.POLLIN)
 
-    # ------------------------------------------------------------------ #
-    # 副本配置
-    # ------------------------------------------------------------------ #
-
     def _replica_config(self, r: int) -> EngineConfig:
-        """每个副本是一份独立引擎：dp_size 归 1，分配自己的卡与 NCCL 端口。
-
-        用 ``copy.copy`` 复用已加载的 hf_config，避免每副本重读磁盘。
-        """
+        """切出第 r 个独立引擎：dp→1，GPU 切片，独立 NCCL 端口。"""
         per = self.config.tp_size * self.config.pp_size
         if self.config.device_ids is not None:
             devices = self.config.device_ids[r * per : (r + 1) * per]
+            if len(devices) != per:
+                raise ValueError(
+                    f"device_ids length {len(self.config.device_ids)} "
+                    f"incompatible with dp={self.dp_size} × (tp×pp={per})"
+                )
         else:
             start = r * per
             devices = list(range(start, start + per))
@@ -219,10 +212,6 @@ class MPClient(EngineCoreClient):
         replica.device_ids = devices
         replica.nccl_port = self.config.nccl_port + r * 16
         return replica
-
-    # ------------------------------------------------------------------ #
-    # EngineCoreClient 接口
-    # ------------------------------------------------------------------ #
 
     def add_request(self, seq: Sequence) -> None:
         self._pending.add(seq.seq_id)
@@ -237,12 +226,7 @@ class MPClient(EngineCoreClient):
     def has_unfinished(self) -> bool:
         return bool(self._pending)
 
-    # ------------------------------------------------------------------ #
-    # 输出汇总
-    # ------------------------------------------------------------------ #
-
     def _drain(self, *, block: bool) -> tuple[list[EngineCoreOutput], int]:
-        """聚合各副本已就绪的输出；``block`` 时至少等到一条（避免门面空转）。"""
         outputs: list[EngineCoreOutput] = []
         metric = 0
         first = True
@@ -260,10 +244,6 @@ class MPClient(EngineCoreClient):
                         self._pending.discard(o.seq_id)
             first = False
         return outputs, metric
-
-    # ------------------------------------------------------------------ #
-    # 销毁
-    # ------------------------------------------------------------------ #
 
     def destroy(self) -> None:
         for sock in self._in:

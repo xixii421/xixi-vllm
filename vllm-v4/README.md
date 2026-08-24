@@ -1,22 +1,25 @@
 # vllm-v4 — 多机多卡并行（DP + TP + PP）
 
-> 以 v3 为基底迁移，实现**数据并行 DP**、**张量并行 TP** 与**流水线并行 PP**，
-> 控制面按 vLLM V1 的 `EngineCore / Executor / EngineCoreClient` 分层重构，补齐
-> `torchrun` 多机启动与 NCCL 网络配置。
+> 以 v3 为基底迁移，实现**数据并行 DP**（独立 Engine 副本）、**张量并行 TP** 与
+> **流水线并行 PP**（sync 切层）。控制面按 vLLM V1 的
+> `EngineCore / Executor / EngineCoreClient` 分层；并行决策树见
+> [docs/07-控制面与并行.md](docs/07-控制面与并行.md)。
+> 补齐 `torchrun` 多机启动与 NCCL 网络配置。
 
 ---
 
 ## 并行布局
 
 
-| 维度  | 切分对象              | 通信                      | 布局             |
+| 维度  | 切分对象              | 通信                      | 进程模型 |
 | --- | ----------------- | ----------------------- | -------------- |
-| DP  | 请求副本              | ZMQ（门面↔EngineCoreProc） | 跨副本独立引擎       |
-| TP  | head / 权重 / vocab | all-reduce / all-gather | 机内（NVLink 高带宽） |
-| PP  | 隐藏层               | send / recv 中间张量        | 跨机（低带宽需求）      |
+| DP  | 请求 / 样本           | ZMQ（门面↔多 Engine）       | **独立 Engine 副本**（非 NCCL DP 组） |
+| TP  | head / 权重 / vocab | NCCL all-reduce / gather | 同 Engine 多 rank |
+| PP  | 隐藏层               | NCCL send/recv 中间张量    | 同 Engine sync lockstep |
 
 
-rank 约定：`global rank = pp_rank * tp_size + tp_rank`。TP 在组内连续，PP 跨组步进。
+单 Engine 内 rank：`global = pp_rank * tp_size + tp_rank`（`world_size = tp × pp`）。  
+总 GPU ≈ `dp × tp × pp`。控制面与并行决策树见 [docs/07-控制面与并行.md](docs/07-控制面与并行.md)。
 
 ```
 [node 0]                          [node 1]
@@ -50,12 +53,15 @@ bash setup_env.sh          # 自动探测 CUDA 版本并装好环境
 
 | 文档 | 内容 |
 | --- | --- |
-| [docs/并行环境.md](docs/并行环境.md) | 三类并行策略、代价、决策树 |
-| [docs/硬件互联.md](docs/硬件互联.md) | 卡数、异构、NVLink 与 PCIe |
-| [docs/服务器测量.md](docs/服务器测量.md) | 带宽测量、三台真实机器剖析 |
-| [docs/集合通信.md](docs/集合通信.md) | NCCL 原语、进程组、控制面通信 |
-| [docs/linear.md](docs/linear.md) | TP 线性层 |
-| [docs/词表.md](docs/词表.md) | 词表并行 |
+| [docs/00-并行环境.md](docs/00-并行环境.md) | 三类并行策略、代价、决策树 |
+| [docs/01-硬件互联.md](docs/01-硬件互联.md) | 卡数、异构、NVLink 与 PCIe |
+| [docs/03-性能对比.md](docs/03-性能对比.md) | 0.6B/4B/8B/14B 实测矩阵与 vLLM 对照 |
+| [docs/07-控制面与并行.md](docs/07-控制面与并行.md) | 控制/调度如何承载 DP·TP·PP |
+| [docs/08-通信通道.md](docs/08-通信通道.md) | ZMQ / Gloo ControlChannel / NCCL |
+| [docs/02-服务器通信测量.md](docs/02-服务器通信测量.md) | 4×A100 通信实测与对照机 |
+| [docs/集合通信.md](docs/集合通信.md) | NCCL 原语、进程组细节 |
+| [docs/06-linear.md](docs/06-linear.md) | TP 线性层 |
+| [docs/05-词表.md](docs/05-词表.md) | 词表并行 |
 | [docs/多机部署.md](docs/多机部署.md) | git 同步与环境脚本 |
 
 ---
@@ -106,19 +112,16 @@ torchrun --nnodes=2 --nproc_per_node=2 --node_rank=1 \
 | `src/compute/kv_ops.py` | Triton `store_kvcache` 内核 |
 | `src/data/kv.py` | `KVManager`：driver 侧纯逻辑 KV 账本（块表 + 前缀索引，不占 GPU） |
 | `src/data/sequence.py` / `batch.py` | `Sequence` 与 wire 结构（`ScheduledBatch / SchedulerOutput / EngineCoreOutput`） |
-| `src/distributed/parallel_state.py` | `Group`（NCCL+Gloo 双组）、`WORLD/TP/PP`、rank 映射、`set_nccl_env` |
-| `src/distributed/communication_op.py` | `all_gather/all_reduce/reduce_scatter`、TP 封装、PP `send/recv_tensors` |
-| `src/distributed/utils.py` | `divide / get_pp_indices / set_pp_layer_ranges / IntermediateTensors / PPMissingLayer` |
-| `src/distributed/control_channel.py` | 控制面 Gloo：广播调度、回收采样 counts + token ids |
+| `src/distributed/parallel_state.py` | `Group`（NCCL+Gloo）、`WORLD/TP/PP`（无 NCCL DP 组） |
+| `src/distributed/communication_op.py` | 集合通信 + PP 阻塞 `send/recv_tensors` |
+| `src/distributed/utils.py` | `divide / get_pp_indices / IntermediateTensors / PPMissingLayer` |
+| `src/distributed/control_channel.py` | 单 Engine 控制面 Gloo（与 DP 的 ZMQ 正交） |
 
 
-- **控制面 = vLLM V1 形状**：`Engine`（门面）→ `EngineCoreClient` → `EngineCore`（纯循环）
-  → `Executor`（`collective_rpc` 广播到各 worker）。
-- **DP**：每个 `dp_size` 副本一个 `EngineCoreProc` 进程，各自持有一份独立引擎并发前向，
-  门面通过 ZMQ `PUSH/PULL` 做 round-robin 路由与输出汇总（对齐 vLLM `MPClient`）。
-- **TP×PP**：每副本内每卡一进程、rank0 兼 driver；单机 `run.py --tp/--pp` spawn 子进程，
-  多机 `run_torchrun.py` 由 torchrun 拉起。控制面走 Gloo `ControlChannel`，计算面走 NCCL。
-- **PP 是同步切层**，不是 1F1B 流水线。要装更大模型继续同步 PP + 不均分；要多卡吞吐用 DP。
+- **控制面 = vLLM V1 形状**：`Engine` → `EngineCoreClient` → `EngineCore` → `Executor`。
+- **DP**：`MPClient` 起 `dp_size` 个独立 Engine；每副本 `dp→1`，ZMQ 路由（见 docs/07）。
+- **TP×PP**：同 Engine 内每卡一进程；控制面 Gloo，计算面 NCCL；PP 为 sync 切层 + piecewise CG。
+- **启动**：`run.py` 支持 DP/单机 TP·PP；`run_torchrun.py` 仅多机 TP×PP。
 
 ---
 
@@ -192,16 +195,14 @@ $PY test/test_parallel.py --model <Qwen3-14B> --tp 1 --pp 2 --pp-layer-counts 12
 
 ## 性能对比
 
-统一 `enforce_eager=True` 隔离 TP/PP 通信开销（`bench/bench_parallel.py`，Qwen3-0.6B，
-prompt=256，greedy decode）：
+完整矩阵（0.6B / 4B / 8B / 14B，CG / compile，与官方 vLLM 对照）见 [docs/03-性能对比.md](docs/03-性能对比.md)。
 
+下表为 0.6B eager 示意（bench/bench_v4.py，prompt=256，greedy）：
 
-| 配置        | TTFT (ms) | decode tok/s (b=1) | 吞吐 tok/s (b=8) |
-| --------- | --------- | ------------------ | -------------- |
-| tp=1 pp=1 | 20.79     | 62.2               | 457.4          |
-| tp=2 pp=1 | 34.88     | 40.7               | 310.2          |
-| tp=1 pp=2 | 50.03     | 20.5               | 158.0          |
+| 配置 | TTFT (ms) | decode (tok/s) | batch8 (tok/s) |
+| --- | --- | --- | --- |
+| tp=1 pp=1 | 19.43 | 65.3 | 487.3 |
+| tp=2 pp=1 | 25.74 | 42.5 | 324.8 |
+| tp=1 pp=2 | 15.55 | 90.5 | 664.8 |
 
-
-0.6B 模型计算量极小，通信开销占主导，TP/PP 呈负加速比属预期——并行只在模型大到
-「计算 >> 通信」时才划算。该测量量化了通信开销这一设计目标。
+本机无 P2P 时，0.6B 的 TP/PP 吞吐由通信主导；完整结论见上文文档。
