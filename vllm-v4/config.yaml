@@ -50,4 +50,4 @@ nccl_ifname: ""  # 多机网卡名（如 ib0/eth0）；空=自动探测
 # enforce_eager: false → decode piecewise CUDA Graph（PP 时 recv/send 图外）；
 # torch_compile: true → prefill torch.compile（含 TP 时用 max-autotune-no-cudagraphs）。
 # 覆盖方式：命令行加 --cg / --compile。
-# 并行语义：dp=独立 Engine 副本；tp/pp=同 Engine NCCL（见 docs/07-控制面与并行.md）。
+# 并行语义：dp=独立 Engine 副本；tp/pp=同 Engine NCCL（见 docs/04-控制与并行.md）。

@@ -1,6 +1,6 @@
 """生成并行系列文档的两张插图：
 1. three_machines_topology.png  三台机器拓扑对照（docs/服务器测量.md）
-2. collectives.png              集合通信原语示意（docs/集合通信.md）
+2. collectives.png              集合通信原语示意（docs/04-控制与并行.md）
 """
 
 from __future__ import annotations

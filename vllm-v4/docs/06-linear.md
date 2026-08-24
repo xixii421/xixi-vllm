@@ -248,9 +248,6 @@ self.weight = nn.Parameter(torch.empty(total, in_size))
 加载时，`shard_id` 指向第几个子阵，本卡在这个子阵里的行偏移由前面子阵的行数累加得出。对 gate_up_proj 来说，output_sizes 是 `[intermediate, intermediate]`，本地权重就是 `[2 * intermediate/tp, hidden]`。一次矩阵乘算出 gate 和 up 两段，这正是 SwiGLU 需要的布局。
 
 ## 4. 前向计算
-
-
-
 ### 4.1 列并行的 all-gather
 
 `ColumnParallelLinear` 的前向先做一次本地矩阵乘。

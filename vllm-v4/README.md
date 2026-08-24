@@ -2,8 +2,8 @@
 
 > 以 v3 为基底迁移，实现**数据并行 DP**（独立 Engine 副本）、**张量并行 TP** 与
 > **流水线并行 PP**（sync 切层）。控制面按 vLLM V1 的
-> `EngineCore / Executor / EngineCoreClient` 分层；并行决策树见
-> [docs/07-控制面与并行.md](docs/07-控制面与并行.md)。
+> `EngineCore / Executor / EngineCoreClient` 分层；见
+> [docs/04-控制与并行.md](docs/04-控制与并行.md)。
 > 补齐 `torchrun` 多机启动与 NCCL 网络配置。
 
 ---
@@ -19,7 +19,7 @@
 
 
 单 Engine 内 rank：`global = pp_rank * tp_size + tp_rank`（`world_size = tp × pp`）。  
-总 GPU ≈ `dp × tp × pp`。控制面与并行决策树见 [docs/07-控制面与并行.md](docs/07-控制面与并行.md)。
+总 GPU ≈ `dp × tp × pp`。控制与并行见 [docs/04-控制与并行.md](docs/04-控制与并行.md)。
 
 ```
 [node 0]                          [node 1]
@@ -56,10 +56,8 @@ bash setup_env.sh          # 自动探测 CUDA 版本并装好环境
 | [docs/00-并行环境.md](docs/00-并行环境.md) | 三类并行策略、代价、决策树 |
 | [docs/01-硬件互联.md](docs/01-硬件互联.md) | 卡数、异构、NVLink 与 PCIe |
 | [docs/03-性能对比.md](docs/03-性能对比.md) | 0.6B/4B/8B/14B 实测矩阵与 vLLM 对照 |
-| [docs/07-控制面与并行.md](docs/07-控制面与并行.md) | 控制/调度如何承载 DP·TP·PP |
-| [docs/08-通信通道.md](docs/08-通信通道.md) | ZMQ / Gloo ControlChannel / NCCL |
+| [docs/04-控制与并行.md](docs/04-控制与并行.md) | 控制面、TP/PP/DP、NCCL/Gloo/ZMQ、进程组 |
 | [docs/02-服务器通信测量.md](docs/02-服务器通信测量.md) | 4×A100 通信实测与对照机 |
-| [docs/集合通信.md](docs/集合通信.md) | NCCL 原语、进程组细节 |
 | [docs/06-linear.md](docs/06-linear.md) | TP 线性层 |
 | [docs/05-词表.md](docs/05-词表.md) | 词表并行 |
 | [docs/多机部署.md](docs/多机部署.md) | git 同步与环境脚本 |
