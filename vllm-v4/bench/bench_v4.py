@@ -13,8 +13,16 @@ dp>1 时输出 N 路请求聚合吞吐。
 from __future__ import annotations
 
 import argparse
+import socket
 import sys
+import time
 from pathlib import Path
+
+
+def _free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
 
 ROOT = Path(__file__).resolve().parent.parent
 BENCH = Path(__file__).resolve().parent
@@ -71,6 +79,9 @@ def make_engine(
             num_kvcache_blocks=num_kvcache_blocks,
             device_ids=device_ids,
             pp_layer_counts=pp_layer_counts,
+            master_addr="127.0.0.1",
+            nccl_port=_free_tcp_port(),
+            nccl_ifname="lo",
         )
     )
 
@@ -131,19 +142,37 @@ def run(args: argparse.Namespace) -> int:
     )
 
     engine = None
+    last_exc: Exception | None = None
+    # NCCL 建连偶发失败，重试几轮换新端口重建。
+    for attempt in range(args.retries):
+        try:
+            engine = make_engine(
+                model=model,
+                tp=args.tp,
+                pp=args.pp,
+                dp=args.dp,
+                cg=cg,
+                compile=compile,
+                device_ids=parse_int_list(args.device_ids),
+                pp_layer_counts=parse_int_list(args.pp_layer_counts),
+                num_kvcache_blocks=args.num_kvcache_blocks,
+                max_num_seqs=args.max_num_seqs,
+            )
+            last_exc = None
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            print(
+                f"engine init attempt {attempt + 1}/{args.retries} failed: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            if attempt < args.retries - 1:
+                time.sleep(3)
     try:
-        engine = make_engine(
-            model=model,
-            tp=args.tp,
-            pp=args.pp,
-            dp=args.dp,
-            cg=cg,
-            compile=compile,
-            device_ids=parse_int_list(args.device_ids),
-            pp_layer_counts=parse_int_list(args.pp_layer_counts),
-            num_kvcache_blocks=args.num_kvcache_blocks,
-            max_num_seqs=args.max_num_seqs,
-        )
+        if engine is None:
+            assert last_exc is not None
+            raise last_exc
         if args.dp > 1:
             record = run_dp_replicas(engine, record, args.n_reqs)
         else:
@@ -179,6 +208,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-kvcache-blocks", type=int, default=64)
     p.add_argument("--max-num-seqs", type=int, default=16)
     p.add_argument("--n-reqs", type=int, default=32, help="仅 dp>1 使用")
+    p.add_argument("--retries", type=int, default=6, help="引擎初始化重试次数")
     return p
 
 

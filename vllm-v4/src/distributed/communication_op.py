@@ -20,7 +20,7 @@ def all_gather(
         dtype=input.dtype,
         device=input.device,
     )
-    dist.all_gather_single(output_tensor, input, group=group.device_group)
+    dist.all_gather_into_tensor(output_tensor, input, group=group.device_group)
     if dim == 0:
         return output_tensor
     output_tensor = output_tensor.reshape((group.size,) + input_size).movedim(0, dim)
@@ -59,7 +59,7 @@ def reduce_scatter(
         dtype=input_tensor.dtype,
         device=input_tensor.device,
     )
-    dist.reduce_scatter_single(
+    dist.reduce_scatter_tensor(
         output_tensor, input_tensor, group=group.device_group, op=op
     )
     if dim == 0:

@@ -29,6 +29,21 @@ from ..data import KVManager, SchedulerOutput, ScheduledBatch
 from ..distributed import ControlChannel, get_world_group
 
 
+def _terminate_procs(procs: list[mp.Process]) -> None:
+    """终止并回收残留 worker：SIGTERM 超时后升级 SIGKILL，避免卡在 CUDA/NCCL。"""
+    for p in procs:
+        if p.is_alive():
+            p.terminate()
+    for p in procs:
+        p.join(timeout=3)
+    for p in procs:
+        if p.is_alive():
+            p.kill()
+    for p in procs:
+        p.join(timeout=5)
+    procs.clear()
+
+
 def _sampler_rank(tp_size: int, pp_size: int) -> int:
     """采样回报的全局 rank：末 PP stage × TP rank 0。"""
     return (pp_size - 1) * tp_size
@@ -188,23 +203,36 @@ class MultiprocExecutor(Executor):
         self.kv: KVManager | None = None
 
         if worker is None:
-            ctx = mp.get_context("spawn")
-            for pp_rank in range(config.pp_size):
-                for tp_rank in range(config.tp_size):
-                    rank = pp_rank * config.tp_size + tp_rank
-                    if rank == 0:
-                        continue
-                    p = ctx.Process(
-                        target=_spawn_worker,
-                        args=(config, rank, tp_rank, pp_rank),
-                        daemon=True,
-                    )
-                    p.start()
-                    self._procs.append(p)
-            worker = Worker(config, rank=0, tp_rank=0, pp_rank=0)
-            worker.init_environment()
-            worker.initialize()
-            dist.barrier()
+            driver_worker: Worker | None = None
+            try:
+                ctx = mp.get_context("spawn")
+                for pp_rank in range(config.pp_size):
+                    for tp_rank in range(config.tp_size):
+                        rank = pp_rank * config.tp_size + tp_rank
+                        if rank == 0:
+                            continue
+                        p = ctx.Process(
+                            target=_spawn_worker,
+                            args=(config, rank, tp_rank, pp_rank),
+                            daemon=False,
+                        )
+                        p.start()
+                        self._procs.append(p)
+                driver_worker = Worker(config, rank=0, tp_rank=0, pp_rank=0)
+                driver_worker.init_environment()
+                driver_worker.initialize()
+                dist.barrier()
+                worker = driver_worker
+            except BaseException:
+                # 任一 rank 建连失败则清理残留 worker 与本进程 dist 状态，
+                # 让上层 retry 从干净状态重来。
+                _terminate_procs(self._procs)
+                if driver_worker is not None:
+                    try:
+                        driver_worker.destroy_environment()
+                    except Exception:
+                        pass
+                raise
 
         self.worker = worker
         self.num_blocks = worker.get_kv_cache_size()
@@ -264,11 +292,7 @@ class MultiprocExecutor(Executor):
                 self.shutdown()
             except Exception:
                 pass
-            for p in self._procs:
-                p.join(timeout=10)
-                if p.is_alive():
-                    p.terminate()
-            self._procs.clear()
+            _terminate_procs(self._procs)
             self.worker.destroy_environment()
         self.kv = None
 

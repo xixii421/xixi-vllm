@@ -8,6 +8,7 @@ from ..distributed import (
     IntermediateTensors,
     get_pp_group,
     get_tp_group,
+    get_world_group,
     recv_tensors,
     send_tensors,
 )
@@ -75,10 +76,17 @@ class ModelRunner:
 
         self.cuda_graph_runner: CUDAGraphRunner | None = None
         if not config.enforce_eager:
+            # capture 路径含 TP all-reduce / PP 边界，各 rank 先对齐再录，
+            # 避免先到的 rank 卡在 warmup 的 NCCL 集合通信。
+            world = get_world_group()
+            if world.size > 1:
+                world.barrier()
             self.cuda_graph_runner = CUDAGraphRunner(
                 CUDAGraphRunner.make_bs_list(max_bs), device
             )
             self.cuda_graph_runner.capture(self._decode_body)
+            if world.size > 1:
+                world.barrier()
 
         self.prefill_fn = None
         if config.torch_compile:

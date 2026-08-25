@@ -57,7 +57,6 @@ class Qwen3Attention(nn.Module):
         self.o_proj = nn.Linear(self.q_size,config.hidden_size,bias=False)
         self.rotary_emb = RotaryEmbedding(
             self.head_dim,
-            self.head_dim,
             config.max_position_embeddings,
             float(getattr(config,"rope_theta",1_000_000)),
         ) # RoPE 按照绝对位置旋转Q, K; Qwen3 全维旋转 (rotary_dim == head_dim)

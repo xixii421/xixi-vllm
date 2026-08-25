@@ -30,17 +30,34 @@ logger = logging.getLogger(__name__)
 class Group:
     """逻辑并行组：NCCL（GPU 张量）+ Gloo（CPU / 元数据）各一份 ProcessGroup。"""
 
-    def __init__(self, ranks: list[int], rank: int):
+    def __init__(
+        self,
+        ranks: list[int],
+        rank: int,
+        device_group: ProcessGroup | None = None,
+        cpu_group: ProcessGroup | None = None,
+    ):
         self.ranks = ranks
         self.rank = rank
         self.size = len(ranks)
         self.group_rank = ranks.index(rank)
-        self.device_group: ProcessGroup = dist.new_group(
-            ranks=ranks, use_local_synchronization=True
-        )
-        self.cpu_group: ProcessGroup = dist.new_group(
-            ranks=ranks, backend="gloo", use_local_synchronization=True
-        )
+        # 单例组（size==1）无需通信；显式传入时复用外部 ProcessGroup，避免重复建连。
+        self._owns_device_group = False
+        self._owns_cpu_group = False
+        if device_group is not None:
+            self.device_group = device_group
+        elif self.size > 1:
+            self.device_group = dist.new_group(ranks=ranks)
+            self._owns_device_group = True
+        else:
+            self.device_group = None
+        if cpu_group is not None:
+            self.cpu_group = cpu_group
+        elif self.size > 1:
+            self.cpu_group = dist.new_group(ranks=ranks, backend="gloo")
+            self._owns_cpu_group = True
+        else:
+            self.cpu_group = None
 
     @property
     def is_first_rank(self) -> bool:
@@ -79,14 +96,16 @@ class Group:
         return self.ranks[self.next_group_rank]
 
     def barrier(self) -> None:
-        if self.size > 1:
+        if self.size > 1 and self.cpu_group is not None:
             dist.barrier(self.cpu_group)
 
     def destroy(self) -> None:
-        dist.destroy_process_group(self.device_group)
-        dist.destroy_process_group(self.cpu_group)
-        del self.device_group
-        del self.cpu_group
+        if self._owns_device_group and self.device_group is not None:
+            dist.destroy_process_group(self.device_group)
+        if self._owns_cpu_group and self.cpu_group is not None:
+            dist.destroy_process_group(self.cpu_group)
+        self.device_group = None
+        self.cpu_group = None
 
 
 WORLD: Group | None = None
@@ -135,7 +154,16 @@ def initialize_model_parallel(
     my_rank = pp_rank * tp_size + tp_rank
     tp_ranks = [pp_rank * tp_size + k for k in range(tp_size)]
     pp_ranks = [k * tp_size + tp_rank for k in range(pp_size)]
-    TP = Group(ranks=tp_ranks, rank=my_rank)
+    # pp==1 时 TP 组 == WORLD 组，复用其 device/cpu 组，省掉一次冗余 NCCL 建连。
+    if WORLD is not None and tp_ranks == WORLD.ranks:
+        TP = Group(
+            ranks=tp_ranks,
+            rank=my_rank,
+            device_group=WORLD.device_group,
+            cpu_group=WORLD.cpu_group,
+        )
+    else:
+        TP = Group(ranks=tp_ranks, rank=my_rank)
     PP = Group(ranks=pp_ranks, rank=my_rank)
 
 
@@ -172,7 +200,15 @@ def init_distributed_environment(
         timeout=datetime.timedelta(seconds=timeout),
         device_id=torch.device("cuda", device_id) if backend == "nccl" else None,
     )
-    WORLD = Group(ranks=list(range(world_size)), rank=rank)
+    # 复用 init_process_group 建的默认 NCCL 组，避免 new_group 重复建连。
+    default_device_group: ProcessGroup | None = None
+    if backend == "nccl":
+        from torch.distributed.distributed_c10d import _get_default_group
+
+        default_device_group = _get_default_group()
+    WORLD = Group(
+        ranks=list(range(world_size)), rank=rank, device_group=default_device_group
+    )
 
 
 def destroy_distributed_environment() -> None:
@@ -216,5 +252,6 @@ def set_nccl_env(ifname: str = "", *, disable_ib: bool = False) -> None:
     else:
         _set("NCCL_IB_GID_INDEX", "3")
         _set("NCCL_NET_GDR_LEVEL", "5")
-    _set("NCCL_P2P_LEVEL", "PXB")
     _set("NCCL_DEBUG", "WARN")
+    # 拉长 heartbeat，避免慢机上的 watchdog 误杀 rank。
+    _set("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC", "1800")

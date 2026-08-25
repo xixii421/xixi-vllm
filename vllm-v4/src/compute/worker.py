@@ -25,6 +25,7 @@ from ..distributed import (
     get_pp_group,
     init_distributed_environment,
     initialize_model_parallel,
+    set_nccl_env,
     set_pp_layer_ranges,
 )
 from .kv_pool import KVPool
@@ -62,9 +63,19 @@ class Worker:
         self._mem_baseline = 0
 
     def init_environment(self, init_method: str | None = None) -> None:
-        init_method = init_method or (
-            f"tcp://{self.config.master_addr}:{self.config.nccl_port}"
-        )
+        # 单机 spawn 默认走 lo；跨机在 config.nccl_ifname 填 ib0/eth0。
+        ifname = self.config.nccl_ifname or "lo"
+        set_nccl_env(ifname, disable_ib=not bool(self.config.nccl_ifname))
+        # 单机（loopback）用文件 rendezvous，不依赖 rank0 先起 TCPStore 的时序。
+        if init_method is None and self.config.master_addr in ("", "127.0.0.1", "localhost"):
+            init_method = (
+                f"file:///tmp/dzyy_vllm_rdv_{self.config.nccl_port}"
+                f"_{self.config.tp_size}_{self.config.pp_size}"
+            )
+        else:
+            init_method = init_method or (
+                f"tcp://{self.config.master_addr}:{self.config.nccl_port}"
+            )
         init_distributed_environment(
             world_size=self.world_size,
             rank=self.rank,
