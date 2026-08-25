@@ -8,9 +8,10 @@
 | bench_vllm.py | 官方 vLLM 对照（仅单卡与 TP） |
 | run_matrix.py | 按 suite 批量跑矩阵 |
 | report.py | 从 out/bench.jsonl 生成 Markdown 表 |
-| probe_server.py | 可选：服务器拓扑与带宽体检 |
+| probe_server.py | 可选：服务器拓扑与 NCCL 延迟体检 |
+| micro/bench_bandwidth.py | 可选：P2P / NCCL 带宽曲线（支持多拓扑 --pairs） |
 
-组件微基准在 micro/ 目录，不进入日常矩阵。
+组件微基准在 micro/ 目录，不进入日常矩阵。通信测量说明见 docs/02-服务器通信测量.md。
 
 ## 单配置
 
