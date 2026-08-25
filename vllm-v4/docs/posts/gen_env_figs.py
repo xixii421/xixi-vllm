@@ -1,5 +1,7 @@
-"""生成并行系列文档插图：
-1. three_machines_topology.png  三台机器拓扑对照（docs/02-服务器通信测量.md）
+"""生成并行系列文档插图：三台机器拓扑对照（docs/02-服务器通信测量.md）。
+
+用法（在 vllm-v4 下）：
+    python docs/posts/gen_env_figs.py
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import matplotlib.font_manager as fm
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 
-OUT = Path(__file__).resolve().parent / ".." / "docs" / "posts"
+OUT = Path(__file__).resolve().parent
 
 _FONT = "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"
 fm.fontManager.addfont(_FONT)
@@ -43,7 +45,6 @@ def draw_topology() -> None:
         ax.text((x0 + x1) / 2, y1 - 0.1, label, ha="center", va="bottom",
                 fontsize=8, color="#4a5568")
 
-    # ---- 环境 A：4090D + 4070S，跨 NUMA，P2P NS ----
     ax = axes[0]
     ax.set_title("环境 A  本地工作站  2 卡强异构", fontsize=10)
     gpu(ax, 0, 1.3, "4090 D\n24GB")
@@ -55,7 +56,6 @@ def draw_topology() -> None:
             fontsize=7.5, color="#4a5568")
     ax.set_xlim(-1.2, 3.4); ax.set_ylim(-0.5, 2.2); ax.axis("off")
 
-    # ---- 环境 B：4 卡，GPU0/1 PIX，GPU2/3 PXB，跨组 SYS，P2P OK ----
     ax = axes[1]
     ax.set_title("环境 B  四卡服务器  同构  P2P=OK", fontsize=10)
     for i, x in enumerate([0, 1.4, 3.6, 5.0]):
@@ -69,7 +69,6 @@ def draw_topology() -> None:
             fontsize=7.5, color="#4a5568")
     ax.set_xlim(-1.2, 6.2); ax.set_ylim(-0.5, 2.2); ax.axis("off")
 
-    # ---- 环境 C：6 卡，GPU3 是 A100，其余 3090，P2P NS/CNS ----
     ax = axes[2]
     ax.set_title("环境 C  六卡服务器  A100+5x3090 强异构", fontsize=10)
     gpu(ax, 0, 1.3, "GPU0\n3090")

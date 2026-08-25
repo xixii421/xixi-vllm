@@ -1,52 +1,37 @@
-"""Batch：常驻 GPU buffer（计算面）。
-
-prefill / decode / CUDA Graph 共用同一套静态 GPU 张量，每步只 ``copy_`` 实际数据进
-buffer；CPU 侧配套预分配的 pinned staging 中转区（``_Staging``），热路径不再动态
-分配锁页内存。padding 区域保持捕获时的安全值（slot=-1、seqlen=0、block=-1），
-CUDA Graph 重放无需额外清理。
-"""
-
 from __future__ import annotations
 
+import numpy as np
 import torch
 
 from ..data.batch import SeqSchedule
 from ..data.sequence import slots_for_range
 
 
-class _Staging:
-    """与 GPU 张量同形状的 pinned CPU 中转区，热路径复用。
+def _pinned(
+    shape: int | tuple[int, ...],
+    dtype: torch.dtype,
+    fill: int | float | None = None,
+) -> torch.Tensor:
+    if isinstance(shape, int):
+        shape = (shape,)
+    if fill is None:
+        return torch.empty(shape, dtype=dtype, pin_memory=True)
+    return torch.full(shape, fill, dtype=dtype, pin_memory=True)
 
-    decode / prefill 各持一份：``mix_prefill_decode`` 开启时同一步内先
-    build_decode 再 build_prefill，前者发起的异步 H2D 拷贝尚未执行完，
-    共用一份 staging 会被后者覆盖而读到脏数据。block_tables 预填 -1，
-    每步只写有效块、逐行清理 padding。
-    """
 
-    def __init__(self, *, max_bs: int, max_tokens: int, max_blocks: int) -> None:
-        self.input_ids = self._alloc(max_tokens, torch.int64)
-        self.positions = self._alloc(max_tokens, torch.int64)
-        self.slot_mapping = self._alloc(max_tokens, torch.int32, fill=-1)
-        self.cache_seqlens = self._alloc(max_bs, torch.int32)
-        self.cu_seqlens_q = self._alloc(max_bs + 1, torch.int32)
-        self.cu_seqlens_k = self._alloc(max_bs + 1, torch.int32)
-        self.block_tables = self._alloc((max_bs, max_blocks), torch.int32, fill=-1)
-        self.temperatures = self._alloc(max_bs, torch.float32)
-        self.top_ps = self._alloc(max_bs, torch.float32)
-        self.top_ks = self._alloc(max_bs, torch.int32)
-        self.min_ps = self._alloc(max_bs, torch.float32)
+def _h2d(dst: torch.Tensor, src: torch.Tensor, n: int) -> None:
+    dst[:n].copy_(src[:n], non_blocking=True)
 
-    @staticmethod
-    def _alloc(
-        shape: int | tuple[int, ...],
-        dtype: torch.dtype,
-        fill: int | float | None = None,
-    ) -> torch.Tensor:
-        if isinstance(shape, int):
-            shape = (shape,)
-        if fill is None:
-            return torch.empty(shape, dtype=dtype, pin_memory=True)
-        return torch.full(shape, fill, dtype=dtype, pin_memory=True)
+
+def _gpu(
+    shape: int | tuple[int, ...],
+    dtype: torch.dtype,
+    device: torch.device,
+    fill: int | float = 0,
+) -> torch.Tensor:
+    if isinstance(shape, int):
+        shape = (shape,)
+    return torch.full(shape, fill, dtype=dtype, device=device)
 
 
 class Batch:
@@ -67,22 +52,18 @@ class Batch:
         self.device = device
         self.block_size = block_size
 
-        self.input_ids = torch.zeros(max_tokens, dtype=torch.int64, device=device)
-        self.positions = torch.zeros(max_tokens, dtype=torch.int64, device=device)
-        self.slot_mapping = torch.full(
-            (max_tokens,), -1, dtype=torch.int32, device=device
-        )
-        self.cache_seqlens = torch.zeros(max_bs, dtype=torch.int32, device=device)
-        self.cu_seqlens_q = torch.zeros(max_bs + 1, dtype=torch.int32, device=device)
-        self.cu_seqlens_k = torch.zeros(max_bs + 1, dtype=torch.int32, device=device)
-        self.block_tables = torch.zeros(
-            max_bs, max_blocks, dtype=torch.int32, device=device
-        )
+        self.input_ids = _gpu(max_tokens, torch.int64, device)
+        self.positions = _gpu(max_tokens, torch.int64, device)
+        self.slot_mapping = _gpu(max_tokens, torch.int32, device, fill=-1)
+        self.cache_seqlens = _gpu(max_bs, torch.int32, device)
+        self.cu_seqlens_q = _gpu(max_bs + 1, torch.int32, device)
+        self.cu_seqlens_k = _gpu(max_bs + 1, torch.int32, device)
+        self.block_tables = _gpu((max_bs, max_blocks), torch.int32, device, fill=-1)
 
-        self.temperatures = torch.zeros(max_bs, dtype=torch.float32, device=device)
-        self.top_ps = torch.zeros(max_bs, dtype=torch.float32, device=device)
-        self.top_ks = torch.zeros(max_bs, dtype=torch.int32, device=device)
-        self.min_ps = torch.zeros(max_bs, dtype=torch.float32, device=device)
+        self.temperatures = _gpu(max_bs, torch.float32, device)
+        self.top_ps = _gpu(max_bs, torch.float32, device)
+        self.top_ks = _gpu(max_bs, torch.int32, device)
+        self.min_ps = _gpu(max_bs, torch.float32, device)
 
         self.all_greedy = True
         self.any_greedy = False
@@ -91,128 +72,180 @@ class Batch:
         self.use_min_p = False
         self.max_top_k = 0
 
-        self._decode_staging = _Staging(
-            max_bs=max_bs, max_tokens=max_tokens, max_blocks=max_blocks
-        )
-        self._prefill_staging = _Staging(
-            max_bs=max_bs, max_tokens=max_tokens, max_blocks=max_blocks
-        )
+        self._dec_ids = _pinned(max_bs, torch.int64)
+        self._dec_pos = _pinned(max_bs, torch.int64)
+        self._dec_slot = _pinned(max_bs, torch.int32, fill=-1)
+        self._dec_csl = _pinned(max_bs, torch.int32)
 
-    @staticmethod
-    def _put(gpu: torch.Tensor, staging: torch.Tensor, values: list) -> None:
-        """list → pinned staging → GPU：复用缓冲，单次异步 H2D，无新增分配。"""
-        staging.numpy()[:] = values
-        gpu.copy_(staging, non_blocking=True)
+        self._pre_ids = _pinned(max_tokens, torch.int64)
+        self._pre_pos = _pinned(max_tokens, torch.int64)
+        self._pre_slot = _pinned(max_tokens, torch.int32, fill=-1)
+        self._pre_cuq = _pinned(max_bs + 1, torch.int32)
+        self._pre_cuk = _pinned(max_bs + 1, torch.int32)
 
-    def build_decode(self, seqs: list[SeqSchedule]) -> None:
+        self._h_temp = _pinned(max_bs, torch.float32)
+        self._h_top_p = _pinned(max_bs, torch.float32)
+        self._h_top_k = _pinned(max_bs, torch.int32)
+        self._h_min_p = _pinned(max_bs, torch.float32)
+
+        self._bt_pin = _pinned((max_bs, max_blocks), torch.int32, fill=-1)
+        self._bt_cpu = self._bt_pin.numpy()
+        self._row_fp: list[tuple[int, int, int]] = [(-1, -1, -1)] * max_bs
+        self._gpu_bt_ids: tuple[int, ...] = ()
+        self._samp_key: tuple | None = None
+
+        self._dec_ids_np = self._dec_ids.numpy()
+        self._dec_pos_np = self._dec_pos.numpy()
+        self._dec_slot_np = self._dec_slot.numpy()
+        self._dec_csl_np = self._dec_csl.numpy()
+        self._pre_ids_np = self._pre_ids.numpy()
+        self._pre_pos_np = self._pre_pos.numpy()
+        self._pre_slot_np = self._pre_slot.numpy()
+        self._pre_cuq_np = self._pre_cuq.numpy()
+        self._pre_cuk_np = self._pre_cuk.numpy()
+        self._h_temp_np = self._h_temp.numpy()
+        self._h_top_p_np = self._h_top_p.numpy()
+        self._h_top_k_np = self._h_top_k.numpy()
+        self._h_min_p_np = self._h_min_p.numpy()
+
+    def build_decode(
+        self, seqs: list[SeqSchedule], *, pad_to: int | None = None
+    ) -> None:
         bs = len(seqs)
-        st = self._decode_staging
-        # decode 时 num_cached_tokens 已指向本步 token 的位置：position = num_cached_tokens，
-        # cache_seqlen = num_cached_tokens + 1（含本步写入的 KV）。
-        self._put(
-            self.input_ids[:bs],
-            st.input_ids[:bs],
-            [s.token_ids[-1] for s in seqs],
-        )
-        self._put(
-            self.positions[:bs],
-            st.positions[:bs],
-            [s.num_cached_tokens for s in seqs],
-        )
-        self._put(
-            self.slot_mapping[:bs],
-            st.slot_mapping[:bs],
-            [self._decode_slot(s) for s in seqs],
-        )
-        self._put(
-            self.cache_seqlens[:bs],
-            st.cache_seqlens[:bs],
-            [s.num_cached_tokens + 1 for s in seqs],
-        )
-        self._fill_block_tables(st, seqs)
-        self._fill_sampling(st, seqs)
+        ids_np, pos_np = self._dec_ids_np, self._dec_pos_np
+        slot_np, csl_np = self._dec_slot_np, self._dec_csl_np
+        bsz = self.block_size
+        for i, s in enumerate(seqs):
+            pos = s.num_cached_tokens
+            bt = s.block_table
+            ids_np[i] = s.token_ids[-1]
+            pos_np[i] = pos
+            slot_np[i] = bt[pos // bsz] * bsz + pos % bsz
+            csl_np[i] = pos + 1
+        _h2d(self.input_ids, self._dec_ids, bs)
+        _h2d(self.positions, self._dec_pos, bs)
+        _h2d(self.slot_mapping, self._dec_slot, bs)
+        _h2d(self.cache_seqlens, self._dec_csl, bs)
+
+        sid = tuple(s.seq_id for s in seqs)
+        self._sync_block_tables(seqs, sid)
+        self._sync_sampling(seqs)
+        if pad_to is not None and pad_to > bs:
+            self.slot_mapping[bs:pad_to].fill_(-1)
+            self.cache_seqlens[bs:pad_to].zero_()
+            self.block_tables[bs:pad_to].fill_(-1)
 
     def build_prefill(self, seqs: list[SeqSchedule]) -> tuple[int, int, int, bool]:
-        st = self._prefill_staging
-        ids: list[int] = []
-        positions: list[int] = []
-        slots: list[int] = []
-        cu_q = [0]
-        cu_k = [0]
+        ids = self._pre_ids_np
+        positions = self._pre_pos_np
+        slots = self._pre_slot_np
+        cu_q = self._pre_cuq_np
+        cu_k = self._pre_cuk_np
+        cu_q[0] = 0
+        cu_k[0] = 0
         max_q = 0
         max_k = 0
-        for s in seqs:
+        n_tokens = 0
+        for i, s in enumerate(seqs):
             start = s.num_cached_tokens
             n = len(s.token_ids)
             end = start + n
-            ids.extend(s.token_ids)
-            positions.extend(range(start, end))
-            slots.extend(slots_for_range(s.block_table, start, end, self.block_size))
-            cu_q.append(cu_q[-1] + n)
-            cu_k.append(cu_k[-1] + end)
+            ids[n_tokens : n_tokens + n] = s.token_ids
+            positions[n_tokens : n_tokens + n] = np.arange(start, end)
+            slots[n_tokens : n_tokens + n] = slots_for_range(
+                s.block_table, start, end, self.block_size
+            )
+            cu_q[i + 1] = cu_q[i] + n
+            cu_k[i + 1] = cu_k[i] + end
             max_q = max(max_q, n)
             max_k = max(max_k, end)
+            n_tokens += n
 
-        n = len(ids)
-        self._put(self.input_ids[:n], st.input_ids[:n], ids)
-        self._put(self.positions[:n], st.positions[:n], positions)
-        self._put(self.slot_mapping[:n], st.slot_mapping[:n], slots)
-        self._put(
-            self.cu_seqlens_q[: len(cu_q)],
-            st.cu_seqlens_q[: len(cu_q)],
-            cu_q,
-        )
-        self._put(
-            self.cu_seqlens_k[: len(cu_k)],
-            st.cu_seqlens_k[: len(cu_k)],
-            cu_k,
-        )
+        bs = len(seqs)
+        _h2d(self.input_ids, self._pre_ids, n_tokens)
+        _h2d(self.positions, self._pre_pos, n_tokens)
+        _h2d(self.slot_mapping, self._pre_slot, n_tokens)
+        n_cu = bs + 1
+        _h2d(self.cu_seqlens_q, self._pre_cuq, n_cu)
+        _h2d(self.cu_seqlens_k, self._pre_cuk, n_cu)
 
-        has_cache = cu_k[-1] > cu_q[-1]
+        has_cache = int(cu_k[bs]) > int(cu_q[bs])
+        sid = tuple(s.seq_id for s in seqs)
         if has_cache:
-            self._fill_block_tables(st, seqs)
-        self._fill_sampling(st, seqs)
-        return n, max_q, max_k, has_cache
+            self._sync_block_tables(seqs, sid)
+        else:
+            self._gpu_bt_ids = ()
+        self._sync_sampling(seqs)
+        return n_tokens, max_q, max_k, has_cache
 
-    def _fill_block_tables(self, st: _Staging, seqs: list[SeqSchedule]) -> None:
-        # 每行只写有效块，剩余清 -1（行复用可能残留旧 seq 的块 id，须保证
-        # padding 恒为安全值）；整行一次全宽异步拷贝到 GPU。
-        view = st.block_tables.numpy()
+    def _sync_block_tables(
+        self, seqs: list[SeqSchedule], sid: tuple[int, ...]
+    ) -> None:
+        bs = len(seqs)
+        same = sid == self._gpu_bt_ids
+        dirty: list[int] = []
+        fp = self._row_fp
+        cpu = self._bt_cpu
         for i, s in enumerate(seqs):
-            row = view[i]
-            k = len(s.block_table)
-            row[:k] = s.block_table
-            row[k:] = -1
-        self.block_tables[: len(seqs)].copy_(
-            st.block_tables[: len(seqs)], non_blocking=True
-        )
+            bt = s.block_table
+            k = len(bt)
+            first, last, prev_k = fp[i]
+            if not same:
+                prev_k = -1
+            elif prev_k == k and (k == 0 or (bt[0] == first and bt[-1] == last)):
+                continue
+            if (
+                prev_k == k - 1
+                and k > 0
+                and (k == 1 or (first == bt[0] and last == bt[k - 2]))
+            ):
+                cpu[i, k - 1] = bt[-1]
+            else:
+                cpu[i, :k] = bt
+                cpu[i, k:] = -1
+            fp[i] = (bt[0] if k else -1, bt[-1] if k else -1, k)
+            dirty.append(i)
+        self._gpu_bt_ids = sid
+        if not dirty:
+            return
+        if len(dirty) > 8 or not same:
+            self.block_tables[:bs].copy_(self._bt_pin[:bs], non_blocking=True)
+            return
+        for i in dirty:
+            self.block_tables[i].copy_(self._bt_pin[i], non_blocking=True)
 
-    def _fill_sampling(self, st: _Staging, seqs: list[SeqSchedule]) -> None:
+    def _sync_sampling(self, seqs: list[SeqSchedule]) -> None:
+        key = tuple(
+            (s.seq_id, s.temperature, s.top_p, s.top_k, s.min_p) for s in seqs
+        )
+        if key == self._samp_key:
+            return
+        self._samp_key = key
         bs = len(seqs)
         vocab = self.vocab_size
-        temps = [s.temperature for s in seqs]
-        top_ps = [1.0 if s.top_p is None else s.top_p for s in seqs]
-        top_ks = [
-            vocab if (s.top_k is None or s.top_k <= 0) else min(s.top_k, vocab)
-            for s in seqs
-        ]
-        min_ps = [0.0 if s.min_p is None else s.min_p for s in seqs]
+        temps = self._h_temp_np
+        top_ps = self._h_top_p_np
+        top_ks = self._h_top_k_np
+        min_ps = self._h_min_p_np
+        for i, s in enumerate(seqs):
+            temps[i] = s.temperature
+            top_ps[i] = 1.0 if s.top_p is None else s.top_p
+            top_ks[i] = (
+                vocab if (s.top_k is None or s.top_k <= 0) else min(s.top_k, vocab)
+            )
+            min_ps[i] = 0.0 if s.min_p is None else s.min_p
+        _h2d(self.temperatures, self._h_temp, bs)
+        _h2d(self.top_ps, self._h_top_p, bs)
+        _h2d(self.top_ks, self._h_top_k, bs)
+        _h2d(self.min_ps, self._h_min_p, bs)
 
-        self._put(self.temperatures[:bs], st.temperatures[:bs], temps)
-        self._put(self.top_ps[:bs], st.top_ps[:bs], top_ps)
-        self._put(self.top_ks[:bs], st.top_ks[:bs], top_ks)
-        self._put(self.min_ps[:bs], st.min_ps[:bs], min_ps)
-
-        self.all_greedy = all(t <= 1e-5 for t in temps)
-        self.any_greedy = any(t <= 1e-5 for t in temps)
-        self.use_top_k = any(k < vocab for k in top_ks)
-        self.use_top_p = any(p < 1.0 for p in top_ps)
-        self.use_min_p = any(m > 0.0 for m in min_ps)
-        self.max_top_k = max(top_ks) if self.use_top_k else 0
-
-    def _decode_slot(self, seq: SeqSchedule) -> int:
-        n = seq.num_cached_tokens + 1
-        return (
-            seq.block_table[(n - 1) // self.block_size] * self.block_size
-            + (n - 1) % self.block_size
-        )
+        t = temps[:bs]
+        k = top_ks[:bs]
+        p = top_ps[:bs]
+        m = min_ps[:bs]
+        self.all_greedy = bool(np.all(t <= 1e-5))
+        self.any_greedy = bool(np.any(t <= 1e-5))
+        self.use_top_k = bool(np.any(k < vocab))
+        self.use_top_p = bool(np.any(p < 1.0))
+        self.use_min_p = bool(np.any(m > 0.0))
+        self.max_top_k = int(k.max()) if self.use_top_k else 0

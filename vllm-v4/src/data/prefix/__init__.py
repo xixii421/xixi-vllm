@@ -1,5 +1,3 @@
-"""Prefix cache backends: none | hash | radix."""
-
 from __future__ import annotations
 
 from typing import Literal
@@ -8,6 +6,7 @@ from .hash_index import HashPrefixIndex
 from .noop import NoopPrefixIndex
 from .radix_index import RadixPrefixIndex
 
+# KVManager 按 config.prefix_backend 在这里选实现。
 PrefixBackend = Literal["none", "hash", "radix"]
 
 

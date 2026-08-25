@@ -1,19 +1,18 @@
-"""KVManager：driver 侧纯逻辑账本（块表 + 前缀索引，不占 GPU、不依赖 torch/distributed）。
-
-GPU KV 张量（KVPool）已迁到 ``compute/kv_pool.py``。调度器只通过本类管理
-「逻辑块分配 / 前缀命中 / 释放」，与 worker 侧的显存分配完全解耦。
-"""
-
 from __future__ import annotations
 
 from .block_manager import BlockManager
 from .prefix import PrefixBackend, RadixPrefixIndex, make_prefix_index
 from .sequence import Sequence
 
+# ==============================================================================
+# driver 侧 KV 账本：给序列发逻辑页、查前缀命中、用完回收。
+#
+# Scheduler 调 can_allocate / allocate / may_append / deallocate。
+# GPU 上真正的 cache 张量在 compute/kv_pool.py，本类不 import torch。
+# ==============================================================================
+
 
 class KVManager:
-    """块表 + 前缀索引的逻辑账本。"""
-
     def __init__(
         self,
         *,
@@ -39,6 +38,7 @@ class KVManager:
         return self.blocks.num_free
 
     def _fit_prefix(self, seq: Sequence) -> int:
+        """在现有空闲页够用的前提下，最多能复用几块前缀。不够则退到更短命中。"""
         need = seq.num_blocks
         if need == 0:
             return 0
@@ -90,6 +90,7 @@ class KVManager:
         self.blocks.may_append(seq)
 
     def sync_prefix(self, seq: Sequence) -> None:
+        """本步写满的新块登记进前缀索引，供后来的请求命中。"""
         if self.prefix_backend == "none" or seq.num_scheduled_tokens <= 0:
             return
         prev = seq.num_cached_tokens - seq.num_scheduled_tokens

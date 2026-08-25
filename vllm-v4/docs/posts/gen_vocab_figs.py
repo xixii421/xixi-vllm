@@ -1,8 +1,11 @@
 """生成词表文档的两张结构示意图：嵌入查表、LM Head。
 
+用法（在 vllm-v4 下）：
+    python docs/posts/gen_vocab_figs.py
+
 输出到 docs/posts/：
-    embedding_lookup.png   词嵌入查表示意图
-    lm_head.png            LM Head 与 softmax 示意图
+    embedding_lookup.png
+    lm_head.png
 """
 
 from __future__ import annotations
@@ -15,18 +18,17 @@ import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Rectangle
 
-OUT = Path(__file__).resolve().parent / ".." / "docs" / "posts"
+OUT = Path(__file__).resolve().parent
 
 _FONT = "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"
 fm.fontManager.addfont(_FONT)
-# matplotlib 3.6+ 支持字体回退列表：ASCII 走 DejaVu，CJK 走 Droid Sans Fallback
 plt.rcParams["font.family"] = ["DejaVu Sans", "Droid Sans Fallback"]
 plt.rcParams["axes.unicode_minus"] = False
 
-C_MAIN = "#2563eb"   # 主蓝
-C_HL = "#f59e0b"     # 高亮橙
-C_DIM = "#9ca3af"    # 弱化灰
-C_BG = "#f8fafc"     # 底
+C_MAIN = "#2563eb"
+C_HL = "#f59e0b"
+C_DIM = "#9ca3af"
+C_BG = "#f8fafc"
 
 
 def _box(ax, x, y, w, h, text, fc=C_BG, ec=C_MAIN, fs=10, tc="black",
@@ -54,16 +56,13 @@ def draw_embedding_lookup() -> None:
     ax.set_ylim(0, 5.6)
     ax.axis("off")
 
-    # ---------- 左：token 序列 ----------
     _box(ax, 0.2, 3.9, 2.0, 1.3, "输入 token\n[1, 2, 3]", fc="#e0f2fe")
     tokens = ["0  [BOS]", "1  我", "2  爱", "3  中国", "4  [EOS]"]
     for i, t in enumerate(tokens):
         y = 3.55 - i * 0.85
         _box(ax, 0.35, y, 1.7, 0.6, t, fc="#f1f5f9", ec=C_DIM, fs=9)
 
-    # ---------- 中：词表矩阵 [5, 4] ----------
-    mat_x, mat_y, cell_w, cell_h = 3.0, 0.7, 0.62, 0.62
-    # 行头（token 号）与行内容
+    mat_x, cell_w, cell_h = 3.0, 0.62, 0.62
     row_head = ["第 0 行", "第 1 行", "第 2 行", "第 3 行", "第 4 行"]
     vals = [
         ["0.1", "0.2", "0.3", "0.4"],
@@ -72,7 +71,7 @@ def draw_embedding_lookup() -> None:
         ["0.7", "0.0", "-0.2", "0.6"],
         ["0.2", "0.8", "-0.4", "0.1"],
     ]
-    hl_rows = {1, 2, 3}  # 输入命中的行
+    hl_rows = {1, 2, 3}
     for r in range(5):
         for c in range(5):
             x = mat_x + c * cell_w
@@ -86,17 +85,14 @@ def draw_embedding_lookup() -> None:
                 ec = C_HL if r in hl_rows else "#cbd5e1"
                 _box(ax, x, y, cell_w, cell_h, vals[r][c - 1], fc=fc,
                      ec=ec, fs=9)
-    # 表标题
     _box(ax, mat_x, 5.0, 5 * cell_w, 0.5,
          "词嵌入表 [vocab=5, hidden=4]", fc="#dbeafe", ec=C_MAIN, fs=10)
 
-    # 箭头：token → 命中行
     for i, ti in enumerate([1, 2, 3]):
-        ty = 3.55 - ti * 0.85 + 0.3          # token 框中心
-        my = 4.15 - ti * cell_h + cell_h / 2  # 行中心
+        ty = 3.55 - ti * 0.85 + 0.3
+        my = 4.15 - ti * cell_h + cell_h / 2
         _arrow(ax, (2.05, ty), (mat_x + 0.31, my), color=C_HL, lw=1.8)
 
-    # ---------- 右：查表输出 ----------
     out_x, out_y = 8.5, 1.0
     _box(ax, out_x, 4.4, 2.4, 0.6, "查出的嵌入向量\n[3, 4]", fc="#dbeafe")
     out_vals = [
@@ -110,10 +106,8 @@ def draw_embedding_lookup() -> None:
             y = out_y + (2 - r) * 0.62
             _box(ax, x, y, 0.6, 0.62, out_vals[r][c], fc="#fef3c7",
                  ec=C_HL, fs=9)
-    # 箭头 矩阵→输出
     _arrow(ax, (6.1, 2.4), (out_x - 0.1, 2.9), color=C_MAIN, lw=1.8)
 
-    # 说明文字
     ax.text(0.2, 0.12, "查表就是从词表矩阵中取出 token 对应的那一行，"
             "表是训练结束后固定不变的。",
             fontsize=9.5, color="#334155")
@@ -130,15 +124,13 @@ def draw_lm_head() -> None:
     ax.set_ylim(0, 5.4)
     ax.axis("off")
 
-    # ---------- 左：隐藏向量 h ----------
     _box(ax, 0.2, 3.9, 1.9, 1.1, "最后一个 token\n的隐藏向量 h\n[hidden]", fc="#e0f2fe")
     for i in range(8):
         y = 3.35 - i * 0.28
         _box(ax, 0.45, y, 1.35, 0.24, "", fc="#dbeafe", ec="#93c5fd", lw=0.8)
     ax.text(0.45, 0.75, "h 的 8 个分量示意", fontsize=8.5, color="#64748b")
 
-    # ---------- 中：LM Head 权重矩阵 [V, H] ----------
-    mat_x, mat_y = 3.0, 0.8
+    mat_x = 3.0
     cell_w, cell_h, rows, cols = 0.56, 0.5, 8, 5
     for r in range(rows):
         for c in range(cols):
@@ -151,10 +143,8 @@ def draw_lm_head() -> None:
     ax.text(mat_x, 4.75 - rows * cell_h, "每一行是一个词的方向",
             fontsize=8.5, color="#64748b")
 
-    # 箭头：h → 权重
     _arrow(ax, (2.15, 2.6), (mat_x - 0.1, 3.4), color=C_MAIN, lw=1.8)
 
-    # ---------- 右：logits + softmax ----------
     logits = [2.1, 0.5, 3.2, 1.1, -0.5, 0.8, -1.2, 0.3]
     labels = ["[BOS]", "我", "爱", "中国", "[EOS]", "你", "好", "的"]
     bar_x, bar_w = 7.1, 2.2

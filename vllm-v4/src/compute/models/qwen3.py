@@ -239,13 +239,13 @@ class Qwen3ForCausalLM(nn.Module):
 
     def load_weights(self, weights):
         """
-        从 HuggingFace 格式加载权重，并自动处理 TP 切分与 PP 映射。
-        
-        主要处理逻辑:
-        1. 过滤并映射层索引：根据当前 PP stage 重命名 layer index。
-        2. 处理融合权重：将 HF 的独立 Q/K/V 和 Gate/Up 权重切分加载到融合矩阵中。
-        3. 处理普通权重：直接加载未融合的权重。
-        4. 权重绑定：处理 lm_head 和 embed_tokens 的权重共享逻辑。
+            从 HuggingFace 格式加载权重，并自动处理 TP 切分与 PP 映射。
+            
+            主要处理逻辑:
+            1. 过滤并映射层索引：根据当前 PP stage 重命名 layer index。
+            2. 处理融合权重：将 HF 的独立 Q/K/V 和 Gate/Up 权重切分加载到融合矩阵中。
+            3. 处理普通权重：直接加载未融合的权重。
+            4. 权重绑定：处理 lm_head 和 embed_tokens 的权重共享逻辑。
         """
 
 

@@ -11,7 +11,6 @@ from ..distributed import graph_capture
 class CUDAGraphRunner:
     def __init__(self, bs_list: list[int], device: torch.device):
         self.device = device
-        # 保持升序：_pad_bs 需找「最小 >= bs」的图；capture 内部再降序捕获。
         self.bs_list = sorted(bs_list)
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
         self.outputs: dict[int, Any] = {}
@@ -32,7 +31,6 @@ class CUDAGraphRunner:
         torch.cuda.synchronize(self.device)
 
     def replay(self, bs: int) -> tuple[Any, int]:
-        """重放后返回 (静态输出句柄, 实际 padded bs)。调用方切片到 bs。"""
         pbs = self._pad_bs(bs)
         self.graphs[pbs].replay()
         return self.outputs[pbs], pbs

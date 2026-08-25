@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import torch
@@ -9,17 +10,16 @@ from ...distributed import (
     tensor_model_parallel_all_reduce,
 )
 
-"""
-Qwen3 张量并行核心组件实现。
-包含 Embedding 层和 LM Head 层，针对显存带宽和通信开销做了优化。
-"""
-
+# ==============================================================================
+# Qwen3 张量并行核心组件实现。
+# 包含 Embedding 层和 LM Head 层，针对显存带宽和通信开销做了优化。
+# ==============================================================================
 
 def _pad_vocab_size(vocab_size: int, tp_size: int, *, multiple: int = 16) -> int:
     """
-    计算填充后的词表总大小。
-    保证能被 tp_size 整除，并且每个 Rank 分到的词表大小是 multiple (如 16) 的倍数，
-    确保契合 NVIDIA GPU Tensor Cores 的矩阵乘法对齐要求，最大化算力利用率。
+        计算填充后的词表总大小。
+        保证能被 tp_size 整除，并且每个 Rank 分到的词表大小是 multiple (如 16) 的倍数，
+        确保契合 NVIDIA GPU Tensor Cores 的矩阵乘法对齐要求，最大化算力利用率。
     """
     # 1. 计算每个 Rank 基础需要处理的词表大小 (向上取整)
     per = (vocab_size + tp_size - 1) // tp_size
@@ -37,8 +37,8 @@ def _load_weight(
     row_offset: int = 0,
 ) -> None:
     """
-    从全量权重中加载当前 Rank 所需的分片。
-    采用 In-place 切片与清零，避免带来额外拷贝开销。
+        从全量权重中加载当前 Rank 所需的分片。
+        采用 In-place 切片与清零，避免带来额外拷贝开销。
     """
     # 获取了当前进程所属的 TP 组对象，核心有 TP 有几张 GPU，还有当前 GPU 的 rank 号
     tp = get_tp_group()
@@ -63,10 +63,10 @@ def _load_weight(
 
 class VocabParallelEmbedding(nn.Module):
     """
-    词表并行 Embedding 层。
-    核心优化：引入 "+1 哑元行"，将越界 Token 映射到索引 0。
-    查表操作直接输出全 0 向量，后续只需进行 AllReduce，省去对高维浮点 Tensor 
-    进行 Mask 操作，将访存压力从 [B, S, H] 降维到了 [B, S]。
+        词表并行 Embedding 层。
+        核心优化：引入 "+1 哑元行"，将越界 Token 映射到索引 0。
+        查表操作直接输出全 0 向量，后续只需进行 AllReduce，省去对高维浮点 Tensor 
+        进行 Mask 操作，将访存压力从 [B, S, H] 降维到了 [B, S]。
     """
 
     def __init__(self, num_embeddings: int, embedding_dim: int):
@@ -128,9 +128,9 @@ class VocabParallelEmbedding(nn.Module):
 
 class ParallelLMHead(nn.Module):
     """
-    并行 LM Head 层 (用于输出 Logits)。
-    包含常规的 AllGather 前向传播，以及针对推理期 Greedy Decoding
-    优化 argmax，大幅降低节点间的通信带宽压力。
+        并行 LM Head 层 (用于输出 Logits)。
+        包含常规的 AllGather 前向传播，以及针对推理期 Greedy Decoding
+        优化 argmax，大幅降低节点间的通信带宽压力。
     """
 
     def __init__(self, hidden_size: int, vocab_size: int, *, bias: bool = False):
@@ -170,8 +170,8 @@ class ParallelLMHead(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
-        标准前向传播。
-        局部线性变换 -> AllGather 拼接全局 Logits -> 截断掉 Padding 部分。
+            标准前向传播。
+            局部线性变换 -> AllGather 拼接全局 Logits -> 截断掉 Padding 部分。
         """
         logits = torch.nn.functional.linear(hidden_states, self.weight, self.bias)
         logits = tensor_model_parallel_all_gather(logits, dim=-1)
@@ -179,9 +179,9 @@ class ParallelLMHead(nn.Module):
 
     def argmax(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
-        【推理期极致优化】用于 Greedy Decoding 的分布式 Argmax。
-        不传输完整的 Logits，而是传输每个 Rank 的局部最大值和索引，
-        通信量降低 99% 以上，极大缓解多卡推理时的网络带宽瓶颈。
+            【推理期优化】用于 Greedy Decoding 的分布式 Argmax。
+            不传输完整的 Logits，而是传输每个 Rank 的局部最大值和索引，
+            通信量降低 99% 以上，极大缓解多卡推理时的网络带宽瓶颈。
         """
         tp = get_tp_group()
         per = self.output_size_per_partition

@@ -1,10 +1,10 @@
 """v4 引擎基准：单卡、TP、PP、DP 及组合。
 
 用法（在 vllm-v4 目录下）:
-  ../.venv2/bin/python bench/bench_v4.py --tp 1 --pp 1 --dp 1 --cg
-  ../.venv2/bin/python bench/bench_v4.py --tp 2 --pp 1 --dp 1 --compile
-  ../.venv2/bin/python bench/bench_v4.py --tp 1 --pp 2 --dp 1 --pp-layer-counts 12,28
-  ../.venv2/bin/python bench/bench_v4.py --tp 1 --pp 1 --dp 2 --n-reqs 32
+  python bench/bench_v4.py --tp 1 --pp 1 --dp 1 --cg
+  python bench/bench_v4.py --tp 2 --pp 1 --dp 1 --compile
+  python bench/bench_v4.py --tp 1 --pp 2 --dp 1 --pp-layer-counts 12,28
+  python bench/bench_v4.py --tp 1 --pp 1 --dp 2 --n-reqs 32
 
 dp=1 时输出 TTFT、单请求 decode、batch8 吞吐。
 dp>1 时输出 N 路请求聚合吞吐。

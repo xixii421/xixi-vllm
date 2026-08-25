@@ -1,13 +1,3 @@
-"""单 rank Worker：一张卡上的 TP×PP 运行时。
-
-rank 布局（单 Engine，与 ``parallel_state`` 一致）::
-
-    global_rank = pp_rank * tp_size + tp_rank
-
-职责：建 NCCL/Gloo 组 → 加载本 stage 模型切片 → KV 池 → ``ModelRunner.run_forward``。
-DP 不在此处理：``MPClient`` 为每个副本单独 spawn Engine，副本内 ``dp_size=1``。
-"""
-
 from __future__ import annotations
 
 import copy

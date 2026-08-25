@@ -1,9 +1,3 @@
-"""Data plane wire structures：调度产物与引擎输出（纯 CPU，无 torch 依赖）。
-
-``Batch``（GPU 缓冲）已迁到 ``compute/batch.py``；本文件只保留控制面 → 计算面
-的最小增量 wire 格式，以及 EngineCore → 门面的输出格式。
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -12,10 +6,21 @@ import msgspec
 
 from .sequence import Sequence
 
+# ==============================================================================
+# 控制面与计算面之间的 CPU 数据结构。
+#
+# Scheduler.schedule 产出 ScheduledBatch（仍持有本进程 Sequence）。
+# Executor.run 调用 to_wire()，得到可 msgspec 编码的 SchedulerOutput，
+# 交给 Worker / ModelRunner 的 build_decode、build_prefill。
+# Scheduler.update 产出 EngineCoreOutput，经 Client 回到 Engine。
+#
+# GPU 上的静态输入缓冲在 compute/batch.py。
+# ==============================================================================
+
 
 @dataclass
 class ScheduledBatch:
-    """调度器产出的本步批次。compute 层只消费这个显式接口，不触碰 Sequence 内部。"""
+    """本步要跑的 prefill / decode 序列。Scheduler 与 EngineCore 使用；Worker 只吃 to_wire()。"""
 
     prefills: list[Sequence] = field(default_factory=list)
     decodes: list[Sequence] = field(default_factory=list)
@@ -24,7 +29,7 @@ class ScheduledBatch:
         return not self.prefills and not self.decodes
 
     def to_wire(self) -> "SchedulerOutput":
-        """转成最小增量 wire 结构：只携带本步真正需要的数据，丢弃 Sequence 全历史。"""
+        """抽出本步前向需要的字段，不把整条 token 历史发给 Worker。"""
         return SchedulerOutput(
             prefills=[_prefill_schedule(s) for s in self.prefills],
             decodes=[_decode_schedule(s) for s in self.decodes],
@@ -36,7 +41,7 @@ def _sampling_fields(s: Sequence) -> tuple[float, float | None, int | None, floa
 
 
 def _decode_schedule(s: Sequence) -> "SeqSchedule":
-    """decode 每序列只发 [last_token]（1 个 id）+ 已缓存 token 数 + block_table。"""
+    """decode：一个新 token、缓存长度、块表（与 Sequence 同一 list，不拷贝）。"""
     assert len(s.token_ids) == s.num_cached_tokens + 1, (
         f"decode invariant: len(token_ids)={len(s.token_ids)} vs "
         f"num_cached_tokens+1={s.num_cached_tokens + 1}"
@@ -44,7 +49,7 @@ def _decode_schedule(s: Sequence) -> "SeqSchedule":
     temperature, top_p, top_k, min_p = _sampling_fields(s)
     return SeqSchedule(
         seq_id=s.seq_id,
-        block_table=list(s.block_table),
+        block_table=s.block_table,
         num_cached_tokens=s.num_cached_tokens,
         token_ids=[s.last_token],
         need_sample=False,
@@ -56,13 +61,13 @@ def _decode_schedule(s: Sequence) -> "SeqSchedule":
 
 
 def _prefill_schedule(s: Sequence) -> "SeqSchedule":
-    """prefill 每序列只发本步 scheduled 的 token 切片，不含已缓存前缀与后续未调度部分。"""
+    """prefill：只发本步 scheduled 的 token 切片，不含已缓存前缀和尚未调度的尾巴。"""
     start = s.num_cached_tokens
     end = start + s.num_scheduled_tokens
     temperature, top_p, top_k, min_p = _sampling_fields(s)
     return SeqSchedule(
         seq_id=s.seq_id,
-        block_table=list(s.block_table),
+        block_table=s.block_table,
         num_cached_tokens=s.num_cached_tokens,
         token_ids=s.token_ids[start:end],
         need_sample=s.need_sample,
@@ -74,12 +79,12 @@ def _prefill_schedule(s: Sequence) -> "SeqSchedule":
 
 
 class SeqSchedule(msgspec.Struct):
-    """单条序列的调度增量（wire 格式）。
+    """
+        单条序列的前向输入（Gloo / 本进程都可以用）。
 
-    相对完整 Sequence，只保留 build_decode / build_prefill 真正读取的字段：
-    - token_ids：decode 为 [last_token]，prefill 为本步 scheduled 切片；
-    - num_cached_tokens：本步前已缓存的 token 数（同时用于推导 position / cache_seqlen）；
-    - block_table：完整块表（block 数远小于 token 数，不可再压缩）。
+        token_ids：decode 为 [last_token]；prefill 为本步切片。
+        num_cached_tokens：本步之前已写入 KV 的长度，用来算 position / cache_seqlen。
+        block_table：与 Sequence 共享引用；GPU 侧按 seq_id 做行缓存，增量 H2D。
     """
 
     seq_id: int
@@ -94,17 +99,17 @@ class SeqSchedule(msgspec.Struct):
 
 
 class SchedulerOutput(msgspec.Struct):
-    """控制面 → 计算面的最小调度结果（wire 格式）。"""
+    """to_wire 的结果：Worker.execute_model 的入参。"""
 
     prefills: list[SeqSchedule] = msgspec.field(default_factory=list)
     decodes: list[SeqSchedule] = msgspec.field(default_factory=list)
 
 
 class EngineCoreOutput(msgspec.Struct):
-    """EngineCore → 客户端（Engine）的单序列增量输出。
+    """
+        本步一条序列的增量，给 Engine / MPClient。
 
-    每步对每条调度到的序列最多产出一个新 token（decode 或 prefill 采样），
-    ``new_token_ids`` 为空表示本步未采样（partial prefill 或 max_tokens<=0）。
+        new_token_ids 为空：本步未采样（chunked prefill 中间段，或 max_tokens 已用尽）。
     """
 
     seq_id: int

@@ -1,9 +1,9 @@
-"""从 bench.jsonl 生成 Markdown 表，便于贴进 docs/02。
+"""从 bench.jsonl 生成 Markdown 表，便于贴进 docs/03-性能对比.md。
 
 用法:
-  ../.venv2/bin/python bench/report.py
-  ../.venv2/bin/python bench/report.py --model Qwen3-8B
-  ../.venv2/bin/python bench/report.py --engine v4 --ok-only
+  python bench/report.py
+  python bench/report.py --model Qwen3-8B
+  python bench/report.py --engine v4 --ok-only
 """
 
 from __future__ import annotations

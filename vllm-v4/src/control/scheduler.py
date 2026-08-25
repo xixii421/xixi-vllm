@@ -8,7 +8,7 @@ from ..data import EngineCoreOutput, KVManager, ScheduledBatch, Sequence, Sequen
 class Scheduler:
     """请求调度器（并行无关）。
 
-    只管理 waiting / running 队列与 KV 逻辑块预算，产出 ``ScheduledBatch``。
+    只管理 waiting / running 队列与 KV 逻辑块预算，产出 ScheduledBatch。
     TP/PP/DP 均不在此体现：同一份 schedule 由 Executor 广播（TP/PP）或由各 DP
     副本各自独立调度（DP）。
     """

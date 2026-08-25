@@ -10,6 +10,7 @@
 # --- keep git meta / series docs ---
 !.gitignore
 !README.md
+!项目介绍.md
 !/utils/
 !/utils/**
 # only the helper under scripts/git/ (not other local scripts/)

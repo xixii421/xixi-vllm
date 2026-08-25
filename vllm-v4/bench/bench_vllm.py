@@ -3,9 +3,9 @@
 官方 V1 离线路径不支持 PP，也不支持 v4 式多 Engine DP。
 指标与 bench_v4 的 dp=1 对齐：TTFT、decode、batch8。
 
-用法（需 .venv-vllm）:
-  ../.venv-vllm/bin/python bench/bench_vllm.py --tp 1 --cg
-  ../.venv-vllm/bin/python bench/bench_vllm.py --tp 2 --cuda-devices 0,1 --compile
+用法（需官方 vLLM 环境）:
+  python bench/bench_vllm.py --tp 1 --cg
+  python bench/bench_vllm.py --tp 2 --cuda-devices 0,1 --compile
 """
 
 from __future__ import annotations

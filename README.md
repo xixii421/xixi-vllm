@@ -15,9 +15,11 @@
     <img src="https://img.shields.io/badge/v1_kv--cache-gray?style=flat-square&label">
     <img src="https://img.shields.io/badge/v2_continuous--batching-gray?style=flat-square&label">
     <img src="https://img.shields.io/badge/v3_flashinfer-gray?style=flat-square&label">
-    <img src="https://img.shields.io/badge/v4_multimodal-gray?style=flat-square&label">
-    <img src="https://img.shields.io/badge/v5_distributed-gray?style=flat-square&label">
+    <img src="https://img.shields.io/badge/v4_TP--PP--DP-gray?style=flat-square&label">
+    <img src="https://img.shields.io/badge/v5_MoE--VL-gray?style=flat-square&label">
   </p>
+
+  <p>从零实现的 Qwen3 推理引擎，按 v0–v5 冻结每一阶段。设计说明、和 nano-vllm / 官方 vLLM 的对照见 <a href="项目介绍.md">项目介绍.md</a>。</p>
 
   
 </div>
@@ -45,32 +47,26 @@ source .venv-py312/bin/activate
 
 官方 `pip install flash-attn` 会触发很久 CUDA 源码编译，并且还会把CPU编译打满，使用 FlashInfer 官方 index + 社区 FlashAttention 预编译 wheel成本更低，但是同样需要版本对齐。
 
+> 以torch2.13.0版本为准
+
 ```bash
-# PyTorch 2.13
 uv pip install torch==2.13.0 torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu130
 
-# FlashInfer 三合一（零编译）
 uv pip install flashinfer-python flashinfer-cubin \
     --index-url https://flashinfer.ai/whl \
     --extra-index-url https://pypi.org/simple
 
-# 非必要
 uv pip install flashinfer-jit-cache \
     --index-url https://flashinfer.ai/whl/cu130
 
-# FlashAttention 预编译 wheel（Linux x86_64，torch 2.13 + cu130）
 uv pip install https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.47/flash_attn-2.8.3+cu130torch2.13-cp312-cp312-linux_x86_64.whl
-```
 
-### 4. 安装其余依赖
-
-```bash
 uv pip install transformers huggingface_hub \
     safetensors tqdm numpy Pillow pyyaml einops xxhash
 ```
 
-### 5. Qwen3 模型下载
+### 4. Qwen3 模型下载
 
 项目内置自动下载逻辑（`src/model_hub.py` / `src/models/hub.py`），首次运行时从 HuggingFace 拉取权重。
 **手动下载到指定目录：**
@@ -108,13 +104,11 @@ PYTHONPATH=vllm-v2 python vllm-v2/run.py
 # v3 — FlashInfer + Decode CUDA Graph
 PYTHONPATH=vllm-v3 python vllm-v3/run.py --compile
 
-# v4 — 多模态 (Qwen3-VL)
-PYTHONPATH=vllm-v4 python vllm-v4/run.py \
-    --model Qwen3-VL-2B-Instruct --image ./vllm-v4/cat.jpg --prompt "描述这张图"
+# v4 — 张量 / 流水线 / 数据并行
+PYTHONPATH=vllm-v4 python vllm-v4/run.py --model Qwen3-0.6B --tp 1
 
-# v5 - MoE 待定
-
-# 鉴于代码量与优化量太大，还在完善中，目前代码已经可以成功运行
+# v5 — MoE / 视觉 / OpenAI API（文档仍在补）
+# 见 vllm-v5/README.md；单卡路径已能跑
 ```
 
 
@@ -126,6 +120,6 @@ PYTHONPATH=vllm-v4 python vllm-v4/run.py \
 | [vllm-v1](vllm-v1/README.md) | KV Cache + PagedAttention + 前缀缓存 | KV Cache 复用、PagedAttention 显存管理、Hash/Radix 前缀缓存 |
 | [vllm-v2](vllm-v2/README.md) | Continuous Batching | 动态组批、三面架构（Scheduler/KVManager/ModelRunner）、torch.compile |
 | [vllm-v3](vllm-v3/README.md) | 算子级性能提升 | FlashAttention paged attention、Decode CUDA Graph、`F.rms_norm`、Gumbel-Max 采样 |
-| [vllm-v4](vllm-v4/README.md) | 多模态（Qwen3-VL） | DeepStack、MRoPE、EncoderCache、ViT CUDA Graph、Vision Token 管理 |
-| [vllm-v5](vllm-v5/README.md) | TP、PP、MoE | 文档待完善 |
-| [vllm-v6]()| 若干量化方案 | 计划中 | 
+| [vllm-v4](vllm-v4/README.md) | 多卡并行 | DP / TP / PP，V1 式 EngineCore |
+| [vllm-v5](vllm-v5/README.md) | MoE、视觉、API | Qwen3-MoE / Qwen3-VL、AsyncLLM、OpenAI HTTP（文档待完善） |
+| [vllm-v6]()| 量化 | 计划中 | 

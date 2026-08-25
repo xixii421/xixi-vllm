@@ -1,10 +1,11 @@
 """矩阵编排：按 suite 依次调用 bench_v4 或 bench_vllm。
 
 用法（在 vllm-v4 目录下）:
-  ../.venv2/bin/python bench/run_matrix.py --suite smoke
-  ../.venv2/bin/python bench/run_matrix.py --suite full
-  ../.venv2/bin/python bench/run_matrix.py --suite vs-vllm
-  ../.venv2/bin/python bench/run_matrix.py --suite smoke --only 0.6b-pp2-cg
+  python bench/run_matrix.py --suite smoke
+  python bench/run_matrix.py --suite full
+  python bench/run_matrix.py --suite vs-vllm
+  python bench/run_matrix.py --suite smoke --only 0.6b-pp2-cg
+  python bench/run_matrix.py --suite vs-vllm --py-vllm /path/to/vllm/python
 """
 
 from __future__ import annotations
@@ -24,8 +25,12 @@ if str(BENCH) not in sys.path:
 from cases import SUITES  # noqa: E402
 from common import JSONL_PATH, append_jsonl, base_record, ensure_out  # noqa: E402
 
-DEFAULT_PY_V4 = str((ROOT.parent / ".venv2" / "bin" / "python").resolve())
-DEFAULT_PY_VLLM = str((ROOT.parent / ".venv-vllm" / "bin" / "python").resolve())
+DEFAULT_PY_V4 = os.environ.get("BENCH_PY_V4", sys.executable)
+_VLLM_GUESS = ROOT.parent / ".venv-vllm" / "bin" / "python"
+DEFAULT_PY_VLLM = os.environ.get(
+    "BENCH_PY_VLLM",
+    str(_VLLM_GUESS) if _VLLM_GUESS.is_file() else sys.executable,
+)
 
 
 def detect_gpus() -> int:

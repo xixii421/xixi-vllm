@@ -1,18 +1,3 @@
-"""进程组与 rank 布局（仅 TP / PP；DP 不进入 NCCL world）。
-
-并行决策（与 ``control/client.py`` / ``control/executor.py`` 对齐）::
-
-    dp_size > 1  → MPClient 起多个独立 Engine 副本（各副本内 dp=1，各自一套 NCCL）
-    tp/pp > 1    → 同一 Engine 内 MultiprocExecutor，WORLD = tp_size * pp_size
-
-本模块只服务「单 Engine 内的 TP×PP」：
-
-    global_rank = pp_rank * tp_size + tp_rank
-
-DP 是请求级副本（ZMQ 路由），不是 Megatron 式 NCCL DP 组，因此这里没有 ``DP`` /
-``get_dp_group``。
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -26,9 +11,17 @@ from torch.distributed import ProcessGroup
 
 logger = logging.getLogger(__name__)
 
+# ==============================================================================
+# 单 Engine 内的 TP × PP 进程组。
+#
+# Worker.init_environment 调 init_distributed_environment + initialize_model_parallel。
+# global_rank = pp_rank * tp_size + tp_rank。
+# DP 不在这里建组（MPClient 每个副本各自一套 WORLD）。
+# ==============================================================================
+
 
 class Group:
-    """逻辑并行组：NCCL（GPU 张量）+ Gloo（CPU / 元数据）各一份 ProcessGroup。"""
+    """一组 rank：device_group 走 NCCL，cpu_group 走 Gloo。size==1 不建组。"""
 
     def __init__(
         self,
@@ -41,7 +34,6 @@ class Group:
         self.rank = rank
         self.size = len(ranks)
         self.group_rank = ranks.index(rank)
-        # 单例组（size==1）无需通信；显式传入时复用外部 ProcessGroup，避免重复建连。
         self._owns_device_group = False
         self._owns_cpu_group = False
         if device_group is not None:
@@ -69,30 +61,25 @@ class Group:
 
     @property
     def prev_group_rank(self) -> int:
-        """组内 rank，供 NCCL ``group_peer=``。线性 PP，首 stage 无前驱。"""
+        """PP 上游，给 NCCL group_peer=。线性流水线，第一段没有前驱。"""
         if self.group_rank <= 0:
-            raise RuntimeError(
-                "first PP stage has no previous peer (linear pipeline, not a ring)"
-            )
+            raise RuntimeError("first PP stage has no previous peer")
         return self.group_rank - 1
 
     @property
     def next_group_rank(self) -> int:
-        """组内 rank，供 NCCL ``group_peer=``。线性 PP，末 stage 无后继。"""
+        """PP 下游，给 NCCL group_peer=。"""
         if self.group_rank >= self.size - 1:
-            raise RuntimeError(
-                "last PP stage has no next peer (linear pipeline, not a ring)"
-            )
+            raise RuntimeError("last PP stage has no next peer")
         return self.group_rank + 1
 
     @property
     def prev_rank(self) -> int:
-        """全局 rank。控制面 Gloo send/recv 用；NCCL ``group_peer`` 不要用。"""
+        """上游的 WORLD rank，给 Gloo send/recv。NCCL 不要用这个。"""
         return self.ranks[self.prev_group_rank]
 
     @property
     def next_rank(self) -> int:
-        """全局 rank。控制面 Gloo send/recv 用；NCCL ``group_peer`` 不要用。"""
         return self.ranks[self.next_group_rank]
 
     def barrier(self) -> None:
@@ -134,17 +121,10 @@ def initialize_model_parallel(
     tp_rank: int,
     pp_rank: int,
 ) -> None:
-    """划分 TP / PP 组（单 Engine 内）。
-
-    rank 布局::
-
-        global_rank = pp_rank * tp_size + tp_rank
-
-    - TP 组：同一 ``pp_rank`` 下连续的 ``tp_size`` 个 global rank（机内 NVLink）。
-    - PP 组：同一 ``tp_rank`` 下步进 ``tp_size`` 的 ``pp_size`` 个 global rank。
-
-    DP 不在此建组：``dp_size>1`` 由 ``MPClient`` 起独立 Engine，每副本各自调用本函数且
-    其 ``world_size = tp_size * pp_size``。
+    """
+        TP：同一 pp_rank 上连续 tp_size 个 global rank。
+        PP：同一 tp_rank 上每隔 tp_size 取一个。
+        pp==1 时 TP 复用 WORLD 的 NCCL 组，少建一次 clique。
     """
     global TP, PP
     if not (0 <= tp_rank < tp_size and 0 <= pp_rank < pp_size):
@@ -154,7 +134,6 @@ def initialize_model_parallel(
     my_rank = pp_rank * tp_size + tp_rank
     tp_ranks = [pp_rank * tp_size + k for k in range(tp_size)]
     pp_ranks = [k * tp_size + tp_rank for k in range(pp_size)]
-    # pp==1 时 TP 组 == WORLD 组，复用其 device/cpu 组，省掉一次冗余 NCCL 建连。
     if WORLD is not None and tp_ranks == WORLD.ranks:
         TP = Group(
             ranks=tp_ranks,
@@ -200,7 +179,6 @@ def init_distributed_environment(
         timeout=datetime.timedelta(seconds=timeout),
         device_id=torch.device("cuda", device_id) if backend == "nccl" else None,
     )
-    # 复用 init_process_group 建的默认 NCCL 组，避免 new_group 重复建连。
     default_device_group: ProcessGroup | None = None
     if backend == "nccl":
         from torch.distributed.distributed_c10d import _get_default_group
@@ -226,10 +204,7 @@ def is_initialized() -> bool:
 
 @contextmanager
 def graph_capture(device: torch.device):
-    """CUDA Graph 捕获窗口：进出前后对 TP/PP 做 barrier，避免图内集合通信死锁。
-
-    PP 的 send/recv 在 piecewise CG 下位于图外，此处 barrier 主要对齐图内 TP 通信。
-    """
+    """录 CUDA Graph 前后对齐 TP/PP，避免图内 all-reduce 各 rank 步调不一致。PP send/recv 仍在图外。"""
     torch.cuda.synchronize(device)
     get_tp_group().barrier()
     get_pp_group().barrier()
@@ -253,5 +228,4 @@ def set_nccl_env(ifname: str = "", *, disable_ib: bool = False) -> None:
         _set("NCCL_IB_GID_INDEX", "3")
         _set("NCCL_NET_GDR_LEVEL", "5")
     _set("NCCL_DEBUG", "WARN")
-    # 拉长 heartbeat，避免慢机上的 watchdog 误杀 rank。
     _set("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC", "1800")

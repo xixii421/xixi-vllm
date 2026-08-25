@@ -1,14 +1,15 @@
-"""Compressed radix tree over chained block-hash keys.
-
-Completes v2 teaching tree with: leaf LRU eviction, detach-by-block invalidate,
-and reverse block→node index (aligned with v7 / production APC needs).
-"""
-
 from __future__ import annotations
 
 import heapq
 import time
 from collections.abc import Sequence as AbcSequence
+
+# ==============================================================================
+# 压缩 radix 树：key 是链式块哈希，value 是逻辑页号。
+#
+# RadixPrefixIndex 用来 match / insert / 按叶子 LRU evict。
+# 节点带 ref_count；只有 ref=0 的叶子才能被摘掉。
+# ==============================================================================
 
 
 def _prefix_len(a: AbcSequence[int], b: AbcSequence[int]) -> int:
@@ -70,7 +71,7 @@ class RadixTree:
         return values, node
 
     def insert(self, key: list[int], value: list[int]) -> tuple[int, RadixNode]:
-        """Insert key→value. Returns (matched_existing_len, leaf_node)."""
+        """插入 key→页号。返回（已有公共前缀长度, 叶子）。"""
         if not key:
             return 0, self.root
         node = self.root
@@ -104,7 +105,7 @@ class RadixTree:
             node = node.parent or self.root
 
     def detach_leaf_for_block(self, block_id: int) -> list[int]:
-        """Drop the zero-ref node owning ``block_id``; return its page IDs."""
+        """页被池子丢掉时，若所属节点无人引用，整段从树上摘掉。"""
         node = self._block_to_node.get(block_id)
         if node is None or node is self.root or node.ref_count > 0:
             return []
@@ -113,7 +114,7 @@ class RadixTree:
         return freed
 
     def evict(self, num_slots: int) -> list[int]:
-        """LRU-evict zero-ref leaves until ``num_slots`` pages collected."""
+        """按 access_time 丢掉无人引用的叶子，直到凑够页数。"""
         leaves = self._leaves()
         heapq.heapify(leaves)
         freed: list[int] = []

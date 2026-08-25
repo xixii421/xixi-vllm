@@ -1,18 +1,25 @@
-"""控制面通道：单 Engine 内 TP×PP 的调度广播与采样回收（Gloo）。
-
-与 DP 的 ZMQ 通道正交：ZMQ 连「门面 ↔ 多 EngineCore」；本通道连「driver ↔ 同 world workers」。
-``src`` / ``dst`` 是全局 rank（WORLD cpu_group），不是 TP/PP 组内 rank。
-"""
-
 from __future__ import annotations
 
 import torch
 import torch.distributed as dist
 
+# ==============================================================================
+# 同 Engine 内 driver ↔ worker 的 Gloo 字节通道。
+#
+# MultiprocExecutor / worker_loop 用来广播 SchedulerOutput、回传 token id。
+# src/dst 是 WORLD rank。DP 的 ZMQ 不走这里。
+# ==============================================================================
+
+
+def _cpu_u8(data: bytes) -> torch.Tensor:
+    return torch.frombuffer(bytearray(data), dtype=torch.uint8).clone()
+
+
+def _to_bytes(buf: torch.Tensor) -> bytes:
+    return buf.contiguous().numpy().tobytes()
+
 
 class ControlChannel:
-    """WORLD cpu_group 上的字节广播 / 点对点。"""
-
     def __init__(self, group) -> None:
         self.group = group
 
@@ -24,23 +31,18 @@ class ControlChannel:
         if n == 0:
             return None
         if rank == src:
-            buf = torch.frombuffer(bytearray(data), dtype=torch.uint8).clone()
-            dist.broadcast(buf, src=src, group=self.group)
+            dist.broadcast(_cpu_u8(data), src=src, group=self.group)
             return None
         buf = torch.empty(n, dtype=torch.uint8)
         dist.broadcast(buf, src=src, group=self.group)
-        return bytes(buf.tolist())
+        return _to_bytes(buf)
 
     def send(self, data: bytes, dst: int) -> None:
         dist.send(
             torch.tensor([len(data)], dtype=torch.long), dst=dst, group=self.group
         )
         if data:
-            dist.send(
-                torch.frombuffer(bytearray(data), dtype=torch.uint8).clone(),
-                dst=dst,
-                group=self.group,
-            )
+            dist.send(_cpu_u8(data), dst=dst, group=self.group)
 
     def recv(self, src: int) -> bytes:
         size = torch.tensor([0], dtype=torch.long)
@@ -50,4 +52,4 @@ class ControlChannel:
             return b""
         buf = torch.empty(n, dtype=torch.uint8)
         dist.recv(buf, src=src, group=self.group)
-        return bytes(buf.tolist())
+        return _to_bytes(buf)

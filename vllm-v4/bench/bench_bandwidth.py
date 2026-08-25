@@ -5,9 +5,9 @@
 2. NCCL all-reduce：algbw / busbw（busbw = algbw * 2(n-1)/n）
 
 用法（在 vllm-v4 下）：
-    python bench/micro/bench_bandwidth.py --devices 0,1
-    python bench/micro/bench_bandwidth.py --pairs PIX:0,1;PXB:2,3;SYS:0,2
-    python bench/micro/bench_bandwidth.py --pairs PIX:0,1 --skip-nccl
+    python bench/bench_bandwidth.py --devices 0,1
+    python bench/bench_bandwidth.py --pairs PIX:0,1;PXB:2,3;SYS:0,2
+    python bench/bench_bandwidth.py --pairs PIX:0,1 --skip-nccl
 
 只依赖 torch。P2P 使用主机侧计时 + 双端 synchronize，避免跨 device
 CUDA Event 计时偏差。

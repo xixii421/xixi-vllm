@@ -1,5 +1,3 @@
-"""No-op prefix index."""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -7,6 +5,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..block_manager import BlockManager
     from ..sequence import Sequence
+
+# prefix_backend=none：match 永远落空，publish / invalidate 什么都不做。
 
 
 class NoopPrefixIndex:

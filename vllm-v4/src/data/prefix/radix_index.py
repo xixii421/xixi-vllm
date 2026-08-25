@@ -1,5 +1,3 @@
-"""Radix-tree prefix index."""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -10,6 +8,13 @@ from .radix_tree import RadixTree
 if TYPE_CHECKING:
     from ..block_manager import BlockManager
     from ..sequence import Sequence
+
+# ==============================================================================
+# 前缀索引：把链式块哈希插进压缩 radix 树，值为逻辑页号。
+#
+# 比 HashPrefixIndex 能共享任意公共前缀。活着的序列 pin 树上的节点，
+# 没人引用的叶子才能被 BlockManager 挤掉。
+# ==============================================================================
 
 
 class RadixPrefixIndex:
@@ -69,7 +74,6 @@ class RadixPrefixIndex:
         value = list(seq.block_table[:num_full_blocks])
         matched_len, last = self.tree.insert(key, value)
 
-        # Dedup: remap onto canonical tree blocks when a longer shared prefix exists.
         if matched_len > 0:
             tree_ids, _ = self.tree.match_prefix(key)
             for i in range(min(matched_len, len(tree_ids), num_full_blocks)):
@@ -88,8 +92,7 @@ class RadixPrefixIndex:
         self._seq_node[seq.seq_id] = last
 
     def invalidate(self, block_id: int, pool: BlockManager) -> None:
-        """Detach zero-ref tree node owning this page (real invalidate, unlike v2)."""
-        del pool  # residency cleared by BlockManager before/after
+        del pool
         self.tree.detach_leaf_for_block(block_id)
 
     def release_seq(self, seq_id: int) -> None:
@@ -98,7 +101,7 @@ class RadixPrefixIndex:
             self.tree.dec_ref(node)  # type: ignore[arg-type]
 
     def pin_match(self, seq: Sequence, num_cached: int) -> None:
-        """Pin tree node after allocate hit (call once per live seq)."""
+        """allocate 命中前缀后钉住对应节点，避免页还在用就被 evict。"""
         if num_cached <= 0:
             return
         key = self._block_hashes(seq, num_cached)
@@ -110,11 +113,7 @@ class RadixPrefixIndex:
         self._seq_node[seq.seq_id] = node
 
     def reclaim_pages(self, num_pages: int, pool: BlockManager) -> list[int]:
-        """Tree leaf-LRU reclaim: drop cold zero-ref leaves, return cached page ids.
-
-        May return more than ``num_pages`` when a leaf holds multiple pages — the
-        whole leaf must move to free together (index already detached).
-        """
+        """丢掉没人引用的冷叶子，返回可以送回 free 的页。一片叶子上的页必须一起走。"""
         if num_pages <= 0:
             return []
         out: list[int] = []

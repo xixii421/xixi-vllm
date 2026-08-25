@@ -1,5 +1,3 @@
-"""Hash-map prefix index."""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -9,6 +7,13 @@ from .hash_util import compute_block_hash
 if TYPE_CHECKING:
     from ..block_manager import BlockManager
     from ..sequence import Sequence
+
+# ==============================================================================
+# 前缀索引：hash → 逻辑页号。
+#
+# KVManager.allocate 调 match；写满一块后 publish。
+# 同一哈希被后写的块覆盖；驱逐时 invalidate 删掉映射。
+# ==============================================================================
 
 
 class HashPrefixIndex:

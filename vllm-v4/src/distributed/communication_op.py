@@ -5,34 +5,48 @@ import torch.distributed as dist
 
 from .parallel_state import Group, get_tp_group, get_world_group
 
+# ==============================================================================
+# NCCL 集合通信与 PP 点对点。
+#
+# Linear / vocab 走 tensor_model_parallel_*（TP 组）。
+# ModelRunner 图外 PP 走 send_tensors / recv_tensors。
+# size==1 直接返回。
+# ==============================================================================
+
+
+def _resolve(group: Group | None) -> Group:
+    return get_world_group() if group is None else group
+
 
 def all_gather(
     input: torch.Tensor, dim: int = -1, group: Group | None = None
 ) -> torch.Tensor:
-    group = get_world_group() if group is None else group
+    """沿 dim 拼接各 rank 分片。NCCL 只在 dim0 拼接，其它维先按 rank 堆再 permute。"""
+    group = _resolve(group)
     if group.size == 1:
         return input
     if dim < 0:
         dim += input.dim()
-    input_size = input.size()
-    output_tensor = torch.empty(
-        (input_size[0] * group.size, *input_size[1:]),
-        dtype=input.dtype,
-        device=input.device,
+    src = input.contiguous()
+    out = torch.empty(
+        (src.shape[0] * group.size, *src.shape[1:]),
+        dtype=src.dtype,
+        device=src.device,
     )
-    dist.all_gather_into_tensor(output_tensor, input, group=group.device_group)
+    dist.all_gather_single(out, src, group=group.device_group)
     if dim == 0:
-        return output_tensor
-    output_tensor = output_tensor.reshape((group.size,) + input_size).movedim(0, dim)
-    return output_tensor.reshape(
-        input_size[:dim] + (group.size * input_size[dim],) + input_size[dim + 1 :]
+        return out
+    return (
+        out.view(group.size, *src.shape)
+        .movedim(0, dim)
+        .reshape(src.shape[:dim] + (src.shape[dim] * group.size,) + src.shape[dim + 1 :])
     )
 
 
 def all_reduce(
     input: torch.Tensor, op=dist.ReduceOp.SUM, group: Group | None = None
 ) -> torch.Tensor:
-    group = get_world_group() if group is None else group
+    group = _resolve(group)
     if group.size == 1:
         return input
     dist.all_reduce(input, op, group=group.device_group)
@@ -45,26 +59,20 @@ def reduce_scatter(
     op=dist.ReduceOp.SUM,
     group: Group | None = None,
 ) -> torch.Tensor:
-    group = get_world_group() if group is None else group
+    group = _resolve(group)
     if group.size == 1:
         return input
-    assert -input.dim() <= dim < input.dim()
     if dim < 0:
         dim += input.dim()
-    input_tensor = input.movedim(0, dim).contiguous()
-    assert input_tensor.shape[0] % group.size == 0
-    chunk_size = input_tensor.shape[0] // group.size
-    output_tensor = torch.empty(
-        (chunk_size,) + input_tensor.shape[1:],
-        dtype=input_tensor.dtype,
-        device=input_tensor.device,
+    src = input.movedim(dim, 0).contiguous()
+    assert src.shape[0] % group.size == 0
+    out = torch.empty(
+        (src.shape[0] // group.size,) + src.shape[1:],
+        dtype=src.dtype,
+        device=src.device,
     )
-    dist.reduce_scatter_tensor(
-        output_tensor, input_tensor, group=group.device_group, op=op
-    )
-    if dim == 0:
-        return output_tensor
-    return output_tensor.movedim(0, dim).contiguous()
+    dist.reduce_scatter_single(out, src, op=op, group=group.device_group)
+    return out if dim == 0 else out.movedim(0, dim).contiguous()
 
 
 def tensor_model_parallel_all_reduce(
@@ -88,12 +96,8 @@ def send_tensors(
     dst: int,
     group: Group | None = None,
 ) -> None:
-    """阻塞点对点发送。``dst`` 为组内 rank（``group_peer``），不是 global rank。
-
-    线性 PP 传 ``group.next_group_rank``。piecewise CG 下在图外调用。
-    """
-    works = _isend_tensors(tensors, dst, group)
-    for work in works:
+    """阻塞发送。dst 是组内 rank（PP 用 next_group_rank），不是 WORLD rank。"""
+    for work in _p2p(dist.isend, tensors, dst, group):
         work.wait()
 
 
@@ -102,51 +106,25 @@ def recv_tensors(
     src: int,
     group: Group | None = None,
 ) -> None:
-    """阻塞点对点接收。``src`` 为组内 rank（``group_peer``），不是 global rank。"""
-    works = _irecv_tensors(tensors, src, group)
-    for work in works:
+    """阻塞接收。src 是组内 rank（PP 用 prev_group_rank）。"""
+    for work in _p2p(dist.irecv, tensors, src, group):
         work.wait()
 
 
-def _isend_tensors(
+def _p2p(
+    op,
     tensors: tuple[torch.Tensor, ...] | list[torch.Tensor],
-    dst: int,
-    group: Group | None = None,
+    peer: int,
+    group: Group | None,
 ) -> list:
-    group = get_world_group() if group is None else group
+    group = _resolve(group)
     if group.size == 1:
         return []
-    if not 0 <= dst < group.size:
-        raise ValueError(
-            f"send dst={dst} is not a group-local rank in [0, {group.size})"
-        )
+    if not 0 <= peer < group.size:
+        raise ValueError(f"peer={peer} not in [0, {group.size})")
     ops = [
-        dist.P2POp(dist.isend, t, group=group.device_group, group_peer=dst)
+        dist.P2POp(op, t, group=group.device_group, group_peer=peer)
         for t in tensors
         if t.numel() > 0
     ]
-    if not ops:
-        return []
-    return list(dist.batch_isend_irecv(ops))
-
-
-def _irecv_tensors(
-    tensors: tuple[torch.Tensor, ...] | list[torch.Tensor],
-    src: int,
-    group: Group | None = None,
-) -> list:
-    group = get_world_group() if group is None else group
-    if group.size == 1:
-        return []
-    if not 0 <= src < group.size:
-        raise ValueError(
-            f"recv src={src} is not a group-local rank in [0, {group.size})"
-        )
-    ops = [
-        dist.P2POp(dist.irecv, t, group=group.device_group, group_peer=src)
-        for t in tensors
-        if t.numel() > 0
-    ]
-    if not ops:
-        return []
-    return list(dist.batch_isend_irecv(ops))
+    return list(dist.batch_isend_irecv(ops)) if ops else []

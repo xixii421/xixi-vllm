@@ -9,6 +9,13 @@ from ..sampling_params import SamplingParams
 
 _SEQ_IDS = count(1)
 
+# ==============================================================================
+# 一条请求在 CPU 上的状态。
+#
+# Engine.add_request / Scheduler / KVManager 读写本对象。
+# 发给 Worker 前由 ScheduledBatch.to_wire() 收成 SeqSchedule。
+# ==============================================================================
+
 
 class SequenceStatus(Enum):
     WAITING = auto()
@@ -22,11 +29,7 @@ def slots_for_range(
     end: int,
     block_size: int,
 ) -> list[int]:
-    """计算 [start, end) 内每个 token 的物理 slot。
-
-    块内 slot 连续，按物理块循环 + ``extend(range(...))``（C 层），避免逐 token
-    的 Python ``//`` ``%`` 运算：8192 token 的 prefill 块从 ~1.1ms 降到 ~0.12ms。
-    """
+    """[start, end) 每个 token 对应的物理 slot。按块 stretch range，避免逐 token 做 // 和 %。"""
     n = end - start
     if n == 0:
         return []
@@ -48,8 +51,6 @@ def slots_for_range(
 
 @dataclass
 class Sequence:
-    """One request: tokens + block_table + scheduling cursors (v2-aligned)."""
-
     token_ids: list[int]
     block_size: int
     seq_id: int = 0
@@ -57,7 +58,8 @@ class Sequence:
     block_table: list[int] = field(default_factory=list)
     num_cached_tokens: int = 0
     num_scheduled_tokens: int = 0
-    need_sample: bool = False  # 本步 prefill 是否已覆盖全部 prompt，需要采样
+    # 本步 prefill 是否已经覆盖完整 prompt，需要采样。
+    need_sample: bool = False
     is_prefill: bool = True
     num_prompt_tokens: int = 0
     temperature: float = 0.0

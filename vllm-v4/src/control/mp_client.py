@@ -1,14 +1,3 @@
-"""MPClient：DP 多副本（独立 Engine），不是 NCCL 数据并行组。
-
-与 TP/PP 的本质区别::
-
-    TP/PP  — 同一次 step、同一 schedule、多 rank 协同算一份模型
-    DP     — dp_size 份完整 Engine，各有 Scheduler / KV / Worker，门面只做路由
-
-每副本经 ``_replica_config`` 把 ``dp_size`` 归 1，并切出自己的 ``device_ids`` 与
-``nccl_port``，再走与单副本相同的 ``EngineCore → Executor → Worker`` 路径。
-"""
-
 from __future__ import annotations
 
 import copy
@@ -25,9 +14,25 @@ from ..data import EngineCoreOutput, Sequence
 from .client import EngineCoreClient
 from .core import EngineCore
 
+# ==============================================================================
+# MPClient：dp>1 时 Engine 到各副本 EngineCore 的调用层。
+#
+# make_client 在 dp_size>1 时构造本类。之后 Engine 的 add_request / step /
+# has_unfinished / destroy 都走这里，不再持有本进程 EngineCore。
+#
+# 每个副本是独立进程里的完整引擎，
+# 经 _replica_config 把 dp 归 1、切开 device_ids 与 nccl_port。
+# 门面只做 round-robin 投递和输出汇总；副本内部的 TP/PP 仍由 Executor 展开。
+# ==============================================================================
+
+
+# ------------------------------------------------------------------ #
+# 门面 ↔ 副本 的消息
+# ------------------------------------------------------------------ #
+
 
 class RequestWire(msgspec.Struct):
-    """门面 → 副本：可序列化的最小请求。"""
+    """一次 add_request 所需的字段。跨进程不能传 Sequence 指针，因此拷贝 token 与采样参数。"""
 
     seq_id: int
     token_ids: list[int]
@@ -70,13 +75,22 @@ class RequestWire(msgspec.Struct):
 
 
 class CoreRequest(msgspec.Struct):
+    """门面 → 副本。"""
+
     op: str  # "add" | "shutdown"
     req: RequestWire | None = None
 
 
 class CoreOutput(msgspec.Struct):
+    """副本 → 门面：本步 EngineCore.step 的产出。"""
+
     outputs: list[EngineCoreOutput]
     metric: int = 0
+
+
+# ------------------------------------------------------------------ #
+# 副本进程
+# ------------------------------------------------------------------ #
 
 
 def run_engine_core_proc(
@@ -89,7 +103,12 @@ def run_engine_core_proc(
     out_addr: str,
     ready,  # multiprocessing.Event
 ) -> None:
-    """单个 DP 副本进程：独立 EngineCore + ZMQ 服务循环。"""
+    """
+        单个 DP 副本：本进程 EngineCore + 一对 ZMQ socket。
+
+        先排空入口上的 add/shutdown，有未完成请求则 step 一次并把结果推给门面；
+        队列空时短睡，避免空转占满 CPU。
+    """
     assert config.dp_size == 1, "replica config must flatten dp_size to 1"
     core = EngineCore(
         config, eos_token_id=eos_token_id, device=torch.device(device), dtype=dtype
@@ -134,8 +153,17 @@ def run_engine_core_proc(
         ctx.term()
 
 
+# ------------------------------------------------------------------ #
+# 门面客户端
+# ------------------------------------------------------------------ #
+
+
 class MPClient(EngineCoreClient):
-    """spawn ``dp_size`` 个 EngineCoreProc，ZMQ round-robin 路由 + 汇总输出。"""
+    """
+        spawn dp_size 个副本进程，ZMQ IPC 投递请求、汇总各副本的 step 输出。
+
+        add_request 按 round-robin 选副本；step 阻塞等到至少一路输出，再非阻塞收齐当前已就绪的结果。
+    """
 
     def __init__(
         self,
@@ -178,7 +206,8 @@ class MPClient(EngineCoreClient):
                     out_addr=out_addr,
                     ready=ready,
                 ),
-                daemon=True,
+                # 副本内 TP/PP 还会再 spawn Worker；daemon 进程不能有子进程。
+                daemon=False,
             )
             p.start()
             self._procs.append(p)
@@ -195,7 +224,7 @@ class MPClient(EngineCoreClient):
             self._poller.register(out_sock, zmq.POLLIN)
 
     def _replica_config(self, r: int) -> EngineConfig:
-        """切出第 r 个独立引擎：dp→1，GPU 切片，独立 NCCL 端口。"""
+        """第 r 个副本：dp=1，GPU 切成 tp×pp 一段，nccl_port 错开以免 FileStore 撞车。"""
         per = self.config.tp_size * self.config.pp_size
         if self.config.device_ids is not None:
             devices = self.config.device_ids[r * per : (r + 1) * per]
@@ -227,6 +256,7 @@ class MPClient(EngineCoreClient):
         return bool(self._pending)
 
     def _drain(self, *, block: bool) -> tuple[list[EngineCoreOutput], int]:
+        """block=True 时先等到任意一路有输出，再把当前已就绪的副本结果收完。"""
         outputs: list[EngineCoreOutput] = []
         metric = 0
         first = True

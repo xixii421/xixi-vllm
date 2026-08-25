@@ -169,8 +169,13 @@ class ModelRunner:
     def _run_decode(self, seqs: list[SeqSchedule]):
         if not seqs:
             return None
-        self.batch.build_decode(seqs)
         bs = len(seqs)
+        pad_to = (
+            self.cuda_graph_runner._pad_bs(bs)
+            if self.cuda_graph_runner is not None and bs <= self.max_bs
+            else None
+        )
+        self.batch.build_decode(seqs, pad_to=pad_to)
 
         if self.cuda_graph_runner is not None and bs <= self.max_bs:
             if not self.is_first_pp:

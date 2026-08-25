@@ -1,8 +1,3 @@
-"""KVPool：Worker 侧 GPU KV 张量（含按当前 rank 分片的维度推导与显存预算）。
-
-从 data 面迁出：KV 张量分配依赖 ``torch`` 与 ``distributed``，属于计算面。
-"""
-
 from __future__ import annotations
 
 import torch
@@ -12,7 +7,6 @@ from ..distributed import all_gather, get_pp_group, get_pp_indices, get_tp_group
 
 
 def get_kv_dims(hf: PretrainedConfig) -> tuple[int, int, int]:
-    """当前 rank 的 KV 分片维度：(本地层数, 本地 kv 头数, head_dim)。"""
     tp = get_tp_group()
     pp = get_pp_group()
     num_kv_heads = max(1, hf.num_key_value_heads // tp.size)
@@ -22,8 +16,6 @@ def get_kv_dims(hf: PretrainedConfig) -> tuple[int, int, int]:
 
 
 class KVPool:
-    """Worker 侧 GPU KV 张量，不含块表 / 前缀。"""
-
     def __init__(
         self,
         hf_config: PretrainedConfig,

@@ -1,8 +1,13 @@
-"""Distributed 通用工具：整除、层划分、跨 stage 中间张量与占位层。"""
-
 from __future__ import annotations
 
 import torch
+
+# ==============================================================================
+# PP 层区间、中间激活、占位层。
+#
+# get_pp_indices 给 Qwen3 决定本 rank 加载哪些层。
+# IntermediateTensors / PPMissingLayer 给跨 stage 的 hidden 和没分到的层。
+# ==============================================================================
 
 _PP_LAYER_RANGES: list[tuple[int, int]] | None = None
 
@@ -21,26 +26,23 @@ def divide(numerator: int, denominator: int) -> int:
 def _equal_split(
     num_hidden_layers: int, pp_rank: int, pp_size: int
 ) -> tuple[int, int]:
-    """均分隐藏层；不能整除时最后一档吃掉余数。"""
-    layers_per_partition = num_hidden_layers // pp_size
-    start_layer = pp_rank * layers_per_partition
-    end_layer = start_layer + layers_per_partition
-    if pp_rank == pp_size - 1:
-        end_layer = num_hidden_layers
-    return start_layer, end_layer
+    n = num_hidden_layers // pp_size
+    start = pp_rank * n
+    end = num_hidden_layers if pp_rank == pp_size - 1 else start + n
+    return start, end
 
 
 def get_pp_indices(
     num_hidden_layers: int, pp_rank: int, pp_size: int
 ) -> tuple[int, int]:
-    """返回本 rank 的层区间；若已设置不均分区间则优先使用。"""
+    """本 rank 的 [start, end)。set_pp_layer_ranges 之后走不均分。"""
     if _PP_LAYER_RANGES is not None:
         return _PP_LAYER_RANGES[pp_rank]
     return _equal_split(num_hidden_layers, pp_rank, pp_size)
 
 
 def set_pp_layer_ranges(layer_counts: list[int] | None) -> None:
-    """按每 stage 层数列表设置不均分区间（累加得到 start/end）。None 复位为等分。"""
+    """按每 stage 层数设区间，例如 12G+24G 的 12/28。None 回到等分。"""
     global _PP_LAYER_RANGES
     if layer_counts is None:
         _PP_LAYER_RANGES = None
@@ -54,13 +56,11 @@ def set_pp_layer_ranges(layer_counts: list[int] | None) -> None:
 
 
 class IntermediateTensors(dict[str, torch.Tensor]):
-    """PP 相邻 stage 之间传递的中间张量（按名字索引）。"""
-
-    pass
+    """PP 边界上的 hidden_states / residual。"""
 
 
 class PPMissingLayer(torch.nn.Identity):
-    """本 rank 不持有的层的占位符，forward 原样透传第一个参数。"""
+    """本 rank 没有的层，forward 原样返回第一个参数。"""
 
-    def forward(self, *args, **kwargs):  # noqa: D102
+    def forward(self, *args, **kwargs):
         return args[0] if args else next(iter(kwargs.values()))

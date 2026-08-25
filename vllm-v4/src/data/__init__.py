@@ -1,5 +1,3 @@
-"""Data plane: sequences, KV logical ledger, and wire structures (pure CPU)."""
-
 from __future__ import annotations
 
 from .batch import EngineCoreOutput, ScheduledBatch, SchedulerOutput, SeqSchedule

@@ -1,8 +1,3 @@
-"""Chained block hashing (xxhash — faster than blake2b for teaching hot path).
-
-Semantics match v2: ``h_i = H(tokens_i | h_{i-1})`` with ``h_{-1} = -1``.
-"""
-
 from __future__ import annotations
 
 import struct
@@ -14,6 +9,9 @@ try:
 except ImportError:  # pragma: no cover
     xxhash = None  # type: ignore
 
+# 整块 token 的链式哈希：h_i = H(本块 token | h_{i-1})，h_{-1} = -1。
+# HashPrefixIndex / RadixPrefixIndex 用它当块的身份。
+
 
 def compute_block_hash(token_ids: list[int] | np.ndarray, prefix: int = -1) -> int:
     if xxhash is not None:
@@ -23,7 +21,6 @@ def compute_block_hash(token_ids: list[int] | np.ndarray, prefix: int = -1) -> i
         arr = np.asarray(token_ids, dtype=np.int32)
         h.update(arr.tobytes())
         return int(h.intdigest())
-    # Fallback: same layout as v2 blake2b path.
     import hashlib
 
     h = hashlib.blake2b(digest_size=8)
