@@ -1,76 +1,90 @@
-"""GPU pick helpers for MoE / parallel tests.
-
-Engine rules (see ``EngineConfig._validate_tp_homogeneous_devices``):
-- **TP / EP** (same process group): require same-SKU GPUs unless
-  ``allow_hetero_tp=True``.
-- **PP** across stages: heterogeneous SKUs are allowed (recommended for
-  Blackwell + A100 → ``tp=1, pp=2, device_ids=[bw, a100]``).
-"""
+"""Pick GPUs and map physical PCI ids → isolated CUDA_VISIBLE_DEVICES runs."""
 
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+from pathlib import Path
 
 import torch
+
+from src.utils.cuda_env import format_flashinfer_arch
 
 
 def gpu_name(i: int) -> str:
     return torch.cuda.get_device_properties(i).name
 
 
-def gpu_mem_mib(i: int) -> int:
-    return int(torch.cuda.get_device_properties(i).total_memory // (1024 * 1024))
-
-
 def gpu_free_mib(i: int) -> int:
-    try:
-        free, _ = torch.cuda.mem_get_info(i)
-        return int(free // (1024 * 1024))
-    except Exception:
-        return gpu_mem_mib(i)
+    free, _ = torch.cuda.mem_get_info(i)
+    return int(free // (1024 * 1024))
 
 
-def find_gpu(*needles: str, min_free_mib: int = 0) -> int | None:
-    """First GPU whose name contains any needle (case-insensitive)."""
+def pick_gpus(n: int, *, prefer: str = "3090", min_free_mib: int = 8000) -> list[int]:
+    """Same-SKU device indices in the **current** visible CUDA order."""
     if not torch.cuda.is_available():
-        return None
-    lowered = [n.lower() for n in needles]
+        raise RuntimeError("CUDA not available")
+    groups: dict[str, list[int]] = {}
     for i in range(torch.cuda.device_count()):
-        name = gpu_name(i).lower()
-        if any(n in name for n in lowered):
-            if min_free_mib and gpu_free_mib(i) < min_free_mib:
-                continue
-            return i
-    return None
+        if gpu_free_mib(i) < min_free_mib:
+            continue
+        groups.setdefault(gpu_name(i), []).append(i)
+    preferred = [g for name, g in groups.items() if prefer.lower() in name.lower()]
+    others = [g for name, g in groups.items() if prefer.lower() not in name.lower()]
+    for g in preferred + others:
+        if len(g) >= n:
+            return g[:n]
+    raise RuntimeError(
+        f"need {n} homogeneous GPUs with >={min_free_mib} MiB free; {groups}"
+    )
 
 
-def find_blackwell(*, min_free_mib: int = 0) -> int | None:
-    # Prefer explicit Blackwell / RTX PRO naming (avoid bare "6000" false positives).
-    return find_gpu("blackwell", "rtx pro 6000", "pro 6000", min_free_mib=min_free_mib)
+def arch_for_device(i: int) -> str:
+    major, minor = torch.cuda.get_device_capability(i)
+    return format_flashinfer_arch(int(major), int(minor))
 
 
-def find_a100(*, min_free_mib: int = 0) -> int | None:
-    return find_gpu("a100", min_free_mib=min_free_mib)
+def run_isolated(
+    physical_ids: list[int],
+    worker_src: str,
+    *args: str,
+    timeout: int = 600,
+) -> str:
+    """Run ``worker_src`` as ``python -c`` with only ``physical_ids`` visible.
 
-
-def blackwell_a100_pair(
-    *,
-    min_free_mib: int = 0,
-    order: str = "bw_a100",
-) -> list[int] | None:
-    """Return ``[stage0, stage1]`` for hetero PP (default Blackwell → A100)."""
-    bw = find_blackwell(min_free_mib=min_free_mib)
-    a100 = find_a100(min_free_mib=min_free_mib)
-    if bw is None or a100 is None:
-        return None
-    if order == "a100_bw":
-        return [a100, bw]
-    return [bw, a100]
-
-
-def env_device_ids(key: str = "VLLM_V7_MOE_DEVICES") -> list[int] | None:
-    """Optional override, e.g. ``VLLM_V7_MOE_DEVICES=0,3``."""
-    raw = os.environ.get(key, "").strip()
-    if not raw:
-        return None
-    return [int(x) for x in raw.split(",") if x.strip() != ""]
+    Sets ``CUDA_VISIBLE_DEVICES`` and ``FLASHINFER_CUDA_ARCH_LIST`` **before**
+    importing FlashInfer (required on mixed-GPU hosts).
+    """
+    env = os.environ.copy()
+    env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in physical_ids)
+    # Resolve arch from the parent process view (full bus).
+    archs = []
+    seen: set[str] = set()
+    for i in physical_ids:
+        a = arch_for_device(i)
+        if a not in seen:
+            seen.add(a)
+            archs.append(a)
+    env["FLASHINFER_CUDA_ARCH_LIST"] = " ".join(archs)
+    env.setdefault("CUDA_HOME", "/usr/local/cuda-12.8")
+    root = str(Path(__file__).resolve().parents[2])
+    env["PYTHONPATH"] = root + (
+        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+    )
+    cmd = [sys.executable, "-c", worker_src, *args]
+    proc = subprocess.run(
+        cmd,
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"isolated worker failed (devices={physical_ids} arch={env['FLASHINFER_CUDA_ARCH_LIST']})\n"
+            f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        )
+    return proc.stdout

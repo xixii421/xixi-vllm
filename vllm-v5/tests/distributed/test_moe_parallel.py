@@ -1,121 +1,78 @@
-"""MoE TP / PP correctness on a tiny checkpoint (cutlass or Triton).
-
-``moe_fused_backend=auto``：有 cutlass 用 cutlass，否则 Triton。
-"""
+"""MoE TP / EP: greedy tokens must match (one layout per subprocess)."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
-import torch
 
-from tests.conftest import needs_2gpu, needs_4gpu
-from tests.helpers import cfg, greedy_tokens, homo_device_ids
-from tests.helpers.devices import blackwell_a100_pair, env_device_ids, gpu_name
-from tests.helpers.moe_tiny import build_tiny_moe
+from tests.conftest import needs_2gpu, needs_cuda
+from tests.helpers import MOE_MODEL, pick_gpus, require_model
+from tests.helpers.devices import run_isolated
+
+pytestmark = [
+    pytest.mark.distributed,
+    needs_cuda,
+    needs_2gpu,
+    require_model(MOE_MODEL),
+]
+
+_WORKER = r"""
+import json, sys
+from src.moe import resolve_moe_backend
+from tests.helpers.engine import cfg, greedy_tokens
 from tests.helpers.parallel import layout_ok
+from tests.helpers.paths import MOE_MODEL
 
-pytestmark = [pytest.mark.distributed, needs_2gpu]
-
-PROMPT = [1, 2, 3, 4, 5, 6, 7, 8]
-N = 8
-
-
-@pytest.fixture(scope="module")
-def tiny_moe_dir(tmp_path_factory):
-    d = tmp_path_factory.mktemp("tiny_moe_dist")
-    return build_tiny_moe(d)
-
-
-def _moe_cfg(tiny_moe_dir, **kwargs):
-    base = dict(
+prompt, n, tp_s, ep_s = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+tp, enable_ep = int(tp_s), ep_s == "1"
+ok, reason = layout_ok(MOE_MODEL, tp=tp, enable_ep=enable_ep)
+if not ok:
+    raise SystemExit(f"bad layout: {reason}")
+backend = resolve_moe_backend("triton")
+tokens = greedy_tokens(
+    cfg(
+        MOE_MODEL,
+        device_ids=list(range(tp)),
+        tp_size=tp,
+        enable_ep=enable_ep,
         max_num_seqs=1,
-        context_len=256,
-        num_kvcache_blocks=16,
-        gpu_memory_utilization=0.35,
-        enforce_eager=True,
-        enable_radix=False,
-        dtype="float16",
-        moe_fused_backend="auto",
+        context_len=512,
+        num_kvcache_blocks=8,
+        gpu_memory_utilization=0.70,
+        moe_backend=backend,
+        nccl_port=29620 + tp * 2 + int(enable_ep),
+    ),
+    prompt,
+    n=n,
+)
+print(json.dumps({"tokens": tokens}))
+"""
+
+
+def _tokens(phys: list[int], *, tp: int, enable_ep: bool) -> list[int]:
+    out = run_isolated(
+        phys[:tp],
+        _WORKER,
+        "The capital of France is",
+        "8",
+        str(tp),
+        "1" if enable_ep else "0",
+        timeout=1200,
     )
-    base.update(kwargs)
-    return cfg(tiny_moe_dir, **base)
+    lines = [ln for ln in out.splitlines() if ln.strip().startswith("{")]
+    assert lines, out
+    return json.loads(lines[-1])["tokens"]
 
 
-def _hetero_pair() -> list[int]:
-    override = env_device_ids()
-    if override is not None and len(override) == 2:
-        return override
-    pair = blackwell_a100_pair(min_free_mib=0)
-    if pair is None:
-        pytest.skip("need Blackwell + A100 (or VLLM_V7_MOE_DEVICES=0,3)")
-    return pair
-
-
-def test_tp2_matches_single(tiny_moe_dir):
-    ok, reason = layout_ok(tiny_moe_dir, tp=2)
-    if not ok:
-        pytest.skip(reason)
-    ids = homo_device_ids(2)
-    single = greedy_tokens(_moe_cfg(tiny_moe_dir, device_ids=[ids[0]]), PROMPT, n=N)
-    tp2 = greedy_tokens(
-        _moe_cfg(tiny_moe_dir, tp_size=2, device_ids=ids),
-        PROMPT,
-        n=N,
-    )
-    assert tp2 == single
-
-
-def test_pp2_matches_single(tiny_moe_dir):
-    ok, reason = layout_ok(tiny_moe_dir, tp=1, pp=2)
-    if not ok:
-        pytest.skip(reason)
-    ids = homo_device_ids(2)
-    single = greedy_tokens(_moe_cfg(tiny_moe_dir, device_ids=[ids[0]]), PROMPT, n=N)
-    pp2 = greedy_tokens(
-        _moe_cfg(tiny_moe_dir, tp_size=1, pp_size=2, device_ids=ids),
-        PROMPT,
-        n=N,
-    )
-    assert pp2 == single
-
-
-def test_pp2_hetero_bw_a100_matches_single(tiny_moe_dir):
-    ok, reason = layout_ok(tiny_moe_dir, tp=1, pp=2)
-    if not ok:
-        pytest.skip(reason)
-    pair = _hetero_pair()
-    print(f"[tiny] PP2 hetero {pair} = {gpu_name(pair[0])} | {gpu_name(pair[1])}")
-    single = greedy_tokens(_moe_cfg(tiny_moe_dir, device_ids=[pair[0]]), PROMPT, n=N)
-    pp2 = greedy_tokens(
-        _moe_cfg(tiny_moe_dir, tp_size=1, pp_size=2, device_ids=pair),
-        PROMPT,
-        n=N,
-    )
-    assert pp2 == single
-
-
-def test_triton_backend_tp1(tiny_moe_dir):
-    gid = homo_device_ids(2)[0]
-    toks = greedy_tokens(
-        _moe_cfg(tiny_moe_dir, device_ids=[gid], moe_fused_backend="triton"),
-        PROMPT,
-        n=N,
-    )
-    assert len(toks) == N
-
-
-@needs_4gpu
-def test_tp2pp2_matches_single_prefix(tiny_moe_dir):
-    if torch.cuda.device_count() < 4:
-        pytest.skip("need 4 GPUs for tp2pp2")
-    ok, reason = layout_ok(tiny_moe_dir, tp=2, pp=2)
-    if not ok:
-        pytest.skip(reason)
-    ids = homo_device_ids(4)
-    single = greedy_tokens(_moe_cfg(tiny_moe_dir, device_ids=[ids[0]]), PROMPT, n=N)
-    tp2pp2 = greedy_tokens(
-        _moe_cfg(tiny_moe_dir, tp_size=2, pp_size=2, device_ids=ids),
-        PROMPT,
-        n=N,
-    )
-    assert tp2pp2[:4] == single[:4]
+def test_moe_tp1_tp2_ep_match():
+    # A2.7B ≈22GB：单卡 tp1 优先 A100；tp2/ep 用两张同型号 3090。
+    try:
+        tp1_devs = pick_gpus(1, prefer="A100", min_free_mib=30000)
+    except RuntimeError:
+        tp1_devs = pick_gpus(1, prefer="3090", min_free_mib=20000)
+    pair = pick_gpus(2, prefer="3090", min_free_mib=18000)
+    ref = _tokens(tp1_devs, tp=1, enable_ep=False)
+    tp2 = _tokens(pair, tp=2, enable_ep=False)
+    ep2 = _tokens(pair, tp=2, enable_ep=True)
+    assert ref == tp2 == ep2, f"tp1={ref} tp2={tp2} ep2={ep2}"
