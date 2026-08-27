@@ -21,12 +21,14 @@ class Sequence:
     token_ids: list[int]
     block_size: int
     seq_id: int = 0
-    status: SequenceStatus = SequenceStatus.WAITING
     block_table: list[int] = field(default_factory=list)
-    num_cached_tokens: int = 0
-    num_scheduled_tokens: int = 0
+    num_cached_tokens: int = 0 # 命中 KV 缓存的 token 数
+
+    # v2新增
+    status: SequenceStatus = SequenceStatus.WAITING
+    num_scheduled_tokens: int = 0 # 本轮 step 要调度处理的 toke 数量
     is_prefill: bool = True
-    num_prompt_tokens: int = 0
+    num_prompt_tokens: int = 0 # prompt 输入部分 token 数量
     temperature: float = 0.0
     top_p: float | None = None
     top_k: int | None = None
@@ -43,6 +45,7 @@ class Sequence:
         block_size: int,
         sampling: SamplingParams | None = None,
     ) -> Sequence:
+        """ 接收 token_ids 创建 Sequence 对象"""
         sp = sampling or SamplingParams()
         ids = copy(token_ids)
         if not ids:
@@ -50,7 +53,7 @@ class Sequence:
         return cls(
             token_ids=ids,
             block_size=block_size,
-            seq_id=next(_SEQ_IDS),
+            seq_id=next(_SEQ_IDS), # 计数器，区分请求id
             num_prompt_tokens=len(ids),
             last_token=ids[-1],
             temperature=sp.temperature,
@@ -74,6 +77,7 @@ class Sequence:
 
     @property
     def num_completion_tokens(self) -> int:
+        # 输出 token 数
         return self.num_tokens - self.num_prompt_tokens
 
     @property

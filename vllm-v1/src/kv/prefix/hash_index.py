@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from kv.prefix.hash_util import compute_block_hash
+from .hash_util import compute_block_hash
 
 if TYPE_CHECKING:
     from ..pool import BlockPool
@@ -16,7 +16,7 @@ class HashPrefixIndex:
     def __init__(self) -> None:
         self._hash_to_block_id: dict[int, int] = {}
 
-    def publish(self,seq: Sequence, num_full_blocks: int, pool: BlockPool) -> None:
+    def publish(self, seq: Sequence, num_full_blocks: int, pool: BlockPool) -> None:
         """ 把前 num_full_blocks 页登记进哈希表 """
         if num_full_blocks <= 0:
             return
@@ -33,7 +33,7 @@ class HashPrefixIndex:
                 # 不同物理块但是token完全相同
                 self._hash_to_block_id[h] = bid
 
-    def match(self,seq: Sequence, pool: BlockPool) -> list[int]:
+    def match(self, seq: Sequence, pool: BlockPool) -> list[int]:
         """ 返回可复用的物理块号列表（前缀，可能为空） """
         h = -1
         hit: list[int] = [] # 记录可以直接复用的物理块id
@@ -51,9 +51,9 @@ class HashPrefixIndex:
             hit.append(bid)
         return hit
 
-    def invalidate(self,block_id: int,pool: BlockPool) -> None:
+    def invalidate(self, block_id: int, pool: BlockPool) -> None:
         """ 页被淘汰时删除哈希映射 """
         block = pool.blocks[block_id]
-        if block.hash != -1 and self._hash_to_block_id.get(block.hash) != block.id:
+        if block.hash != -1 and self._hash_to_block_id.get(block.hash) == block_id:
             # 当前物理块哈希值不为-1 且 哈希表内仍有映射 删除旧块
             del self._hash_to_block_id[block.hash]

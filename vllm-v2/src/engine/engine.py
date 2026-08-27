@@ -40,6 +40,8 @@ class Engine:
         self.last_num_cached_tokens = 0
 
     def _init_kv(self) -> None:
+        """ 初始化KV缓存，请求调度以及模型执行 """
+        # 管理物理block内存，前缀缓存，对外给Scheduler提供block分配接口，给ModelRunner提供KV缓存张量
         self.kv = KVManager(
             self.model,
             num_blocks=self.config.num_kv_blocks,
@@ -48,13 +50,15 @@ class Engine:
             device=self.device,
             dtype=self.dtype,
         )
+        # 请求调度器，请求排队，资源判断，状态更新
         self.scheduler = Scheduler(
             self.kv,
-            max_num_seqs=self.config.max_num_seqs,
-            max_num_batched_tokens=self.config.max_num_batched_tokens,
-            eos_token_id=self.eos_token_id,
-            mix_prefill_decode=self.config.mix_prefill_decode,
+            max_num_seqs=self.config.max_num_seqs, # 最大请求数
+            max_num_batched_tokens=self.config.max_num_batched_tokens, # 单轮token上限
+            eos_token_id=self.eos_token_id, # 结束符，结合is_finished
+            mix_prefill_decode=self.config.mix_prefill_decode, # 调度策略
         )
+        # 模型执行器 接收Scheduler输出的序列列表向前传播并返回新的token_id
         self.model_runner = ModelRunner(
             self.model, self.kv, self.sampler, device=self.device
         )
@@ -62,14 +66,15 @@ class Engine:
     def reset_kv(
         self, prefix_backend: Literal["none", "hash", "radix"] | None = None
     ) -> None:
+        """ 运行时重置整套 KV 缓存子系统 """
         if prefix_backend is not None:
             if prefix_backend not in ("none", "hash", "radix"):
                 raise ValueError(f"invalid prefix_backend: {prefix_backend!r}")
-            self.config.prefix_backend = prefix_backend
-        self._init_kv()
-        self.last_num_cached_tokens = 0
+            self.config.prefix_backend = prefix_backend # 热切换前缀缓存策略
+        self._init_kv() # 初始化 KVManager、Scheduler、ModelRunner
+        self.last_num_cached_tokens = 0 # 前缀缓存命中的token数量
         if self.device.type == "cuda":
-            torch.cuda.empty_cache()
+            torch.cuda.empty_cache() # 释放闲置GPU显存给CUDA
 
     def _resolve_dtype(self) -> torch.dtype:
         if self.config.dtype != "auto":
@@ -83,6 +88,7 @@ class Engine:
         prompt: str | list[int],
         sampling_params: SamplingParams | None = None,
     ) -> Sequence:
+        """ 将 prompt 包装成 Sequence 对象，并进入调度器排队 """
         token_ids = (
             list(prompt) if isinstance(prompt, list) else self.tokenizer.encode(prompt)
         )
@@ -95,20 +101,26 @@ class Engine:
         return seq
 
     def step(self) -> tuple[list[tuple[int, list[int]]], int]:
+        """ """
         prefills, decodes = self.scheduler.schedule()
+        # prefills 需要执行prefill的序列
+        # decodes 正在做迭代生成的序列
+
         if not prefills and not decodes:
             return [], 0
 
-        # Prefix-hit size from allocate() (not post-prefill num_cached).
+        # 来自 allocate() 的prefill阶段token命中的数量
         self.last_num_cached_tokens = self.kv.last_num_cached_tokens
 
-        prefill_toks = sum(s.num_scheduled_tokens for s in prefills)
-        metric = prefill_toks + len(decodes)
+        prefill_toks = sum(s.num_scheduled_tokens for s in prefills) # 本轮所有prefill跑的token数量
+        metric = prefill_toks + len(decodes) # 本轮所有的token数量
 
-        # Decode first so in-flight requests keep moving; then prefill chunks.
+        # 优先执行 decode，保证正在流式输出的请求持续向前推进；之后再执行 prefill 分片
         p_ids, d_ids = self.model_runner.run(prefills, decodes)
 
         finished: list = []
+        # 模型跑完后处理: 追加生成的token_id, 分配新生成token的物理地址
+        # 返回真正执行结束的seq列表
         if decodes:
             finished.extend(
                 self.scheduler.postprocess(decodes, d_ids, is_prefill=False)
@@ -117,10 +129,12 @@ class Engine:
             finished.extend(
                 self.scheduler.postprocess(prefills, p_ids, is_prefill=True)
             )
+        # 正常情况下，prefill的seq是不会结束的，因为还要继续decode生成
+        # 但是如果prompt过长超过限制token长度或者遇到eos,会提前结束
 
         outputs = [
             (seq.seq_id, seq.token_ids[seq.num_prompt_tokens :]) for seq in finished
-        ]
+        ] # 返回单请求的请求id，decode输出token
         return outputs, metric
 
 
@@ -129,22 +143,30 @@ class Engine:
         prompts: list[str | list[int]],
         sampling_params: SamplingParams | list[SamplingParams] | None = None,
     ) -> list[str]:
+        """ 多请求对外API """
+        # 处理采样参数，每条prompt对应一套采样配置
         if sampling_params is None:
+            # 采用默认参数
             sps = [SamplingParams() for _ in prompts]
         elif isinstance(sampling_params, (list, tuple)):
+            # 多prompt，采样配置数量必须和prompt数量对齐
             sps = list(sampling_params)
             if len(sps) != len(prompts):
                 raise ValueError("sampling_params length must match prompts")
         else:
+            # 单prompt
             sps = [sampling_params for _ in prompts]
 
         seqs = [self.add_request(p, sp) for p, sp in zip(prompts, sps)]
+        # seqs 保存 prompt 输入顺序
         finished_text: dict[int, str] = {}
         while not self.scheduler.is_finished():
             outputs, _ = self.step()
+            # outputs的seq顺序是结束顺序
             for seq_id, completion_ids in outputs:
                 finished_text[seq_id] = self.tokenizer.decode(completion_ids)
         return [finished_text[seq.seq_id] for seq in seqs]
+        # 保证输出顺序和输入一致
 
     def generate(
         self,
@@ -155,6 +177,7 @@ class Engine:
         top_k: int | None = None,
         min_p: float | None = None,
     ) -> Iterator[str]:
+        """ 单请求对外API """
         sp = SamplingParams(
             temperature=temperature,
             top_p=top_p,
@@ -163,10 +186,11 @@ class Engine:
             max_tokens=max_new_tokens,
         )
         seq = self.add_request(prompt, sp)
-        emitted = 0
+        emitted = 0 # 输出 token 计数器
         while not seq.is_finished:
-            self.step()
+            self.step() # 模型调度 + GPU 推理 + postprocess
             while emitted < seq.num_completion_tokens:
+                # 新token生成，但是还没有输出
                 tid = seq.token_ids[seq.num_prompt_tokens + emitted]
                 emitted += 1
-                yield self.tokenizer.decode([tid])
+                yield self.tokenizer.decode([tid]) # 输出

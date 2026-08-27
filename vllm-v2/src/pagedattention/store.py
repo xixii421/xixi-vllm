@@ -6,6 +6,7 @@ import torch
 
 
 class _BlockTensorStore(Protocol):
+    # Protocol 协议类型，相当于接口定义,描述 KV 显存池对象必须具备的成员与张量 shape
     block_size: int
     num_kv_heads: int
     head_dim: int
@@ -16,6 +17,7 @@ class _BlockTensorStore(Protocol):
 def _coerce_kv_token_major(
     k: torch.Tensor, v: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """ 把 KV 统一转换成 token 主维度格式 [total_tokens, Hkv, D] """
     if k.dim() == 4:
         b, s, h, d = k.shape
         return k.reshape(b * s, h, d), v.reshape(b * s, h, d)
@@ -27,6 +29,7 @@ def _coerce_kv_token_major(
 def _flat_layer_views(
     pool: _BlockTensorStore, layer_id: int
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """ 取某一层 layer_id 的全部 KV 池，做展平视图 """
     flat_dim = pool.num_kv_heads * pool.head_dim
     flat_k = pool.k[layer_id].reshape(-1, flat_dim)
     flat_v = pool.v[layer_id].reshape(-1, flat_dim)

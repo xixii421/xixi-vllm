@@ -67,8 +67,8 @@ class BlockPool:
         )
 
     def allocate_fresh(self) -> int:
+        """ 取一页空闲块；free 空则淘汰一块 cached """
         if not self.free_ids:
-
             if not self.cached_ids:
                 raise RuntimeError("KV block pool exhausted")
             bid = next(iter(self.cached_ids))
@@ -81,6 +81,7 @@ class BlockPool:
         return bid
 
     def _evict_cached(self, bid: int) -> None:
+        """ 丢掉一块 cached，必要时通知前缀索引 """
         if self.on_evict is not None:
             self.on_evict(bid)
         self.cached_ids.discard(bid)
@@ -89,12 +90,14 @@ class BlockPool:
         self.free_ids.add(bid)
 
     def reclaim_cached(self, bid: int) -> None:
+        """ 前缀命中：把 cached 页重新变为 used """
         self.cached_ids.discard(bid)
         self.free_ids.discard(bid)
         self.used_ids.add(bid)
         self.blocks[bid].ref_count = 1
 
     def release_to_cached_or_free(self, bid: int, *, keep_cached: bool) -> None:
+        """ 请求结束减引用；可保留为 cached，否则回 free """
         block = self.blocks[bid]
         block.ref_count -= 1
         if block.ref_count > 0:

@@ -13,13 +13,15 @@ class EngineConfig:
     model: str
     context_len: int = 2048
     dtype: str = "auto"
-    # from v1 
+
+    # KV / prefix (v1 新增)
     prefix_backend: Literal["none", "hash", "radix"] = "hash"
     block_size: int = 16
     num_kv_blocks: int = 0  # 0 → derive
-    # continuous batching
-    max_num_seqs: int = 8
-    max_num_batched_tokens: int = 4096
+
+    # continuous batching(v2 新增)
+    max_num_seqs: int = 8  # 最大请求数量
+    max_num_batched_tokens: int = 4096 # 单条batch最大token数
     # True: decode + prefill chunk 同一步；False: 旧 Prefill-first
     mix_prefill_decode: bool = True
     hf_config: PretrainedConfig = field(init=False)
