@@ -72,16 +72,18 @@ class KVManager:
         block_size: int,
         dtype: torch.dtype,
         device: torch.device,
-        gpu_memory_utilization: float,
+        gpu_memory_utilization: float, # 用户设置的GPU显存利用率上限
         reserve_bytes: int = 0,
     ) -> int:
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize(device)
+        """ 自动计算 KV Cache 最大可用 block 数量 """
+        torch.cuda.empty_cache() # 释放troch缓存中空闲显存碎片
+        torch.cuda.synchronize(device) # 同步GPU
         nkv = hf.num_key_value_heads
         hd = getattr(hf, "head_dim", hf.hidden_size // hf.num_attention_heads)
         layers = hf.num_hidden_layers
         block_bytes = 2 * layers * block_size * nkv * hd * dtype.itemsize
-        free, total = torch.cuda.mem_get_info(device)
+        # KV两份张量 层数 单块token数 单KVtoken头数加维度 单元素字节数
+        free, total = torch.cuda.mem_get_info(device) # 设备空闲字节，总物理显存字节
         available = int(total * gpu_memory_utilization) - (total - free)
         # 预留给 CG 的字节数由调用方按实际捕获足迹传入（见 Engine._probe_cg_footprint）。
         available -= reserve_bytes
@@ -92,14 +94,12 @@ class KVManager:
         return self.blocks.num_free
 
     def _fit_prefix(self, seq: Sequence) -> int:
-        """前缀复用预检查：计算当前序列最多可复用多少连续前缀 KV 块。"""
+        """预检查：计算当前序列能否复用前缀 KV 块 """
         need = seq.num_blocks
         if need == 0:
             return 0
         hit = self.index.match(seq, self.blocks)
         max_cached = min(len(hit), need)
-        if max_cached == 0:
-            return -1
         reclaimable = sum(
             1 for b in hit[:max_cached] if b in self.blocks.cached_ids
         )
