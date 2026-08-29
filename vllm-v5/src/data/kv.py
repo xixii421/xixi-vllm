@@ -44,8 +44,6 @@ class KVManager:
             return 0
         hit = self.index.match(seq, self.blocks)
         max_cached = min(len(hit), need)
-        if max_cached == 0:
-            return -1
         reclaimable = sum(
             1 for b in hit[:max_cached] if b in self.blocks.cached_ids
         )
