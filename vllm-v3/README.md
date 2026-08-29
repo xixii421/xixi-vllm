@@ -4,6 +4,40 @@
 
 ---
 
+## 代码架构
+
+```
+vllm-v3/
+├── run.py                        # 改写：+ --cg / --compile / --batch
+├── config.yaml                   # 改写：+ kvcache_block_size / gpu_memory_utilization / torch_compile / enforce_eager
+├── src/
+│   ├── config.py                 # 改写：kvcache_block_size=256 / enforce_eager 等
+│   ├── control/                  # 新增：控制面（v2 的 engine/ 拆出）
+│   │   ├── engine.py             #   改写：step = schedule → run → postprocess
+│   │   └── scheduler.py          #   改写：waiting/running、chunked prefill
+│   ├── data/                     # 新增：数据面（v2 的 kv/ + 批数据拆出）
+│   │   ├── batch.py              #   新增：常驻 GPU buffer + pin_memory H2D
+│   │   ├── block_manager.py      #   新增：多请求 block 分配
+│   │   ├── kv_ops.py             #   新增：Triton scatter 写核
+│   │   └── manager.py            #   改写：KV 布局 [2,L,blocks,bs,n_kv,hd]
+│   └── compute/                  # 新增：计算面（v2 的 layers/ + 推理编排拆出）
+│       ├── cuda_graph.py         #   新增：Decode CUDA Graph
+│       ├── executor.py           #   新增：执行入口
+│       ├── model_runner.py       #   改写：decode/prefill 编排 + compile + CG fast path
+│       ├── sampler.py            #   新增：批量采样
+│       ├── layers/
+│       │   ├── attention.py      #   改写：FlashAttention paged
+│       │   └── ops.py            #   新增：FlashInfer RoPE/SiLU custom op
+│       └── models/
+│           ├── qwen3.py          #   改写：QKV / Gate-Up GEMM 融合
+│           └── loader.py         #   新增：快速权重加载
+├── bench/                        # 性能基准
+├── test/                         # 测试
+└── docs/                         # 设计文档
+```
+
+---
+
 ## 相对 v2 新增
 
 | # | 优化 | 对应模块 | 收益 |
@@ -43,23 +77,6 @@ python run.py --model Qwen3-0.6B --batch
 # 测试
 PYTHONPATH=. pytest tests/test_scheduler.py -q
 ```
-
----
-
-## 核心源码
-
-| 文件 | v2→v3 |
-|------|-------|
-| `src/compute/layers/attention.py` | **改写** — `store_kvcache → flash_attn_*`；`AttnInputs`/`AttnMetadata` + `attention_context` |
-| `src/data/kv_ops.py` | **新增** — Triton `store_kvcache` kernel |
-| `src/compute/cuda_graph.py` | **新增** — `CUDAGraphRunner` decode |
-| `src/compute/model_runner.py` | **改写** — decode/prefill 编排 + torch.compile prefill + CG fast path |
-| `src/data/batch.py` | **改写** — 常驻 GPU buffer + `pin_memory` H2D |
-| `src/compute/sampler.py` | **新增** — 批量采样 |
-| `src/compute/layers/ops.py` | **新增** — FlashInfer RoPE/SiLU 注册为 custom op（兼容 torch.compile） |
-| `src/compute/models/qwen3.py` | **改写** — `qkv_proj` / `gate_up_proj` GEMM 融合 |
-| `src/compute/models/loader.py` | **新增** — 快速权重加载 |
-| `src/config.py` | **扩展** — `kvcache_block_size=256` / `gpu_memory_utilization` / `torch_compile` / `enforce_eager` |
 
 ---
 

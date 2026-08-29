@@ -51,7 +51,23 @@ def test_resolve_backend_triton():
 
 
 @require_model(MOE_MODEL)
-def test_engine_config_forces_eager_for_moe(tmp_path=None):
+def test_engine_config_moe_allows_cudagraph(tmp_path=None):
+    c = EngineConfig(
+        model=str(MOE_MODEL),
+        enforce_eager=False,
+        moe_backend="triton",
+        num_kvcache_blocks=8,
+        context_len=512,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.5,
+        prefix_backend="none",
+    )
+    assert c.is_moe and c.enforce_eager is False
+
+
+@require_model(MOE_MODEL)
+def test_engine_config_moe_force_eager_env(monkeypatch):
+    monkeypatch.setenv("VLLM_MOE_FORCE_EAGER", "1")
     c = EngineConfig(
         model=str(MOE_MODEL),
         enforce_eager=False,

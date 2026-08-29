@@ -92,19 +92,21 @@ class KVManager:
         return self.blocks.num_free
 
     def _fit_prefix(self, seq: Sequence) -> int:
+        """前缀复用预检查：计算当前序列最多可复用多少连续前缀 KV 块。"""
         need = seq.num_blocks
         if need == 0:
             return 0
         hit = self.index.match(seq, self.blocks)
         max_cached = min(len(hit), need)
-        while max_cached >= 0:
-            new_needed = need - max_cached
-            reclaimable = sum(
-                1 for b in hit[:max_cached] if b in self.blocks.cached_ids
-            )
-            if self.blocks.num_free + reclaimable >= new_needed:
-                return max_cached
-            max_cached -= 1
+        if max_cached == 0:
+            return -1
+        reclaimable = sum(
+            1 for b in hit[:max_cached] if b in self.blocks.cached_ids
+        )
+        other_cached = len(self.blocks.cached_ids) - reclaimable
+        new_needed = need - max_cached
+        if self.blocks.num_free + other_cached >= new_needed:
+            return max_cached
         return -1
 
     def can_allocate(self, seq: Sequence) -> bool:

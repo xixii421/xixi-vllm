@@ -13,6 +13,9 @@ _WS: dict[tuple, torch.Tensor] = {}
 
 def clear_state() -> None:
     _WS.clear()
+    from .cuda import clear_state as clear_cuda_state
+
+    clear_cuda_state()
 
 
 def _scratch(key: tuple, *, shape, dtype, device) -> torch.Tensor:

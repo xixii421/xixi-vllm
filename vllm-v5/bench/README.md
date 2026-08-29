@@ -21,4 +21,11 @@ Then::
 Metrics (both engines, same prompt / max_tokens / greedy)::
 
     ttft_ms, decode_tok_s, e2e_tok_s, tokens (for correctness spot-check)
+
+MoE matrix (TP / EP / CUDA Graph)::
+
+    bash bench/run_moe_matrix.sh
+    # or single cell:
+    PYTHONPATH=. python bench/moe_e2e.py --devices 0 --tp 1 --cg --moe-backend triton
+    PYTHONPATH=. python bench/moe_e2e.py --devices 0,1 --tp 2 --ep --eager
 """

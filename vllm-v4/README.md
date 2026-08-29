@@ -16,6 +16,59 @@
 
 ---
 
+## 代码架构
+
+```
+vllm-v4/
+├── run.py                        # 改写：+ --tp / --pp / --dp / --pp-layer-counts / --device-ids
+├── run_torchrun.py               # 新增：多机 torchrun 入口
+├── config.yaml                   # 改写：+ tp_size / pp_size / dp_size / nccl 等
+├── src/
+│   ├── config.py                 # 改写：tp/pp/dp/pp_layer_counts/device_ids/nccl_port
+│   ├── control/                  # 改写：+ 多进程控制面
+│   │   ├── client.py             #   新增：Client 屏蔽调用差异
+│   │   ├── core.py               #   新增：EngineCore
+│   │   ├── executor.py           #   新增：Executor
+│   │   └── mp_client.py          #   新增：多进程 Client
+│   ├── data/
+│   │   └── kv.py                 # 改写：driver 侧 KV 账本（原 manager.py）
+│   ├── compute/                  # 改写：+ worker / kv_pool / 并行层
+│   │   ├── batch.py              #   新增：GPU 侧 batch（v3 只有 data/batch.py）
+│   │   ├── kv_ops.py             #   改写：原 data/kv_ops.py 移入
+│   │   ├── kv_pool.py            #   新增：GPU 上的 KV 张量池
+│   │   ├── model_runner.py       #   改写：按 rank 组织前向
+│   │   ├── worker.py             #   新增：每卡 Worker
+│   │   ├── layers/
+│   │   │   ├── linear.py         #   新增：列并行 / 行并行 Linear
+│   │   │   ├── vocab_parallel.py #   新增：词表并行
+│   │   │   └── attention.py      #   改写：TP 切 head
+│   │   └── models/
+│   │       └── qwen3.py          #   改写：接入并行层
+│   └── distributed/              # 新增：并行通信
+│       ├── parallel_state.py     #   rank / 进程组管理
+│       ├── communication_op.py   #   all-reduce / all-gather 封装
+│       ├── control_channel.py    #   控制通道
+│       └── utils.py              #   通信辅助
+├── test/                         # 并行正确性测试
+├── bench/                        # 吞吐基准
+└── docs/                         # 设计文档
+```
+
+---
+
+## 相对 v3 新增
+
+| 新增能力 | 对应模块 | 说明 |
+|---------|---------|------|
+| 多进程控制面 | `src/control/client.py` / `core.py` / `executor.py` / `mp_client.py` | Engine → Core → Executor → Worker 分层，单卡多卡同接口 |
+| 张量并行 TP | `src/compute/layers/linear.py` / `vocab_parallel.py` | 列并行 / 行并行线性层 + 词表并行，all-reduce / all-gather |
+| 流水线并行 PP | `src/control/core.py` / `executor.py` / `compute/worker.py` | 按层切 stage，send/recv hidden，支持不均分层数 |
+| 数据并行 DP | `src/control/client.py` / `mp_client.py` | 独立 Engine 副本 + round-robin 分发，ZMQ 本机 IPC |
+| 通信层 | `src/distributed/` | NCCL（TP/PP）、ZMQ（DP）、Gloo（控制） |
+| GPU KV 池拆分 | `src/compute/kv_pool.py` | 真正 KV 张量放到 compute 侧，账本留在 data 侧 |
+
+---
+
 ## 启动
 
 默认是 eager，启动快。要吞吐加 `--cg`（decode CUDA Graph）；prefill 再加 `--compile`。
@@ -38,7 +91,6 @@ python run.py --model Qwen3-8B --dp 2 --tp 2 --device-ids 0,1,2,3 --cg --batch
 python run.py --model Qwen3-0.6B --batch --cg
 CUDA_VISIBLE_DEVICES=1,2 python run.py --model Qwen3-0.6B --tp 2 --cg
 ```
-
 
 常用参数：`--tp` `--pp` `--dp` `--pp-layer-counts` `--device-ids` `--cg` `--compile` `--prefix-backend none|hash|radix`。其余在 `config.yaml`。`--device-ids` 长度必须等于 `dp×tp×pp`。
 

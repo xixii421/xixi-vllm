@@ -4,6 +4,36 @@
 
 ---
 
+## 代码架构
+
+```
+vllm-v1/
+├── run.py                        # 改写：CLI 入口（+ --prefix-backend / --block-size）
+├── src/
+│   ├── config.py                 # 改写：+ block_size / prefix_backend / num_kv_blocks
+│   ├── model.py                  # 改写：Attention 增加 layer_id
+│   ├── engine.py                 # 改写：prefill / decode 双路径，驱动 KVManager
+│   ├── kv/                       # 新增：KV 生命周期与分页
+│   │   ├── pool.py               #   物理 block 池（free / used / cached 三态）
+│   │   ├── sequence.py           #   请求逻辑状态 + 页表
+│   │   ├── manager.py            #   订页 / 补页 / 还页
+│   │   ├── context.py            #   ForwardContext 访存契约
+│   │   └── prefix/               #   前缀索引
+│   │       ├── hash_index.py     #   链式 hash 字典
+│   │       ├── hash_util.py      #   块哈希计算
+│   │       ├── radix_index.py    #   radix 索引（match / publish / pin / release）
+│   │       ├── radix_tree.py     #   压缩前缀树
+│   │       └── noop.py           #   空实现
+│   ├── pagedattention/           # 新增：页式读写
+│   │   ├── slots.py              #   逻辑位置 → 物理 slot
+│   │   └── store.py              #   write 散射 / gather 聚合
+│   └── layers/
+│       └── attention.py          # 改写：PagedStore.write → gather → SDPA
+└── docs/                         # 设计文档
+```
+
+---
+
 ## 相对 v0 新增
 
 | 新增能力 | 对应模块 | 说明 |
@@ -41,37 +71,11 @@ python run.py --download   # 预下载全部模型到 ~/huggingface
 
 ---
 
-## 核心源码
-
-新增（`src/` 目录下）：
-
-| 模块 | 文件 | 职责 |
-|------|------|------|
-| KV 生命周期 | `src/kv/pool.py` | 物理 block 池，free / used / cached 三态 |
-| | `src/kv/sequence.py` | 请求逻辑状态 + 页表 |
-| | `src/kv/manager.py` | 订页（allocate）/ 补页（ensure_blocks）/ 还页（finish） |
-| | `src/kv/context.py` | 全局 `ForwardContext` 访存契约 |
-| 前缀缓存 | `src/kv/prefix/hash_index.py` | 链式 hash 字典索引 |
-| | `src/kv/prefix/radix_index.py` | radix 前缀索引（match/publish/pin/release） |
-| | `src/kv/prefix/radix_tree.py` | 压缩前缀树（insert / match_prefix / 引用计数） |
-| | `src/kv/prefix/hash_util.py` + `noop.py` | 块哈希计算 / 空实现 |
-| PagedAttention | `src/pagedattention/store.py` | PagedStore write（散射）/ gather（聚合） |
-| | `src/pagedattention/slots.py` | 逻辑位置 → 物理 slot |
-
-改写：
-
-| 文件 | 变化 |
-|------|------|
-| `src/engine.py` | prefill + decode 双路径，组装 slot_mapping，驱动 KVManager |
-| `src/layers/attention.py` | 走 `PagedStore.write → gather → SDPA` |
-
----
-
 ## 文档
 
 | 文档 | 说明 |
 |------|------|
 | [00-设计解释.md](docs/00-设计解释.md) | 设计动机：v0 性能瓶颈、为何只有 KV 可缓存、PagedAttention 思想、KV 管理三理念 |
 | [01-代码架构.md](docs/01-代码架构.md) | 代码详解：页池三态 / slot 映射 / PagedStore / KVManager 生命周期 / Engine 时间线 |
-| [02-相比v0的增改.md](docs/02-相比v0的增改.md) | v0 → v1 差异文件清单（新增 / 继承 / 改写） |
+| [02-相比v0的增改.md](docs/02-相比v0的增改.md) | v0 → v1 差异文件清单（新增 / 改写） |
 | [03-Prefix详解.md](docs/03-Prefix详解.md) | 前缀缓存：链式 hash 字典 vs Radix 压缩前缀树，两种后端对比 |

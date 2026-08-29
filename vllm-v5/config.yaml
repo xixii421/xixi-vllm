@@ -48,7 +48,7 @@ nccl_ifname: ""  # 多机网卡名（如 ib0/eth0）；空=自动探测
 
 # --- MoE ---
 enable_ep: false          # true=在现有 TP ranks 上按 expert 切分（不扩大 world）
-moe_backend: "auto"       # auto / cutlass / triton；MoE 默认强制 eager
+moe_backend: "auto"       # auto / cutlass / triton；MoE 可开 --cg（workspace 池化）
 
 # --- 分布式 CG / compile（torchrun 多机路径同样生效）---
 # enforce_eager: false → decode piecewise CUDA Graph（PP 时 recv/send 图外）；

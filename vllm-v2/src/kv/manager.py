@@ -48,22 +48,20 @@ class KVManager:
         self.last_num_cached_tokens = 0
 
     def _fit_prefix(self, seq: Sequence) -> int:
-        """ 前缀复用预检查：用来计算当前序列最多可以复用多少连续的前缀 KV‑Cache 块 """
-        """ 核心思想是自残缩短前缀，转移驱逐代价 """
+        """前缀复用预检查：计算当前序列最多可复用多少连续前缀 KV 块。"""
         need = seq.num_blocks
         if need == 0:
             return 0
         hit = self.index.match(seq, self.pool)
-        max_cached = min(len(hit), need) # 计划复用块数
-        while max_cached >= 0:
-            new_needed = need - max_cached # 复用之后需要的新块数
-            reclaimable = sum(1 for b in hit[:max_cached] if b in self.pool.cached_ids)
-            # reclaimable 代表复用块中，在cached中的数量，其余的都在used
-            if len(self.pool.free_ids) + reclaimable >= new_needed:
-                # 新块需要的空间够了
-                return max_cached
-            max_cached -= 1 # 不够的话需要减去复用块长度
-        return -1  # 没有可供复用的块
+        max_cached = min(len(hit), need)
+        if max_cached == 0:
+            return -1
+        reclaimable = sum(1 for b in hit[:max_cached] if b in self.pool.cached_ids)
+        other_cached = len(self.pool.cached_ids) - reclaimable
+        new_needed = need - max_cached
+        if len(self.pool.free_ids) + other_cached >= new_needed:
+            return max_cached
+        return -1
 
     def can_allocate(self, seq: Sequence) -> bool:
         """ 判断新请求是否有足够物理块可分配 """

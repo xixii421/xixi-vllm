@@ -7,7 +7,7 @@ v4 写清了词表并行和线性层并行。v5 多出来的是 Mixture of Exper
 | 文档 | 写什么 |
 | --- | --- |
 | [00-MoE概述.md](00-MoE概述.md) | 从 Jacobs 到 Qwen3-MoE：稀疏门控、接到 FFN、Switch、Mixtral、DeepSeek、Qwen1.5/2/2.5 再到 Qwen3；常考题 |
-| [01-路由与融合计算.md](01-路由与融合计算.md) | 模块划分、公式、按 token 的基础核、align / grouped GEMM、常考题 |
+| [01-路由与融合计算.md](01-路由与融合计算.md) | 从 naive 双重循环到 align / grouped GEMM，再串回 v5 前向 |
 | [02-专家并行.md](02-专家并行.md) | MoE TP 与 EP、v5 不搬 token、共享专家与 AR 顺序、常考题 |
 | [03-v5实现.md](03-v5实现.md) | `src/moe/` 文件地图、权重加载、后端、与官方差异、常考题 |
 

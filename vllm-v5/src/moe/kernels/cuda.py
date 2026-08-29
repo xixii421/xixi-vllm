@@ -1,6 +1,9 @@
 """JIT CUDA aux kernels for MoE: align / silu / moe_sum.
 
 Source lives next to this file (``moe_kernels.cu``). Main GEMMs stay Triton/cutlass.
+
+Buffers are pooled by shape so decode CUDA Graph capture sees a fixed
+allocation count (same approach as vLLM: no fresh ``cudaMalloc`` per step).
 """
 
 from __future__ import annotations
@@ -14,6 +17,34 @@ import torch
 import torch.nn.functional as F
 
 _CSRC = Path(__file__).resolve().parent / "moe_kernels.cu"
+
+_ALIGN: dict[tuple, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+_SILU: dict[tuple, torch.Tensor] = {}
+_SUM: dict[tuple, torch.Tensor] = {}
+
+
+def clear_state() -> None:
+    _ALIGN.clear()
+    _SILU.clear()
+    _SUM.clear()
+
+
+def align_capacity(n: int, num_experts: int, block_size: int) -> int:
+    """Upper bound on ``sorted_ids`` length for fixed ``n = M * top_k``."""
+    if n <= 0:
+        return 0
+    cap = n + num_experts * (block_size - 1)
+    if n < num_experts:
+        cap = min(n * block_size, cap)
+    return int(cap)
+
+
+def _pool(cache: dict, key: tuple, *, shape, dtype, device) -> torch.Tensor:
+    buf = cache.get(key)
+    if buf is None or buf.shape != shape or buf.dtype != dtype or buf.device != device:
+        buf = torch.empty(shape, dtype=dtype, device=device)
+        cache[key] = buf
+    return buf
 
 
 @lru_cache(maxsize=1)
@@ -43,7 +74,6 @@ def _ext():
                 os.environ["PATH"] = cand + os.pathsep + path
             break
 
-    # Torch may wrap nvcc with ccache; ninja then passes gcc-only -MD.
     _which = shutil.which
 
     def _no_ccache(cmd, *args, **kwargs):
@@ -77,8 +107,10 @@ def _ext():
 
 def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     """``[up|gate]`` → ``up * silu(gate)``."""
+    out_shape = (*x.shape[:-1], x.shape[-1] // 2)
     if x.is_cuda and cuda_available():
-        out = x.new_empty(*x.shape[:-1], x.shape[-1] // 2)
+        key = (x.device.index or 0, *out_shape, x.dtype)
+        out = _pool(_SILU, key, shape=out_shape, dtype=x.dtype, device=x.device)
         _ext().mul_and_silu(out, x.contiguous())
         return out
     up, gate = x.chunk(2, dim=-1)
@@ -88,9 +120,10 @@ def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
 def moe_sum(mid: torch.Tensor, M: int, top_k: int) -> torch.Tensor:
     """Reduce ``[M*top_k, H]`` → ``[M, H]``."""
     H = mid.shape[-1]
-    out = mid.new_empty(M, H)
     if M == 0:
-        return out
+        return mid.new_empty(0, H)
+    key = (mid.device.index or 0, M, H, mid.dtype)
+    out = _pool(_SUM, key, shape=(M, H), dtype=mid.dtype, device=mid.device)
     if mid.is_cuda and cuda_available():
         _ext().moe_sum(mid.view(M, top_k, H), out)
         return out
@@ -102,7 +135,12 @@ def moe_align_block_size(
     block_size: int,
     num_experts: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Pack tokens per expert. Returns ``(sorted_ids, expert_ids, num_post)``."""
+    """Pack tokens per expert. Returns ``(sorted_ids, expert_ids, num_post)``.
+
+    ``sorted_ids`` / ``expert_ids`` lengths are the *capacity* for this
+    ``(n, E, block_size)``, not the live ``num_post``. Capacity is fixed when
+    decode pads to a captured batch size, which is what CUDA Graph needs.
+    """
     flat = topk_ids.reshape(-1)
     n = flat.numel()
     device = topk_ids.device
@@ -111,14 +149,22 @@ def moe_align_block_size(
         return z, z, torch.zeros(1, dtype=torch.int32, device=device)
 
     if device.type == "cuda" and cuda_available():
-        cap = n + num_experts * (block_size - 1)
-        if n < num_experts:
-            cap = min(n * block_size, cap)
-        sorted_ids = torch.empty(cap, dtype=torch.int32, device=device)
-        expert_ids = torch.empty(
-            (cap + block_size - 1) // block_size, dtype=torch.int32, device=device
-        )
-        num_post = torch.empty(1, dtype=torch.int32, device=device)
+        cap = align_capacity(n, num_experts, block_size)
+        n_blocks = (cap + block_size - 1) // block_size
+        key = (device.index or 0, n, num_experts, block_size)
+        bufs = _ALIGN.get(key)
+        if (
+            bufs is None
+            or bufs[0].numel() != cap
+            or bufs[1].numel() != n_blocks
+            or bufs[0].device != device
+        ):
+            sorted_ids = torch.empty(cap, dtype=torch.int32, device=device)
+            expert_ids = torch.empty(n_blocks, dtype=torch.int32, device=device)
+            num_post = torch.empty(1, dtype=torch.int32, device=device)
+            _ALIGN[key] = (sorted_ids, expert_ids, num_post)
+        else:
+            sorted_ids, expert_ids, num_post = bufs
         ids = flat if flat.dtype in (torch.int32, torch.int64) else flat.to(torch.int32)
         _ext().moe_align_block_size(
             ids.contiguous(),
@@ -149,7 +195,7 @@ def _align_torch(
     starts[0] = 0
     torch.cumsum(padded, dim=0, out=starts[1:])
     num_post = starts[-1:].contiguous()
-    cap = int(n + num_experts * (block_size - 1))
+    cap = align_capacity(n, num_experts, block_size)
     sorted_ids = torch.full((cap,), n, dtype=torch.int32, device=device)
     n_blocks = (cap + block_size - 1) // block_size
     if bool(valid.any()):

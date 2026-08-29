@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import torch
 
+from .kernels import clear_cuda_state
 from .kernels import triton as triton_moe
 
 _IDS: dict[tuple, torch.Tensor] = {}
 _SCALES: dict[tuple, torch.Tensor] = {}
+_OUT: dict[tuple, torch.Tensor] = {}
 
 
 def clear_fused_state() -> None:
     _IDS.clear()
     _SCALES.clear()
+    _OUT.clear()
     triton_moe.clear_state()
+    clear_cuda_state()
 
 
 def _scratch(cache, key, *, shape, dtype, device):
@@ -36,9 +40,12 @@ def _cutlass(
     from flashinfer.tllm_enums import ActivationType
 
     t, k = hidden_states.shape[0], topk_ids.shape[1]
+    h = hidden_states.shape[1]
     dev = hidden_states.device
     di = dev.index or 0
-    out = torch.empty_like(hidden_states)
+    out = _scratch(
+        _OUT, (di, t, h, hidden_states.dtype), shape=(t, h), dtype=hidden_states.dtype, device=dev
+    )
     ids = _scratch(_IDS, (di, t, k), shape=(t, k), dtype=torch.int32, device=dev)
     scales = _scratch(
         _SCALES, (di, t, k), shape=(t, k), dtype=torch.float32, device=dev

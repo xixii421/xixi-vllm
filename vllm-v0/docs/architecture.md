@@ -75,7 +75,7 @@ vllm-v0/
 
 ### Qwen3-0.6B
 [Qwen系列学习链接](https://modelscope.cn/models/Qwen/Qwen3-0.6B-Base)
-[查看整个架构的脚本](../test/test_qwen.py)
+
 
 
 ### 阅读顺序

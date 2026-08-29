@@ -59,7 +59,21 @@ def main() -> None:
     p.add_argument("--reps", type=int, default=3)
     p.add_argument("--prompt", default="The capital of France is")
     p.add_argument("--moe-backend", default="triton")
+    p.add_argument("--nccl-port", type=int, default=29500)
+    cg = p.add_mutually_exclusive_group()
+    cg.add_argument(
+        "--cg",
+        action="store_true",
+        help="enable Decode CUDA Graph (enforce_eager=False)",
+    )
+    cg.add_argument(
+        "--eager",
+        action="store_true",
+        help="force eager (default if neither --cg nor --eager)",
+    )
     args = p.parse_args()
+    # Default remains eager for historical bench scripts; pass --cg to measure Graph.
+    use_cg = bool(args.cg) and not bool(args.eager)
 
     devices = [int(x) for x in args.devices.split(",") if x.strip() != ""]
     model = str(DENSE_MODEL if args.model == "dense" else MOE_MODEL)
@@ -72,13 +86,14 @@ def main() -> None:
             device_ids=devices[: max(args.tp, 1)],
             tp_size=args.tp,
             enable_ep=bool(args.ep),
-            enforce_eager=True,
+            enforce_eager=not use_cg,
             max_num_seqs=1,
             context_len=2048,
             num_kvcache_blocks=64,
             gpu_memory_utilization=0.85,
             prefix_backend="none",
             moe_backend=args.moe_backend,  # type: ignore[arg-type]
+            nccl_port=int(args.nccl_port),
         )
     )
     try:
@@ -86,8 +101,10 @@ def main() -> None:
     finally:
         eng.destroy()
 
+    mode = "cg" if use_cg else "eager"
     print(
-        f"model={args.model} tp={args.tp} ep={args.ep} devices={devices} n={args.n}\n"
+        f"model={args.model} tp={args.tp} ep={args.ep} mode={mode} "
+        f"devices={devices} n={args.n}\n"
         f"  ttft_ms={r['ttft_ms']:.2f}  decode_tok/s={r['decode_tok_s']:.2f}  "
         f"e2e_tok/s={r['e2e_tok_s']:.2f}\n"
         f"  tokens={r['tokens'][:16]}{'...' if len(r['tokens']) > 16 else ''}"

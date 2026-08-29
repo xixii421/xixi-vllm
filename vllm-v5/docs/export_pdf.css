@@ -56,13 +56,60 @@ li > p {
   margin: 0.2em 0;
 }
 
-blockquote {
-  margin: 0.8em 0;
-  padding: 0.4em 0.9em;
-  border-left: 3px solid #888;
-  color: #444;
-  background: #f7f7f7;
+/* —— GitHub Alerts（[!NOTE] / [!IMPORTANT] …）—— */
+.md-alert {
+  margin: 0.95em 0;
+  padding: 0.65em 0.95em 0.75em;
+  border-left: 4px solid #888;
+  border-radius: 4px;
+  background: #f6f8fa;
+  page-break-inside: avoid;
 }
+.md-alert > :first-child { margin-top: 0; }
+.md-alert > :last-child { margin-bottom: 0; }
+.md-alert-title {
+  margin: 0 0 0.45em;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+.md-alert-title strong {
+  font-weight: 750;
+}
+.md-alert p { margin: 0.35em 0; }
+.md-alert ul, .md-alert ol {
+  margin: 0.35em 0 0.5em;
+}
+
+.md-alert-note {
+  border-left-color: #0969da;
+  background: #ddf4ff;
+}
+.md-alert-note .md-alert-title { color: #0550ae; }
+
+.md-alert-tip {
+  border-left-color: #1a7f37;
+  background: #dafbe1;
+}
+.md-alert-tip .md-alert-title { color: #116329; }
+
+.md-alert-important {
+  border-left-color: #8250df;
+  background: #fbefff;
+}
+.md-alert-important .md-alert-title { color: #6639ba; }
+
+.md-alert-warning {
+  border-left-color: #bf8700;
+  background: #fff8c5;
+}
+.md-alert-warning .md-alert-title { color: #9a6700; }
+
+.md-alert-caution {
+  border-left-color: #cf222e;
+  background: #ffebe9;
+}
+.md-alert-caution .md-alert-title { color: #a40e26; }
+
 code {
   font-family: "Noto Sans Mono CJK SC", "DejaVu Sans Mono", ui-monospace, monospace;
   font-size: 0.92em;

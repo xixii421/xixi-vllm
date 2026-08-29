@@ -72,7 +72,7 @@ class KVManager:
             seq_id=self._seq_counter,
         )
 
-    def allocate(self,seq: Sequence) -> None:
+    def allocate(self, seq: Sequence) -> None:
         """ 前缀命中复用页，其余 allocate_fresh；写好 block_table """
         seq.block_table.clear()
         seq.num_cached_tokens = 0
@@ -81,23 +81,15 @@ class KVManager:
             self.last_num_cached_tokens = 0
             return
 
-        # 自残缩短前缀，转移驱逐代价
+        # 判断当前序列是否有足够的块可以使用
         hit = self.index.match(seq, self.pool)
         max_cached = min(len(hit),need) # 计划复用块数
-        while max_cached >= 0:
-            new_needed = need - max_cached # 复用之后需要的新块数
-            reclaimable = sum(1 for b in hit[:max_cached] if b in self.pool.cached_ids)
-            # reclaimable 代表复用块中，在cached中的数量，其余的都在used
-            # 目的：把驱逐的代价，尽量留给当前这个请求自己承担，尽量保护全局其他请求的缓存
-            # 怎么理解：前缀减少肯定是从后往前的，如果我们减去一个cached块，后面还要请求一个free块，没有收益
-            # 如果我们减去一个used块，没有多出资源，反而还要多请求一个free，负收益
-            # 但是后面cached转换free的时候做LRU，有限选择自己刚才的cached块转换
-            # 可以很好的承担驱逐代价，而不影响全局其他请求的cached
-            # 不过allocate_fresh为了教学没有写LRU，了解就行
-            if len(self.pool.free_ids) + reclaimable >= new_needed:
-                break # 新块需要的空间够了
-            max_cached -= 1 # 不够的话需要减去复用块长度
-        if max_cached < 0: # 没有可供复用的块
+        reclaimable = sum(1 for b in hit[:max_cached] if b in self.pool.cached_ids)
+        # 前缀已经命中的块
+        other_cached = len(self.pool.cached_ids) - reclaimable
+        # 除了前缀命中的其他的cached块
+        new_needed = need - max_cached  # 复用之后需要的新块数
+        if len(self.pool.free_ids) + other_cached < new_needed:
             raise RuntimeError("not enough KV blocks for sequence")
 
         for bid in hit[:max_cached]:

@@ -29,7 +29,7 @@ C. 性能对比口径（与官方 vLLM 对齐）
   - greedy + ignore_eos，固定 prompt / max_tokens / seed
   - 指标：TTFT (ms)、decode tok/s、e2e tok/s
   - 单请求与小 batch（默认 1 与 8）分开报
-  - 同 GPU、同 dtype、同 max_model_len；MoE 默认 eager
+  - 同 GPU、同 dtype、同 max_model_len；对比 CG 时两边都开 `--cg` / 关 eager
 
 -------------------------------------------------------------------------------
 二、如何跑

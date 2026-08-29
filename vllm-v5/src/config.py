@@ -90,8 +90,14 @@ class EngineConfig:
             getattr(text, "max_position_embeddings", self.context_len),
         )
         self._validate_parallel(text)
-        if self.is_moe:
-            # 动态 routing 先保证正确；cutlass workspace 稳定后再开 CG。
+        # MoE 可以进 Decode CUDA Graph：token 数按 captured BS 垫齐后，
+        # align / silu / sum / GEMM workspace 都按容量复用，不再逐步 cudaMalloc。
+        # 若环境仍要强制 eager：VLLM_MOE_FORCE_EAGER=1。
+        if self.is_moe and os.environ.get("VLLM_MOE_FORCE_EAGER", "0") in (
+            "1",
+            "true",
+            "True",
+        ):
             self.enforce_eager = True
 
     def _validate_parallel(self, text: PretrainedConfig) -> None:

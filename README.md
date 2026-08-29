@@ -19,7 +19,7 @@
     <img src="https://img.shields.io/badge/v5_MoE--VL-gray?style=flat-square&label">
   </p>
 
-  <p>从零实现的 Qwen3 推理引擎，按 v0–v5 冻结每一阶段。设计说明、和 nano-vllm / 官方 vLLM 的对照见 <a href="项目介绍.md">项目介绍.md</a>。</p>
+  <p>从零实现的 Qwen3 推理引擎，按 v0–v5 冻结每一阶段。迭代目录见 <a href="项目目录.html">项目目录.html</a>。</p>
 
   
 </div>
