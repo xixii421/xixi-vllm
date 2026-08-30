@@ -53,7 +53,9 @@ ReLU的优点很明显：
 - 稀疏性，ReLU将一部分输出置0，可以提升模型的泛化能力
 - 收敛速度快，使用ReLU的网络相对来说收敛速度更快，能够更好地拟合非线性数据。
 
-> [!NOTE] 为什么负区间梯度为0会带来问题？
+> [!NOTE]  
+> 为什么负区间梯度为0会带来问题？
+> 
 > 梯度为0意味着权重之后不会再更新，如果某个神经元一直处于负区间，它就会永久地退出学习；在深层网络中，这种情况会累积，导致神经元数量大幅度减小，最终导致模型有效容量下降，表达能力受限，泛化性能变差。
 
 后续有Leaky ReLU、ELU、GELU、Swish等改进激活函数来缓解上述问题。
@@ -157,8 +159,8 @@ y = W_2 \cdot h_{\text{GLU}} \approx \begin{bmatrix} 0.3\times0.441 -0.2\times(-
 y = W_2 \cdot h_{\text{SwiGLU}} \approx \begin{bmatrix} 0.3\times0.331 -0.2\times0.141 \\ 0.4\times0.331 +0.6\times0.141 \end{bmatrix} = \begin{bmatrix} 0.071 \\ 0.217 \end{bmatrix}
 ```
 
-> [!NOTE] 为什么SwiGLU更强？
->
+> [!NOTE]  
+> 为什么SwiGLU更强？
 > SiLU 的非单调性和负值区间让门控可以“反向激活”，实现更复杂的特征选择。实验证明，在同等训练 FLOPs 下，SwiGLU 的困惑度明显低于 ReLU、GELU、GLU 等变体。PaLM、LLaMA、Mistral 等几乎所有主流 Decoder-Only 大模型都采用了 SwiGLU。
 
 ---
