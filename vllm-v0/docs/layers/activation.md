@@ -53,9 +53,7 @@ ReLU的优点很明显：
 - 稀疏性，ReLU将一部分输出置0，可以提升模型的泛化能力
 - 收敛速度快，使用ReLU的网络相对来说收敛速度更快，能够更好地拟合非线性数据。
 
-> [!NOTE]
-> **为什么负区间梯度为0会带来问题？**
->
+> [!NOTE] 为什么负区间梯度为0会带来问题？
 > 梯度为0意味着权重之后不会再更新，如果某个神经元一直处于负区间，它就会永久地退出学习；在深层网络中，这种情况会累积，导致神经元数量大幅度减小，最终导致模型有效容量下降，表达能力受限，泛化性能变差。
 
 后续有Leaky ReLU、ELU、GELU、Swish等改进激活函数来缓解上述问题。
@@ -92,9 +90,7 @@ y \approx \begin{bmatrix} 0.3\times0.427 -0.2\times(-0.232) \\ 0.4\times0.427 +0
 
 
 ## 4. GLU
-但 SiLU 仍然有一个局限，整个门控仍然来自同一个输入。也就是说：
-$\text{gate}=f(x)$,$\text{value}=x$
-门控和内容共享同一份特征，因为它们都是同一个x表征出来的。
+但 SiLU 仍然有一个局限，整个门控仍然来自同一个输入。也就是说 $\text{gate}=f(x)$，$\text{value}=x$。门控和内容共享同一份特征，因为它们都是同一个 $x$ 表征出来的。
 
 于是研究者开始思考：如果门控和内容分别由两条独立路径生成，会发生什么？
 
@@ -115,23 +111,17 @@ W_v = W_1 = \begin{bmatrix} 0.5 & 0.2 \\ -0.3 & 0.8 \end{bmatrix}
 ```
 
 ### 手算GLU
-1. **计算 gate**：$g_{\text{raw}} = x W_g = [1.0, -0.5] \cdot W_g$
+1. **计算 gate**：$g_{\text{raw}}=x W_g=[1.0,-0.5]\cdot W_g=[0.75,-0.55]$。
+   门控使用激活函数：$\sigma(0.75)\approx 0.679$，$\sigma(-0.55)\approx 0.366$，所以 $\text{gate}=[0.679, 0.366]$。
 
-```math
-g_{\text{raw}} = [0.75, -0.55]
-```
+2. **计算 value**：$v=x W_v=[0.65, -0.7]$。
 
-   门控使用激活函数：$\sigma(0.75) \approx 0.679,\ \sigma(-0.55) \approx 0.366$  
-   所以 $gate = [0.679, 0.366]$
-
-2. **计算 value**：$v = x W_v = [0.65, -0.7]$
-
-3. 逐元素乘（加权）：$h_{GLU} = gate \odot v = [0.679\times0.65,\ 0.366\times(-0.7)] \approx [0.441, -0.256]$
+3. 逐元素乘（加权）：$h_{\text{GLU}}=\text{gate}\odot v=[0.679\times 0.65,\ 0.366\times(-0.7)]\approx[0.441, -0.256]$。
 
 4. **降维输出**：
 
 ```math
-y = W_2 \cdot h_{GLU} \approx \begin{bmatrix} 0.3\times0.441 -0.2\times(-0.256) \\ 0.4\times0.441 +0.6\times(-0.256) \end{bmatrix}
+y = W_2 \cdot h_{\text{GLU}} \approx \begin{bmatrix} 0.3\times0.441 -0.2\times(-0.256) \\ 0.4\times0.441 +0.6\times(-0.256) \end{bmatrix}
 ```
 
 门控使得 value 的第二维 `-0.7` 被门控值 `0.366` 削弱，相当于网络自己学会了“这个特征不太重要”。
@@ -149,27 +139,27 @@ y = W_2 \cdot h_{GLU} \approx \begin{bmatrix} 0.3\times0.441 -0.2\times(-0.256) 
 
 我们用完全相同的数据，只改变门控函数，再算一遍：
 
-1. **gate 原始值不变**
-   **SiLU 激活**：
-   - $\text{SiLU}(0.75) = 0.75 \times \sigma(0.75) = 0.509$
-   - $\text{SiLU}(-0.55) = -0.55 \times \sigma(-0.55) = -0.201$
-    这里我们发现门控出现了负值。`-0.201`
+1. **gate 原始值不变**，只换 SiLU 激活：
+   - $\text{SiLU}(0.75)=0.75\times\sigma(0.75)=0.509$
+   - $\text{SiLU}(-0.55)=-0.55\times\sigma(-0.55)=-0.201$
+
+   这里门控出现了负值 `-0.201`。
 
 2. **value 不变**
 
-3. **调制**：$h_{SwiGLU} = [0.509\times0.65,\ (-0.201)\times(-0.7)]$
+3. **调制**：$h_{\text{SwiGLU}}=[0.509\times 0.65,\ (-0.201)\times(-0.7)]\approx[0.331, 0.141]$。
 
    第二维原本是 `-0.7`，门控是 `-0.201`，负负得正，输出变成了 `+0.141`。**信息不仅被调制，符号都可能翻转**。
+
 4. **降维输出**：
 
 ```math
-y = W_2 \cdot h_{SwiGLU} \approx \begin{bmatrix} 0.3\times0.331 -0.2\times0.141 \\ 0.4\times0.331 +0.6\times0.141 \end{bmatrix} = \begin{bmatrix} 0.071 \\ 0.217 \end{bmatrix}
+y = W_2 \cdot h_{\text{SwiGLU}} \approx \begin{bmatrix} 0.3\times0.331 -0.2\times0.141 \\ 0.4\times0.331 +0.6\times0.141 \end{bmatrix} = \begin{bmatrix} 0.071 \\ 0.217 \end{bmatrix}
 ```
 
-> [!NOTE]
-> **为什么SwiGLU更强？**
+> [!NOTE] 为什么SwiGLU更强？
 >
-> SiLU 的非单调性和负值区间让门控可以“反向激活”，实现更复杂的特征选择。  实验证明，在同等训练 FLOPs 下，SwiGLU 的困惑度明显低于 ReLU、GELU、GLU 等变体.PaLM、LLaMA、Mistral 等几乎所有主流 Decoder-Only 大模型都采用了 SwiGLU。
+> SiLU 的非单调性和负值区间让门控可以“反向激活”，实现更复杂的特征选择。实验证明，在同等训练 FLOPs 下，SwiGLU 的困惑度明显低于 ReLU、GELU、GLU 等变体。PaLM、LLaMA、Mistral 等几乎所有主流 Decoder-Only 大模型都采用了 SwiGLU。
 
 ---
 
