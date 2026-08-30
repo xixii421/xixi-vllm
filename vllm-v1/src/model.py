@@ -1,3 +1,9 @@
+"""Qwen3 CausalLM 骨架：Decoder 堆叠 + HF 权重装载（含 QKV 合并）。
+
+与 v0 唯一的结构差异：Qwen3Attention 持有 layer_id，
+用于 KV Cache 写入时定位到对应层的物理页。
+"""
+
 from __future__ import annotations
 from collections.abc import Iterable
 
@@ -5,11 +11,11 @@ import torch
 from torch import nn
 from transformers.models.qwen3 import Qwen3Config
 
-from layers.layernorm import RMSNorm
-from layers.rotary import RotaryEmbedding
-from layers.attention import Attention
-from layers.activation import SiluAndMul
-from model_loader import default_weight_loader
+from .layers.activation import SiluAndMul
+from .layers.attention import Attention
+from .layers.layernorm import RMSNorm
+from .layers.rotary import RotaryEmbedding
+from .model_loader import default_weight_loader
 
 _QKV_SHARDS = (
     ("q_proj",lambda q,kv:(0,q)),
@@ -20,7 +26,7 @@ _QKV_SHARDS = (
 
 class Qwen3MLP(nn.Module):
     """SwiGLU 前馈网络"""
-    def __init__(self,config:Qwen3Config) -> None:
+    def __init__(self, config: Qwen3Config) -> None:
         # 1 Qwen3Config 超参数配置类，模型固有配置，不可训练参数
         # 2 例如 hidden_size 隐藏维度 intermediate MLP中间维度，升维维度 num_hidden_layers FNN层数
         # 3 num_attention_heads Q头数量 num_key_value_heads GQA的KV头数 等等
@@ -34,7 +40,7 @@ class Qwen3MLP(nn.Module):
         # 4 up_proj 升维算子，做特征升维 down_proj 降维算子
         self.act_fn = SiluAndMul()
 
-    def forward(self,x:torch.Tensor) -> torch.Tensor:
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
         return self.down_proj(
             self.act_fn(torch.cat([self.up_proj(x),self.gate_proj(x)],dim=-1)),
         )
@@ -42,7 +48,7 @@ class Qwen3MLP(nn.Module):
 
 class Qwen3Attention(nn.Module):
     """Qwen3 自注意力: Fused QKV -> QK Norm -> RoPE -> GQA -> Linear"""
-    def __init__(self,config:Qwen3Config,layer_id: int) -> None:
+    def __init__(self, config: Qwen3Config, layer_id: int) -> None:
         super().__init__()
         self.num_heads = config.num_attention_heads # Q头数
         self.num_kv_heads = config.num_key_value_heads # KV头数
@@ -65,7 +71,7 @@ class Qwen3Attention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim,eps=config.rms_norm_eps)
         # QK-Norm：按每个 head 的 head_dim 做 RMSNorm
 
-    def forward(self,position:torch.Tensor,hidden_states:torch.Tensor) -> torch.Tensor:
+    def forward(self, position: torch.Tensor, hidden_states :torch.Tensor) -> torch.Tensor:
         # 1 一次投影 -> 三段切分 -> 分别做 norm 和 RoPE -> 重新组装 -> 线性投影
         # 2 hidden_states 整批张量，网络在层与层之间传递的核心数据
         q,k,v = self.qkv_proj(hidden_states).split(
@@ -118,7 +124,7 @@ class Qwen3DecoderLayer(nn.Module):
         return self.mlp(hidden_states),residual
 
 class Qwen3Model(nn.Module):
-    def __init__(self,config:Qwen3Config) -> None:
+    def __init__(self, config: Qwen3Config) -> None:
         """Qwen3 模型: Embed -> 堆叠Layers -> Norm"""
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size,config.hidden_size)
@@ -144,7 +150,7 @@ class Qwen3Model(nn.Module):
 
 class Qwen3ForCausalLM(nn.Module):
     """Qwen3模型顶层: backbone + LM head"""
-    def __init__(self,config:Qwen3Config) -> None:
+    def __init__(self, config: Qwen3Config) -> None:
         super().__init__()
         self.model = Qwen3Model(config)
         self.lm_head = nn.Linear(config.hidden_size,config.vocab_size,bias=False)
@@ -189,9 +195,9 @@ class Qwen3ForCausalLM(nn.Module):
                 default_weight_loader(params[name], w)
                 # 填充剩余权重值
                 loaded.add(name) # 记录剩余权重成功填充
-        if "lm_head.weight" not in loaded and "model.embed_tokens_weight" in loaded:
+        if "lm_head.weight" not in loaded and "model.embed_tokens.weight" in loaded:
             default_weight_loader(
-                params["lm_head.weight"], params["model.embed_tokens_weight"]
+                params["lm_head.weight"], params["model.embed_tokens.weight"]
             )
             loaded.add("lm_head.weight")
             # 1 解决权重共享问题

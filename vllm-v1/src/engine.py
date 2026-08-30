@@ -5,19 +5,16 @@ from typing import Literal
 import torch
 from transformers import AutoTokenizer
 
-from config import EngineConfig
-from model import Qwen3ForCausalLM
-from model_loader import load_model
-from sampler import Sampler
-from kv.context import ForwardContext,set_forward_context
-from kv.manager import KVManager
-from kv.sequence import Sequence
-from pagedattention.slots import slots_tensor
-
+from .config import EngineConfig
+from .kv import ForwardContext, KVManager, Sequence, set_forward_context
+from .model import Qwen3ForCausalLM
+from .model_loader import load_model
+from .pagedattention import slots_tensor
+from .sampler import Sampler
 
 
 class Engine:
-    def __init__(self,config:EngineConfig) -> None:
+    def __init__(self, config:EngineConfig) -> None:
         self.config = config
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.dtype = self._resolve_dtype()
@@ -54,7 +51,7 @@ class Engine:
             dtype=self.dtype,
         )
     def reset_kv(
-        self,prefix_backend: Literal["none","hash","radix"] | None = None,
+        self, prefix_backend: Literal["none","hash","radix"] | None = None,
     ) -> None:
         """清空 KV / 前缀状态；可选切换 prefix_backend。供测试复用同一模型 """
         if prefix_backend is not None:
@@ -132,7 +129,7 @@ class Engine:
 
         temp_t = None if temperature<=0 else pack(temperature,torch.float)
         top_p_t = pack(top_p,torch.float)
-        top_k_t = pack(top_k,torch.float)
+        top_k_t = pack(top_k,torch.int)
 
         seq: Sequence = self.kv.new_sequence(input_ids) # 前缀匹配
         self.kv.allocate(seq) # 分配block资源
@@ -181,7 +178,7 @@ class Engine:
             cached_len = prompt_len
 
             # 开启decode循环
-            for _ in range(max_new_tokens): # 已经产出了一个token，需要循环生成最多max_new_token-1个
+            for _ in range(max_new_tokens - 1): # 已经产出了一个token，需要循环生成最多max_new_token-1个
                 if cached_len >= self.context_len:
                     break # 上下文上限保护
                 self._bind_ctx(
@@ -191,7 +188,7 @@ class Engine:
                 positions = torch.tensor([[cached_len]],device=self.device, dtype=torch.long)
                 h = self.model(ids,positions)
                 logits = self.model.compute_logits(h[:,-1:]).squeeze(1)
-                next_id = int(self.sampler(logits,temp_t,top_k_t,top_k_t).item())
+                next_id = int(self.sampler(logits,temp_t,top_p_t,top_k_t).item())
                 cached_len += 1
                 seq.append_token(next_id)
                 self.kv.ensure_blocks(seq)

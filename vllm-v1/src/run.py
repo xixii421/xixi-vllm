@@ -1,9 +1,9 @@
-"""vllm-v0 统一入口 — 基础自回归推理。
+"""vllm-v1 统一入口 — KV Cache + 前缀缓存。
 
 用法:
     python run.py                                    # 使用 config.yaml 默认值
-    python run.py --model Qwen3-1.5B --prompt "你好"   # CLI 覆盖配置
-    python run.py --config my_config.yaml             # 指定配置文件
+    python run.py --model Qwen3-1.5B --prompt "你好"  # CLI 覆盖配置
+    python run.py --prefix-backend radix              # 切换前缀缓存后端
 """
 from __future__ import annotations
 
