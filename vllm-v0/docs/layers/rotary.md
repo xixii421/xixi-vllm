@@ -1,9 +1,7 @@
 ## 2. RotaryEmbedding
 [RotaryEmbedding代码](../../src/layers/rotary.py)
 
-> [!NOTE]
-> **参考阅读**
->
+> [!NOTE] 参考阅读
 > [苏神的RoPE blog](https://www.spaces.ac.cn/archives/8265) | [袁朝发的Blog](https://yuanchaofa.com/post/hands-on-rope-position-embedding) |
 
 我在博客中提到过，Attention机制本身是没有位置信息的，因此需要显式的注入位置信息。

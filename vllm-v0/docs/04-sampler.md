@@ -4,9 +4,13 @@
 
 模型前向传播结束后，得到的是词表上每个 token 的原始分数，也就是 logits。这些分数还没有概率含义，不能直接当概率用。Sampler 的职责是把这 15 万维度的分数向量转化成一个具体的 token id。这个转化过程决定了生成结果是确定性的，还是带有随机性的。
 
+
+
 ## 1. 采样在推理链路中的位置
 
 自回归生成的每一步，模型都会输出一个长度为词表大小的向量。向量中的每个元素对应词表中一个 token 的得分。Sampler 接收这个向量，经过一系列处理后返回一个整数，也就是下一个要生成的 token id。这个 id 随后交给 tokenizer 解码成文字。
+
+![sampler示意图](./posts/sampler01.png)
 
 ```
 lm_head 输出 logits [1, vocab_size]
@@ -24,7 +28,11 @@ tokenizer.decode
 
 最早的自回归生成直接取最高分，也就是贪心。贪心和 beam search 在长文本上会反复吐出同样的短语，甚至陷入循环。seq2seq 时代就有人观察到这个现象。
 
+![贪心解码，每步取最高分（Hugging Face *How to generate text*）](./posts/hf_greedy_search.png)
+
 完全随机采样本来能带来多样性，但直接从完整的 softmax 分布里抽，会频繁抽到概率很低的 token，生成内容前言不搭后语。Holtzman 等人在 2020 年的论文里把这个现象叫作分布尾部不可靠。
+
+![按条件概率随机抽下一个词（Hugging Face *How to generate text*）](./posts/hf_sampling_search.png)
 
 解决问题的方向是截断分布，只在高分区域里随机抽。
 
@@ -32,7 +40,11 @@ Hinton 等人在 2015 年做知识蒸馏时给 softmax 加了温度参数，用�
 
 top-k 出自 Fan 等人在 ACL 2018 的论文《Hierarchical Neural Story Generation》。每一步只在分数最高的 k 个 token 里抽，论文里取 k 等于 10。它解决了随机采样的尾部问题，但 k 是固定的，分布平坦时需要更多候选，分布尖锐时又会混进低分 token。
 
+![固定 K=6 时，平坦分布只覆盖 68% 概率，尖锐分布覆盖 99%（Hugging Face *How to generate text*）](./posts/hf_top_k_sampling.png)
+
 top-p 叫 `nucleus sampling`，出自 Holtzman 等人在 *ICLR 2020 的论文《The Curious Case of Neural Text Degeneration》*。它按累积概率截断，保留概率和刚好达到 p 的最小集合。候选数量随分布置信度伸缩，比固定的 k 更贴合每一步的实际分布。
+
+![p≈0.92 时，平坦分布保留 9 个词，尖锐分布只保留 3 个（Hugging Face *How to generate text*）](./posts/hf_top_p_sampling.png)
 
 v0 的 Sampler 把 temperature、top-k、top-p 三条路径统一到一个 forward 里，用参数控制走哪条。
 
