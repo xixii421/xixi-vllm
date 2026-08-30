@@ -65,41 +65,44 @@ class Batch:
 
     @staticmethod
     def _cp(dst: torch.Tensor, data: list, dtype: torch.dtype) -> None:
+        """ CPU侧数据拷贝进GPU """
         cpu = torch.tensor(data, dtype=dtype, pin_memory=True)
         dst.copy_(cpu, non_blocking=True)
 
     def build_decode(self, seqs: list[Sequence]) -> None:
+        """ 把一批要做 decode 的请求，填进已经提前分配好的静态 GPU 缓冲区 """
         bs = len(seqs)
         block_size = seqs[0].block_size
-        self._cp(self.input_ids[:bs], [s.last_token for s in seqs], torch.int64)
-        self._cp(self.positions[:bs], [len(s) - 1 for s in seqs], torch.int64)
+        self._cp(self.input_ids[:bs], [s.last_token for s in seqs], torch.int64) # 输入token id
+        self._cp(self.positions[:bs], [len(s) - 1 for s in seqs], torch.int64) # 输入token pos
         self._cp(
             self.slot_mapping[:bs],
             [self._decode_slot(s, block_size) for s in seqs],
             torch.int32,
-        )
-        self._cp(self.cache_seqlens[:bs], [len(s) for s in seqs], torch.int32)
-        self._fill_block_tables(seqs)
+        ) # 输入token对应的物理地址
+        self._cp(self.cache_seqlens[:bs], [len(s) for s in seqs], torch.int32) # 已缓存token数
+        self._fill_block_tables(seqs) # 填充KVCache映射表
         self._fill_sampling(seqs)
 
     def build_prefill(self, seqs: list[Sequence]) -> tuple[int, int, int, bool]:
+        """ 组装 Prefill ，把 CPU上的 Sequence 列表数据填入静态 GPU Buffer """
         block_size = seqs[0].block_size
         ids: list[int] = []
         positions: list[int] = []
         slots: list[int] = []
         cu_q = [0]
         cu_k = [0]
-        max_q = 0
+        max_q = 0 # 最大Q处理数量，用来分配Q侧需要的共享内存
         max_k = 0
         for s in seqs:
             start = s.num_cached_tokens
             n = s.num_scheduled_tokens
             end = start + n
-            ids.extend(s.token_ids[start:end])
+            ids.extend(s.token_ids[start:end]) # 收集本轮全部输入token id
             positions.extend(range(start, end))
             slots.extend(slots_for_range(s.block_table, start, end, block_size))
-            cu_q.append(cu_q[-1] + n)
-            cu_k.append(cu_k[-1] + end)
+            cu_q.append(cu_q[-1] + n) # 本轮新产生的Q累计数量
+            cu_k.append(cu_k[-1] + end) # 本轮历史K累计数量
             max_q = max(max_q, n)
             max_k = max(max_k, end)
 
@@ -111,20 +114,22 @@ class Batch:
         self._cp(self.cu_seqlens_k[: len(cu_k)], cu_k, torch.int32)
 
         has_cache = cu_k[-1] > cu_q[-1]
-        if has_cache:
+        if has_cache: # 存在历史KVCache，则需要更新 GPU 缓存
             self._fill_block_tables(seqs)
         self._fill_sampling(seqs)
         return n, max_q, max_k, has_cache
 
     def _fill_block_tables(self, seqs: list[Sequence]) -> None:
+        """ 将 CPU 侧 KVCache 表填充进 GPU """
         width = self.max_blocks
         flat: list[int] = []
         for s in seqs:
             flat.extend(s.block_table)
-            flat.extend([-1] * (width - len(s.block_table)))
+            flat.extend([-1] * (width - len(s.block_table))) # 补到最大宽度
         self._cp(self.block_tables[: len(seqs)].reshape(-1), flat, torch.int32)
 
     def _fill_sampling(self, seqs: list[Sequence]) -> None:
+        """ 将每条请求的采样参数拷贝进 GPU """
         bs = len(seqs)
         vocab = self.vocab_size
         temps = [s.temperature for s in seqs]
@@ -140,7 +145,7 @@ class Batch:
         self._cp(self.top_ks[:bs], top_ks, torch.int32)
         self._cp(self.min_ps[:bs], min_ps, torch.float32)
 
-        self.all_greedy = all(t <= 1e-5 for t in temps)
+        self.all_greedy = all(t <= 1e-5 for t in temps) # 贪心快速路径，跳过概率重分布
         self.any_greedy = any(t <= 1e-5 for t in temps)
         self.use_top_k = any(k < vocab for k in top_ks)
         self.use_top_p = any(p < 1.0 for p in top_ps)
@@ -149,5 +154,6 @@ class Batch:
 
     @staticmethod
     def _decode_slot(seq: Sequence, block_size: int) -> int:
+        """ 逻辑地址转物理地址 """
         n = len(seq)
         return seq.block_table[(n - 1) // block_size] * block_size + (n - 1) % block_size
