@@ -34,11 +34,11 @@ class Sequence:
         """ 当前请求可以填满的页数（尾块未满不计入，前缀只共享满块） """
         return self.num_tokens // self.block_size
 
-    def block_token_ids(self,i: int) -> list[int]:
+    def block_token_ids(self, i: int) -> list[int]:
         """ 取出第 i 个逻辑页上的 token_id 片段（用于算块哈希） """
         s = i * self.block_size
         return self.token_ids[s : s + self.block_size]
 
-    def append_token(self,token_id: int) -> None:
+    def append_token(self, token_id: int) -> None:
         """ decode 追加一个新 token """
         self.token_ids.append(token_id)

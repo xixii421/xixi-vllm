@@ -82,7 +82,7 @@ class BlockPool:
             dtype=dtype,
         )
 
-    def _evict_cached(self,bid: int) -> None:
+    def _evict_cached(self, bid: int) -> None:
         """ 丢掉一块 cached，必要时通知前缀索引 """
         if self.on_evict is not None:
             self.on_evict(bid)
@@ -106,14 +106,14 @@ class BlockPool:
         self.used_ids.add(bid)
         return bid
 
-    def reclaim_cached(self,bid: int) -> None:
+    def reclaim_cached(self, bid: int) -> None:
         """ 前缀命中：把 cached 页重新变为 used """
         self.cached_ids.discard(bid)
         self.free_ids.discard(bid)
         self.used_ids.add(bid)
         self.blocks[bid].ref_count = 1
 
-    def release_to_cached_or_free(self,bid: int, *,keep_cached: bool) -> None:
+    def release_to_cached_or_free(self, bid: int, *, keep_cached: bool) -> None:
         """ 请求结束减引用；可保留为 cached，否则回 free """
         block = self.blocks[bid]
         block.ref_count -= 1

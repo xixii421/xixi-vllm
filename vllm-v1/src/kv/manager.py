@@ -16,12 +16,10 @@ from typing import Literal
 import torch
 from torch import nn
 
-from pagedattention.store import PagedStore
-from kv.pool import BlockPool
-from kv.prefix.hash_index import HashPrefixIndex
-from kv.prefix.noop import NoopPrefixIndex
-from kv.prefix.radix_index import RadixPrefixIndex
-from kv.sequence import Sequence
+from ..pagedattention import PagedStore
+from .pool import BlockPool
+from .prefix import HashPrefixIndex, NoopPrefixIndex, RadixPrefixIndex
+from .sequence import Sequence
 
 _PrefixBackend = Literal["none","hash","radix"]
 
@@ -31,8 +29,7 @@ def _make_index(backend: _PrefixBackend):
         return HashPrefixIndex()
     elif backend == "radix":
         return RadixPrefixIndex()
-    else:
-        return NoopPrefixIndex()
+    return NoopPrefixIndex()
 
 class KVManager:
     """ 单引擎的 KV 与前缀缓存入口 """
@@ -63,7 +60,7 @@ class KVManager:
         self._seq_counter = 0 # 请求数量
         self.last_num_cached_tokens = 0 # 上一轮迭代一共命中缓存的token数量，用于统计前缀缓存命中率
 
-    def new_sequence(self,token_ids: list[int]) -> Sequence:
+    def new_sequence(self, token_ids: list[int]) -> Sequence:
         """ 创建尚未绑页的 Sequence """
         self._seq_counter += 1
         return Sequence(
@@ -111,12 +108,12 @@ class KVManager:
             self.index.pin_match(seq, max_cached)
             # 如果索引是基树索引且有复用前缀，需要更新基树引用
 
-    def ensure_blocks(self,seq: Sequence) -> None:
+    def ensure_blocks(self, seq: Sequence) -> None:
         """ decode 变长时把 block_table 补到够用 """
         while len(seq.block_table) < seq.num_blocks:
             seq.block_table.append(self.pool.allocate_fresh())
 
-    def finish(self,seq: Sequence) -> None:
+    def finish(self, seq: Sequence) -> None:
         """ 满块发布进前缀索引；页转 cached 或 free """
         # 序列seq执行结束，收尾
         n_full = seq.num_full_blocks()
