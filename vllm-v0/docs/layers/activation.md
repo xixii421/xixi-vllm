@@ -113,12 +113,12 @@ W_v = W_1 = \begin{bmatrix} 0.5 & 0.2 \\ -0.3 & 0.8 \end{bmatrix}
 ```
 
 ### 手算GLU
-1. **计算 gate**：$g_{\text{raw}}=x W_g=[1.0,-0.5]\cdot W_g=[0.75,-0.55]$。
-   门控使用激活函数：$\sigma(0.75)\approx 0.679$，$\sigma(-0.55)\approx 0.366$，所以 $\text{gate}=[0.679, 0.366]$。
+1. **计算 gate**: $g_{\text{raw}}=x W_g=[1.0,-0.5]\cdot W_g=[0.75,-0.55]$, 
+   门控使用激活函数: $\sigma(0.75)\approx 0.679$，$\sigma(-0.55)\approx 0.366$，所以 $\text{gate}=[0.679, 0.366]$。
 
-2. **计算 value**：$v=x W_v=[0.65, -0.7]$。
+2. **计算 value**: $v=x W_v=[0.65, -0.7]$。
 
-3. 逐元素乘（加权）：$h_{\text{GLU}}=\text{gate}\odot v=[0.679\times 0.65,\ 0.366\times(-0.7)]\approx[0.441, -0.256]$。
+3. 逐元素乘（加权）: $h_{\text{GLU}}=\text{gate}\odot v=[0.679\times 0.65,\ 0.366\times(-0.7)]\approx[0.441, -0.256]$。
 
 4. **降维输出**：
 
@@ -149,7 +149,7 @@ y = W_2 \cdot h_{\text{GLU}} \approx \begin{bmatrix} 0.3\times0.441 -0.2\times(-
 
 2. **value 不变**
 
-3. **调制**：$h_{\text{SwiGLU}}=[0.509\times 0.65,\ (-0.201)\times(-0.7)]\approx[0.331, 0.141]$。
+3. **调制**: $h_{\text{SwiGLU}}=[0.509\times 0.65,\ (-0.201)\times(-0.7)]\approx[0.331, 0.141]$。
 
    第二维原本是 `-0.7`，门控是 `-0.201`，负负得正，输出变成了 `+0.141`。**信息不仅被调制，符号都可能翻转**。
 
