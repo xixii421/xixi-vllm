@@ -4,11 +4,11 @@ import torch.nn.functional as F
 # 函数式接口，提供神经网络运算函数，不需要实例化即可调用
 from torch import nn
 
-from kv.context import get_forward_context
+from ..kv.context import get_forward_context
 
 
 class Attention(nn.Module):
-    def __init__(self,num_heads:int,head_dim:int,num_kv_heads:int,layer_id: int=0) -> None:
+    def __init__(self, num_heads: int, head_dim: int, num_kv_heads: int, layer_id: int=0) -> None:
         """GQA 即分组查询注意力 多个Q公用一组KV"""
         # 1 num_heads Q的总头数
         # 2 head_dim 头维度
@@ -47,7 +47,7 @@ class Attention(nn.Module):
         # 4 SDPA具体做了什么：QK^T -> scale 缩放 -> 掩码覆盖 -> softmax计算权重 -> 权重乘V，得到每个头输出
         # 5 因为开启了GQA支持 所以内部会自动处理GQA的KV共享
 
-    def forward(self, q:torch.Tensor,k:torch.Tensor,v:torch.Tensor)->torch.Tensor:
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         ctx = get_forward_context()
 
         q = q.transpose(1, 2)
