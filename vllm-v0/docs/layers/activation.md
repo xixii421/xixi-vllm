@@ -82,7 +82,8 @@ SiLU（Sigmoid Linear Unit）也被称为 Swish，定义为：
 
    负数仍然在，它得到一个微弱的负输出。梯度也依然存在。
 
-3. 降维：$y = W_2 \cdot [0.427, -0.232]^T$
+3. 降维：
+   - $y = W_2 \cdot [0.427, -0.232]^T$
 
 ```math
 y \approx \begin{bmatrix} 0.3\times0.427 -0.2\times(-0.232) \\ 0.4\times0.427 +0.6\times(-0.232) \end{bmatrix} = \begin{bmatrix} 0.174 \\ 0.032 \end{bmatrix}
