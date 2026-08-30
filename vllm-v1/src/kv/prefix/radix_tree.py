@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence as AbcSequence
 # Sequence 抽象基类，代表有序可索引、可切片、可迭代的序列类型 因为自己定义了Sequence，所以重命名
 
-def _prefix_len(a:AbcSequence[int],b:AbcSequence[int]) -> int:
+def _prefix_len(a: AbcSequence[int], b: AbcSequence[int]) -> int:
     """ 两序列公共前缀长度 """
     n = 0
     m = min(len(a),len(b))
@@ -37,7 +37,7 @@ class RadixTree:
         self.root = _RadixNode(ref_count=1)
 
     def _add(
-            self,parent:_RadixNode, key: tuple[int,...],value: tuple[int,...],
+            self, parent: _RadixNode, key: tuple[int,...], value: tuple[int,...],
     ) -> _RadixNode:
         """ 在 parent 下挂一条新边 """
         node = _RadixNode(parent=parent, key=key, value=value)
@@ -45,7 +45,7 @@ class RadixTree:
         # 取这条边 token 片段第一个 token，作为 children 字典的索引 key
         return node
 
-    def _split(self,node:_RadixNode,split_at: int) -> _RadixNode:
+    def _split(self, node: _RadixNode, split_at: int) -> _RadixNode:
         """ 在边上 split_at 处拆成父边 + 子边 """
         new_node = _RadixNode(
             parent=node.parent,
@@ -63,7 +63,7 @@ class RadixTree:
         return new_node
 
 
-    def insert(self,key:list[int], value: list[int]) -> _RadixNode:
+    def insert(self, key: list[int], value: list[int]) -> _RadixNode:
         """ 插入一条 key→value，必要时分裂边；返回末端节点。 """
         if not key:
             return self.root
@@ -84,7 +84,7 @@ class RadixTree:
             return self._add(node,tuple(key),tuple(value))
         return node
 
-    def match_prefix(self,key:list[int]) -> tuple[list[int],_RadixNode]:
+    def match_prefix(self, key:list[int]) -> tuple[list[int], _RadixNode]:
         """ 沿树走最长匹配，返回已命中的 value（块号列表）与停留节点 """
         if not key:
             return [],self.root
@@ -99,6 +99,7 @@ class RadixTree:
 
             if p1 < len(child.key): # 边的token只匹配上一部分，需要分裂边
                 new_node = self._split(child,p1)
+                values.extend(new_node.value)
                 return values,new_node
             # 这条边token匹配成功
             values.extend(child.value) # 保存物理页号
@@ -107,7 +108,7 @@ class RadixTree:
             child_key = key[0] if key else -1 # 更新剩下的第一个token，如果key空了赋值-1
         return values,node
 
-    def inc_ref(self,node: _RadixNode) -> None:
+    def inc_ref(self, node: _RadixNode) -> None:
         """ 自 node 到根引用 +1 """
         while node is not self.root:
             node.ref_count += 1

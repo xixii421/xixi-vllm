@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from kv.prefix.hash_util import compute_block_hash
-from kv.prefix.radix_tree import RadixTree
+from .hash_util import compute_block_hash
+from .radix_tree import RadixTree
 
 if TYPE_CHECKING:
-    from kv.pool import BlockPool
-    from kv.sequence import Sequence
+    from ..pool import BlockPool
+    from ..sequence import Sequence
 
 class RadixPrefixIndex:
     """ match/publish 走树；块哈希仍用 compute_block_hash """
@@ -20,7 +20,7 @@ class RadixPrefixIndex:
         # int 代表Sequence的请求id
         # object 所有类的根父类，可以是任意类，实际上是 _RadixNode 存的是对应请求的末端节点
 
-    def _block_hashes(self,seq: Sequence, n: int) -> list[int]:
+    def _block_hashes(self, seq: Sequence, n: int) -> list[int]:
         """ 前 n 个满块的链式哈希序列（树的 key） """
         h = -1
         out: list[int] = []
@@ -29,7 +29,7 @@ class RadixPrefixIndex:
             out.append(h)
         return out
 
-    def publish(self,seq: Sequence,num_full_blocks: int,pool: BlockPool) -> None:
+    def publish(self, seq: Sequence, num_full_blocks: int, pool: BlockPool) -> None:
         """ 写块元数据并插入/合并到 radix 树 """
         if num_full_blocks <= 0:
             return
@@ -51,7 +51,7 @@ class RadixPrefixIndex:
         self._tree.inc_ref(last) # 增添新路径
         self._seq_node[seq.seq_id] = last # 更新字典
 
-    def match(self,seq: Sequence, pool: BlockPool) -> list[int]:
+    def match(self, seq: Sequence, pool: BlockPool) -> list[int]:
         """ 树上最长前缀 + 元数据校验 → 可复用物理块列表 """
         n_full = seq.num_full_blocks()
         if n_full <= 0:
@@ -72,7 +72,7 @@ class RadixPrefixIndex:
             hit.append(bid)
         return hit
 
-    def pin_match(self,seq: Sequence,num_blocks: int) -> None:
+    def pin_match(self, seq: Sequence, num_blocks: int) -> None:
         """ allocate 命中后：为对应前缀节点加引用，供 finish 时 release_seq """
         # 只读不写树，上述match函数没有加引用，这里给树上已存在的节点增加引用
         if num_blocks <= 0:
@@ -82,11 +82,11 @@ class RadixPrefixIndex:
         self._tree.inc_ref(node)
         self._seq_node[seq.seq_id] = node
 
-    def invalidate(self,block_id: int,pool: BlockPool) -> None:
+    def invalidate(self, block_id: int, pool: BlockPool) -> None:
         """ 教学实现：淘汰时不拆树，靠块元数据校验兜底 """
         return
 
-    def release_seq(self,seq_id: int) -> None:
+    def release_seq(self, seq_id: int) -> None:
         """ 请求结束，松开该 seq 持有的树节点引用 """
         node = self._seq_node.pop(seq_id,None)
         if node is not None:
