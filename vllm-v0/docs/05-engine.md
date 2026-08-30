@@ -1,8 +1,8 @@
 # Engine 推理引擎
 
-> [engine.py 源码](../src/engine.py) | [architecture 总览](./architecture.md) | [model 模型实现](./model.md)
+> [engine.py 源码](../src/engine.py) | [architecture 总览](./architecture.md) | [模型组装](./04-model.md)
 
-<span style="color:#1d4ed8">**模块名**</span> · <span style="color:#b45309">**核心机制**</span> · <span style="color:#059669">**实现细节**</span> · <span style="color:#7c3aed">**数据流**</span>
+
 
 `model.py` 解决了「模型怎么算」，`engine.py` 解决「怎么拿模型跑起来、一个字一个字地吐出来」。v0 的 Engine 保持极简，把**加载、循环、采样、流式输出**收进一个类，为后续 KV Cache 和调度器升级留出清晰边界。
 
@@ -72,7 +72,7 @@ load_model(self.model, config.model)
 self.model = self.model.to(dtype=self.dtype, device=self.device)
 ```
 
-<span style="color:#b45309">**机制**</span> 先建空骨架，再流式灌权重（第 3 节 `model.md`），最后 `.to()` 上设备/转 dtype。**加载顺序是刻意设计的**——若先 `.to(device)` 再灌权重，加载过程会反复在 CPU/GPU 间搬运张量，浪费显存；先建骨架、权重灌进参数后统一迁移，只搬一次。
+<span style="color:#b45309">**机制**</span> 先建空骨架，再流式灌权重（见 [05-weights.md](./05-weights.md)），最后 `.to()` 上设备/转 dtype。加载顺序是刻意设计的。若先 `.to(device)` 再灌权重，加载过程会反复在 CPU/GPU 间搬运张量，浪费显存；先建骨架、权重灌进参数后统一迁移，只搬一次。
 
 <span style="color:#059669">**细节**</span> v0 只跑 eager 前向（不做 `torch.compile`），让每一步的计算路径直观可读——这也是后续版本做 CUDA Graph 优化的教学起点。
 
@@ -169,7 +169,7 @@ yield self.tokenizer.decode([next_id])
 
 <span style="color:#059669">**细节**</span> 比 `no_grad` 更激进：不仅不记录梯度，连 autograd 的自动求导机制整体跳过，推理场景下省开销、防误触。整个 `generate` 循环都跑在这个模式里——模型前向、logits 投影、采样全部无梯度。
 
-### 3.6 v0 的关键特征：每步重算全序列（无 KV Cache）
+### 3.6 v0 的关键特征：每步重算全序列
 
 <span style="color:#b45309">**机制**</span> 第 3.3 节看到 `input_ids` 每轮都重建 `[1, N]`、`positions` 每轮从 0 `arange`。这正是 v0 **没有 KV Cache** 的标志：
 
@@ -192,7 +192,7 @@ Engine 不关心采样数学细节，只传采样参数
 next_id = self.sampler(logits, temp_t, top_p_t, top_k_t).item()
 ```
 
-`Sampler` 内部的策略链（temperature → top-k → top-p → softmax → multinomial）在 `layers.md` 第 8 节已有说明。Engine 侧只需记住两点
+`Sampler` 内部的策略链（temperature → top-k → top-p → softmax → multinomial）在 [06-sampler.md](./06-sampler.md) 已有说明。Engine 侧只需记住两点
 
 <span style="color:#059669">**细节**</span> 参数顺序是 `(logits, temperatures, top_ps, top_ks)`，和 `generate` 函数签名的 `(temperature, top_p, top_k)` 顺序不同，调用时注意对齐。
 

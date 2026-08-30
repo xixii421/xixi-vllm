@@ -1,6 +1,50 @@
-# vllm-v0 架构文档
+# 概述
+
+vllm-v0 是一个从零实现的 Qwen3 自回归引擎，涵盖配置加载、读取权重、搭建模型、执行前向、采样 token、流式输出等核心内容。
+
+v0 版本虽然说是引擎，但是实际上更像是从零搭建一个大模型执行框架，只需要能够完成最基本的推理即可。
+
+通过 v0，读者可以看到一条完整的链路：
+- 权重如何从磁盘加载到内存；
+- 大模型的每一层是如何被组织起来的
+- 输入文本是如何被tokenizer 转化成为 token id的；
+- 模型如何根据当前 token 预测下一个 token；
+- 生成结果如何逐步流式返回。
 
 
+
+
+如果只是让模型生成 token，直接用 `transformers`包就已经足够了：
+
+```python
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model = AutoModelForCausalLM.from_pretrained(
+    "Qwen/Qwen3-0.6B", torch_dtype="auto"
+).cuda()
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+
+input_ids = tokenizer("Hello, my name is", return_tensors="pt")["input_ids"].cuda()
+
+for _ in range(20):
+    logits = model(input_ids).logits                        # 整条序列完整前向
+    next_id = logits[:, -1, :].argmax(dim=-1, keepdim=True) # 只取最后一个位置
+    input_ids = torch.cat([input_ids, next_id], dim=-1)     # 拼回输入
+    print(tokenizer.decode(next_id[0]), end="", flush=True)
+```
+
+这段代码的逻辑非常简单，就是先加载一个大模型，然后把当前的所有prompt 输入到模型中，并且取出最后一个位置的logits，选出下一个token并且再把它拼回输入中，继续重复预测。
+
+这里的 `transformers` 是一套模型调用库，具有负责加载权重、构建模型、调用 tokenizer，并提供 generate 接口等功能。
+
+尽管它十分方便，但是方便并不等于高效。
+
+对我们而言，这实际上是一个黑盒，而且上面的代码每生成一个 token，都会把完整输入重新送入模型。序列越长，重复计算越多。
+
+实际上我们可以通过自行搭建模型，来掌握大模型推理的各项细节，进而逐步优化，使其更加高效。
+
+# 为什么需要推理框架？
 我们究竟为什么需要推理框架呢？原生的模型为什么不能做推理？
 
 1. **计算冗余极大**。如果每次生成新的Token都把包含历史所有的Token重新进行一次完整的Attention计算，那么时间复杂度就为`O(N*2)`.对于128K甚至1M的长上下文，这种重复计算会导致生成速度极慢。
@@ -16,15 +60,17 @@ vLLM之所以能够成为当前LLM推理的标杆，核心就在于针对上述�
 
 而我们如果一上来就学习这么复杂的内容，会直接让我们淹没在巨大的学习成本中，接下来我就带大家一步一步实现每一个版本，并且进行性能和功能完整的测试。
 
-## 一、核心推理循环
-在当前的版本中，我们的核心是一个实现LLM的自回归生成。
-### 1.1 最简循环
+
+# 自回归循环
+
+大模型的核心是自回归生成。即模型推理预测下一个 token，反复执行，直到生成结束。
+
+## 1. 最简循环
 
 ```python
-# engine.py — 整个推理系统的核心
+# engine.py 的核心
 for _ in range(max_new_tokens):
-
-    # 1. 构造输入：把整个序列（prompt + 已生成的所有 token）拼成 [1, current_len]
+    # 1. 构造输入：整个序列（prompt + 已生成 token）
     ids = torch.tensor([input_ids], device="cuda", dtype=torch.long)
 
     # 2. 位置：[0, 1, 2, ..., current_len-1]
@@ -33,59 +79,40 @@ for _ in range(max_new_tokens):
     # 3. 完整 forward
     h = self.model(ids, positions)
 
-    # 4. 取最后一个位置的 hidden state → 投影到词表 → 采样
+    # 4. 取最后一个位置的 hidden state，投影到词表，采样
     logits = self.lm_head(h[:, -1:]).squeeze(1)
     next_token = self.sampler(logits, ...).item()
 
-    # 5. 输出新 token，拼回序列，准备下一次循环
+    # 5. 输出新 token，拼回序列，进入下一轮
     yield self.tokenizer.decode([next_token])
     input_ids.append(next_token)
 ```
 
-**关键点**：每次生成一个新 token，都要把**整个序列**（prompt + 所有已生成 token）重新跑一遍完整的 transformer forward。
+每生成一个新 token，都要把整个序列重新跑一遍完整 forward。
 
-### 1.2 数据流图
-![V0版本流程图](./posts/流程图.png)
+![v0 自回归数据流](./posts/流程图.png)
 
+## 2. 每一步发生了什么
 
+第 t 步时，输入长度 N = t。
 
-## 二、文件结构
-
-```
-vllm-v0/
-├── run.py                    入口脚本
-└── src/
-    ├── config.py              配置类
-    ├── engine.py              推理引擎（模型加载 + generate 循环）
-    ├── model.py               Qwen3 模型定义 + 权重加载
-    ├── model_loader.py        safetensors 权重读取
-    ├── sampler.py             采样器
-    └── layers/
-        ├── attention.py       多头 / 分组查询注意力
-        ├── rotary.py          RoPE 旋转位置编码
-        ├── layernorm.py       RMSNorm
-        └── activation.py      SiLU激活函数
+```text
+input_ids [t0, t1, ..., t_{t-1}]      长度 N
+    ↓
+positions [0, 1, ..., N-1]            完整位置
+    ↓
+model 前向                             28 层全算
+    ↓
+h[:, -1:]                             只取最后一个位置
+    ↓
+lm_head → logits [1, vocab]
+    ↓
+sampler → next_token_id
 ```
 
+## 3. 代价
 
+每步都在重算所有历史 token 的注意力，复杂度 O(N²)。虽然只有最后一个位置被采样，前面 N-1 个位置的注意力分数全白算了。
 
-
-## 三、模型结构速览
-本教程以典型的Qwen3-0.6B为例：
-
-### Qwen3-0.6B
-[Qwen系列学习链接](https://modelscope.cn/models/Qwen/Qwen3-0.6B-Base)
-
-
-
-### 阅读顺序
-
-完整目录与推荐阅读路径见仓库根目录 [README.md](../README.md)。本目录下建议顺序：
-
-1. 本文（架构与自回归循环）
-2. [layers/rmsnorm.md](./layers/rmsnorm.md) → [rotary.md](./layers/rotary.md) → [attention.md](./layers/attention.md) → [activation.md](./layers/activation.md)
-3. [layers.md](./layers.md)（层装配总览）
-4. [model.md](./model.md)（组合成 Qwen3 + 权重加载）
-5. [sampler.md](./sampler.md)
-6. [engine.md](./engine.md) + `run.py`
+这是 v0 最大的性能瓶颈，也是下一版 v1 引入 KV Cache 后要解决的第一个问题。缓存历史 K/V，decode 每步只对新增 token 做计算。
 
