@@ -27,9 +27,9 @@ class RotaryEmbedding(nn.Module):
     def forward(
         self, positions: torch.Tensor, query: torch.Tensor, key: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # 模型整体 .to(bf16) 会把 buffer 一并转 bf16；FlashInfer 要求 fp32，惰性转回一次
-        if self.cos_sin_cache.dtype != torch.float32:
-            self.cos_sin_cache = self.cos_sin_cache.float()
+        # cos_sin_cache 已在 executor 加载模型后固定为 fp32（FlashInfer 要求）。
+        # 不能在 forward 里惰性 .float()：torch.compile 的 CUDAGraph 会复用该临时内存，
+        # 下次重放时覆盖 → "overwritten by a subsequent run"。
         return torch.ops.vllm.rotary_embedding(
             query, key, positions, self.cos_sin_cache, self.head_size
         )
