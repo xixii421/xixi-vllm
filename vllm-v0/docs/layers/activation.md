@@ -114,7 +114,7 @@ W_v = W_1 = \begin{bmatrix} 0.5 & 0.2 \\ -0.3 & 0.8 \end{bmatrix}
 
 ### 手算GLU
 1. **计算 gate**: $g_{\text{raw}}=x W_g=[1.0,-0.5]\cdot W_g=[0.75,-0.55]$, 
-   门控使用激活函数: $\sigma(0.75)\approx 0.679$，$\sigma(-0.55)\approx 0.366$，所以 $\text{gate}=[0.679, 0.366]$。
+   门控使用激活函数: $\sigma(0.75)\approx 0.679$, $\sigma(-0.55)\approx 0.366$，所以 $\text{gate}=[0.679, 0.366]$。
 
 2. **计算 value**: $v=x W_v=[0.65, -0.7]$。
 
