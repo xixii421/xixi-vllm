@@ -68,6 +68,6 @@ python -m bench.compare_chunked --model Qwen3-0.6B --budget 32 --long-prompt 512
 
 | 文档 | 说明 |
 |------|------|
-| [00-V2版本设计解释.md](docs/00-V2版本设计解释.md) | Continuous Batching 动机 |
-| [01-相比v1的增改.md](docs/01-相比v1的增改.md) | v1 → v2 逐个差异文件清单 |
-| [02-代码架构与三面分离.md](docs/02-代码架构与三面分离.md) | 控制面 / 数据面 / 计算面架构详解 |
+| [00-v2版本设计.md](docs/00-v2版本设计.md) | Continuous Batching 与 Chunked Prefill 动机 |
+| [01-相比v1的增改.md](docs/01-相比v1的增改.md) | v1 → v2 新增与改写清单 |
+| [02-代码架构详解.md](docs/02-代码架构详解.md) | 控制面 / 数据面 / 计算面，按源码从外到内 |

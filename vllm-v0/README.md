@@ -79,14 +79,16 @@ python run.py --list
 
 ## 文档
 
+按编号 01–05 读主线，算子细节在 `docs/layers/`。
+
 | 顺序 | 文档 | 弄清什么 |
 |:--:|------|---------|
-| 1 | [architecture.md](docs/architecture.md) | 自回归循环是什么 |
-| 2 | [layers.md](docs/layers.md) | Attention / MLP / Decoder 数据流 |
-| 3 | [layers/rmsnorm.md](docs/layers/rmsnorm.md) | RMSNorm+残差详解 |
-| 4 | [layers/rotary.md](docs/layers/rotary.md) | RoPE位置编码 |
-| 5 | [layers/attention.md](docs/layers/attention.md) | GQA + SDPA |
-| 6 | [layers/activation.md](docs/layers/activation.md) | SwiGLU 详解|
-| 7 | [model.md](docs/model.md) | 模型详解 |
-| 8 | [sampler.md](docs/sampler.md) | 采样策略详解 |
-| 9 | [engine.md](docs/engine.md) | 执行流程详解 |
+| 1 | [01-overview.md](docs/01-overview.md) | v0 要覆盖的完整推理链路 |
+| 2 | [02-model.md](docs/02-model.md) | Qwen3 骨架如何一层层组装 |
+| 3 | [03-weights.md](docs/03-weights.md) | safetensors 如何装到自写结构上 |
+| 4 | [04-sampler.md](docs/04-sampler.md) | logits 如何变成下一个 token |
+| 5 | [05-engine.md](docs/05-engine.md) | generate 如何串起加载、前向、采样、流式输出 |
+| — | [layers/rmsnorm.md](docs/layers/rmsnorm.md) | RMSNorm 与残差融合 |
+| — | [layers/rotary.md](docs/layers/rotary.md) | RoPE 位置编码 |
+| — | [layers/attention.md](docs/layers/attention.md) | GQA + 因果 SDPA |
+| — | [layers/activation.md](docs/layers/activation.md) | SwiGLU 与 SiluAndMul |

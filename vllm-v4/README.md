@@ -113,12 +113,14 @@ python test/test_dp.py --dp 2 --n-reqs 4
 
 ## 文档
 
-| | |
-| --- | --- |
-| 三种并行怎么选 | [docs/00-并行环境.md](docs/00-并行环境.md) |
-| 控制面与三条通道 | [docs/04-控制与并行.md](docs/04-控制与并行.md) |
-| 两台机器实测 | [docs/03-性能对比.md](docs/03-性能对比.md) |
-| 硬件 / 通信 | [docs/01-硬件互联.md](docs/01-硬件互联.md) · [docs/02-服务器通信测量.md](docs/02-服务器通信测量.md) |
-| TP 线性层 / 词表 | [docs/06-linear.md](docs/06-linear.md) · [docs/05-词表.md](docs/05-词表.md) |
+| 文档 | 说明 |
+|------|------|
+| [00-并行环境.md](docs/00-并行环境.md) | 三类并行策略与选型 |
+| [01-硬件互联.md](docs/01-硬件互联.md) | 单机 GPU 拓扑与互联 |
+| [02-服务器通信测量.md](docs/02-服务器通信测量.md) | 四卡 A100 卡间通信实测 |
+| [03-性能对比.md](docs/03-性能对比.md) | 两台机器上 TP / PP / DP 与 CG / compile |
+| [04-控制与并行.md](docs/04-控制与并行.md) | 控制面与 Gloo / NCCL / ZMQ |
+| [05-词表.md](docs/05-词表.md) | 词表并行原理与实现 |
+| [06-linear.md](docs/06-linear.md) | 列并行 / 行并行线性层 |
 
 这版不做：OpenAI HTTP、MoE、视觉、量化、投机解码。那些在 v5 / v6。DP 只做本机副本，没有跨机数据并行。
