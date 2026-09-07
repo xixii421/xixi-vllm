@@ -84,7 +84,7 @@ python run.py --list
 | 顺序 | 文档 | 弄清什么 |
 |:--:|------|---------|
 | 1 | [01-overview.md](docs/01-overview.md) | v0 要覆盖的完整推理链路 |
-| 2 | [02-model.md](docs/02-model.md) | Qwen3 骨架如何一层层组装 |
+| 2 | [02-model.md](docs/02-model.md) |大模型详解|
 | 3 | [03-weights.md](docs/03-weights.md) | safetensors 如何装到自写结构上 |
 | 4 | [04-sampler.md](docs/04-sampler.md) | logits 如何变成下一个 token |
 | 5 | [05-engine.md](docs/05-engine.md) | generate 如何串起加载、前向、采样、流式输出 |

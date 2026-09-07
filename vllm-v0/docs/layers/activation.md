@@ -1,5 +1,5 @@
 # Activation
-## 为什么需要激活函数？
+## 1. 为什么需要激活函数？
 如果神经网络只有线性变换（矩阵乘法+偏置），无论堆多少层，实际上都等价于一层线性变换。
 
 ```math
@@ -11,9 +11,12 @@ W_3(W_2(W_1x+b_1)+b_2)+b_3 = \tilde{W}x + \tilde{b}
 
 在 Transformer 架构中，FFN 承担了 70% 以上的参数量，而激活函数的选择直接决定了模型的**表达能力、训练稳定性、计算效率**。
 
-## 预备知识
+## 2. 预备知识
 一个 Transformer Block 包含 Attention 和 FFN 两个子层，其中 FFN 对每个位置独立作用：
-![alt text](../posts/ffn.png)
+<p align="center">
+  <img src="../posts/ffn.png" alt="FFN 结构" width="420">
+</p>
+
 
 数学形式：
 
@@ -36,7 +39,7 @@ W_2 = \begin{bmatrix} 0.3 & -0.2 \\ 0.4 & 0.6 \end{bmatrix}
 
 现在，让我们从 ReLU 开始，一步步推动进化。
 
-## 2. ReLU
+## 3. ReLU
 
 **定义**：  
 
@@ -61,7 +64,7 @@ ReLU的优点很明显：
 后续有Leaky ReLU、ELU、GELU、Swish等改进激活函数来缓解上述问题。
 
 
-## 3. SiLU / Swish
+## 4. SiLU / Swish
 SiLU（Sigmoid Linear Unit）也被称为 Swish，定义为：
 
 ```math
@@ -92,7 +95,7 @@ y \approx \begin{bmatrix} 0.3\times0.427 -0.2\times(-0.232) \\ 0.4\times0.427 +0
 对比 ReLU 的输出 $[0.195, 0.26]$，SiLU 的输出完全不同。更重要的是，**SiLU 处处光滑、非单调**，允许梯度稳定流动，训练深层网络时表现显著优于 ReLU。在 LLaMA 等模型中，即便后来有了 SwiGLU，SiLU 本身作为激活函数也曾被直接使用。
 
 
-## 4. GLU
+## 5. GLU
 但 SiLU 仍然有一个局限，整个门控仍然来自同一个输入。也就是说 $\text{gate}=f(x)$，$\text{value}=x$。门控和内容共享同一份特征，因为它们都是同一个 $x$ 表征出来的。
 
 于是研究者开始思考：如果门控和内容分别由两条独立路径生成，会发生什么？
@@ -132,7 +135,7 @@ y = W_2 \cdot h_{\text{GLU}} \approx \begin{bmatrix} 0.3\times0.441 -0.2\times(-
 但激活函数 sigmoid 门控**永远非负**，只能削弱或放行，不能反转符号。这限制了门控的表达能力。
 
 
-## 5. SwiGLU
+## 6. SwiGLU
 
 2019 年，Shazeer 在《GLU Variants Improve Transformer》中系统比较了多种门控激活，发现**将 sigmoid 换成 SiLU**（即 Swish）能取得最佳效果。这就是 SwiGLU：
 
@@ -166,11 +169,11 @@ y = W_2 \cdot h_{\text{SwiGLU}} \approx \begin{bmatrix} 0.3\times0.331 -0.2\time
 
 ---
 
-## 6. 工程实现
+## 7. 工程实现
 
 数学上的 SwiGLU 需要用两个权重矩阵 $W_g$ 和 $W_v$ 分别做两次矩阵乘法。但在实际部署中，这两次矩阵乘法**读取的是同一个输入 $x$**，完全可以合并为一个更大的矩阵乘法，从而节省一半的内存带宽。
 
-### 6.1 权重合并
+### 7.1 权重合并
 
 将 $W_v$ 和 $W_g$ 按列拼接：
 
@@ -186,7 +189,7 @@ x W_{\text{fused}} = \begin{bmatrix} 0.65 & -0.7 & 0.75 & -0.55 \end{bmatrix}
 
 前两维是 value，后两维是 gate。
 
-### 6.2 融合算子 `SiluAndMul`
+### 7.2 融合算子 `SiluAndMul`
 
 ```python
 class SiluAndMul(nn.Module):
@@ -210,7 +213,7 @@ def forward(self, x: torch.Tensor) -> torch.Tensor:
     return self.down_proj(self.act_fn(torch.cat([self.up_proj(x), self.gate_proj(x)], dim=-1)))
 ```
 
-### 6.3 效果
+### 7.3 效果
 
 - **减少显存读写**：输入 `x` 只需从显存读取一次，而不是两次，中间结果在寄存器/共享内存中直接完成激活和乘法。
 - **减少 kernel 启动**：`split + silu + multiply` 三个小操作融合成一个 CUDA kernel，省去两次中间结果的发射与读写。
