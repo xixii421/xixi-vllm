@@ -21,7 +21,7 @@ from utils.run_utils import handle_hub_cli, load_config, merge_cli  # noqa: E402
 
 from src.config import EngineConfig  # noqa: E402
 from src.engine import Engine  # noqa: E402
-from src.model_hub import resolve_model_path  # noqa: E402
+from utils.model_hub import resolve_model_path  # noqa: E402
 
 DEFAULTS = {
     "model": "Qwen3-0.6B",

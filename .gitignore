@@ -10,7 +10,11 @@
 # --- keep git meta / series docs ---
 !.gitignore
 !README.md
+!.python-version
+!pyproject.toml
+!uv.lock
 !项目介绍.md
+!BENCHMARK_RTX4060_LAPTOP.md
 !/utils/
 !/utils/**
 # only the helper under scripts/git/ (not other local scripts/)
@@ -36,6 +40,7 @@
 **/venv
 **/venv/
 **/.python-version
+!/.python-version
 **/__pycache__/
 **/*.py[cod]
 **/*$py.class

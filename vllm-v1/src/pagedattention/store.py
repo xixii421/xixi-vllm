@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 
+
 class PagedStore:
     """ 分页 KV 存储：write（本步 K/V 写入 slot）+ gather（按页表读回历史）。
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 
+
 def slots_tensor(
     block_table: list[int],
     start: int,
