@@ -59,7 +59,7 @@ class Worker:
         # 单机（loopback）用文件 rendezvous，不依赖 rank0 先起 TCPStore 的时序。
         if init_method is None and self.config.master_addr in ("", "127.0.0.1", "localhost"):
             init_method = (
-                f"file:///tmp/dzyy_vllm_rdv_{self.config.nccl_port}"
+                f"file:///tmp/xixi_vllm_rdv_{self.config.nccl_port}"
                 f"_{self.config.tp_size}_{self.config.pp_size}"
             )
         else:

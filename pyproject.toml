@@ -1,5 +1,5 @@
 [project]
-name = "dzyy-vllm"
+name = "xixi-vllm"
 version = "0.1.0"
 description = "A from-scratch Qwen3 v4 inference engine with tensor, pipeline, and data parallelism."
 readme = "README.md"
