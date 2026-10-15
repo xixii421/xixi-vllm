@@ -1,40 +1,21 @@
-# Teaching mini-vLLM series repo (vllm-v0 … vllm-v7)
-#
-# Strategy: ignore everything at the monorepo root, then explicitly
-# allow only the teaching version trees. Nested repos such as
-# dzyy_vllm/, ullm/, vllm/, nano-vllm/ stay untracked.
-
-# --- default: ignore all root entries ---
+# v4 engine, shared utilities, documentation and assets only.
 /*
-
-# --- keep git meta / series docs ---
 !.gitignore
 !README.md
 !.python-version
 !pyproject.toml
 !uv.lock
-!项目介绍.md
-!BENCHMARK_RTX4060_LAPTOP.md
-!/utils/
-!/utils/**
-# only the helper under scripts/git/ (not other local scripts/)
-!/scripts/
-/scripts/*
-!/scripts/git/
-!/scripts/git/**
-
-# --- teaching versions only ---
-!/vllm-v0/
-!/vllm-v1/
-!/vllm-v2/
-!/vllm-v3/
-!/vllm-v4/
-!/vllm-v5/
-!/vllm-v6/
-!/vllm-v7/
+!/assets/
+!/src/
+!/run.py
+!/run_torchrun.py
+!/config.yaml
+!/test/
+!/bench/
+!/docs/
 
 # --- never commit envs / caches / artifacts (any depth) ---
-# cover both real dirs and symlinks (e.g. vllm-v6/.venv -> v5)
+# cover both real directories and symlinks
 **/.venv
 **/.venv/
 **/venv
@@ -68,11 +49,6 @@
 **/*.pt.trace.json
 **/*.nsys-rep
 **/chrome_trace*.json
-
-# profiler 产出物（json trace / txt 汇总均可由脚本再生成，一律不入库）
-profiler/**/out/
-profiler/**/*.nsys-rep
-profiler/**/*.sqlite
 
 # Bench outputs / logs / local dumps
 **/bench/results/
