@@ -29,13 +29,15 @@ class Group:
         rank: int,
         device_group: ProcessGroup | None = None,
         cpu_group: ProcessGroup | None = None,
+        *,
+        owns_groups: bool = False,
     ):
         self.ranks = ranks
         self.rank = rank
         self.size = len(ranks)
         self.group_rank = ranks.index(rank)
-        self._owns_device_group = False
-        self._owns_cpu_group = False
+        self._owns_device_group = owns_groups and device_group is not None
+        self._owns_cpu_group = owns_groups and cpu_group is not None
         if device_group is not None:
             self.device_group = device_group
         elif self.size > 1:
@@ -115,6 +117,27 @@ def get_pp_group() -> Group:
     return PP
 
 
+def _create_parallel_group(rank_groups: list[list[int]], rank: int) -> Group:
+    """所有 WORLD rank 按同一顺序建组，仅持有本 rank 所属的子组。"""
+    world = get_world_group()
+    local_group = None
+    for ranks in rank_groups:
+        if ranks == world.ranks:
+            local_group = Group(ranks, rank, world.device_group, world.cpu_group)
+        elif len(ranks) == 1:
+            if rank in ranks:
+                local_group = Group(ranks, rank)
+        else:
+            device_group = dist.new_group(ranks=ranks)
+            cpu_group = dist.new_group(ranks=ranks, backend="gloo")
+            if rank in ranks:
+                local_group = Group(
+                    ranks, rank, device_group, cpu_group, owns_groups=True
+                )
+    assert local_group is not None, f"rank {rank} has no parallel group"
+    return local_group
+
+
 def initialize_model_parallel(
     tp_size: int,
     pp_size: int,
@@ -132,18 +155,23 @@ def initialize_model_parallel(
             f"invalid ranks: tp_rank={tp_rank}/{tp_size}, pp_rank={pp_rank}/{pp_size}"
         )
     my_rank = pp_rank * tp_size + tp_rank
-    tp_ranks = [pp_rank * tp_size + k for k in range(tp_size)]
-    pp_ranks = [k * tp_size + tp_rank for k in range(pp_size)]
-    if WORLD is not None and tp_ranks == WORLD.ranks:
-        TP = Group(
-            ranks=tp_ranks,
-            rank=my_rank,
-            device_group=WORLD.device_group,
-            cpu_group=WORLD.cpu_group,
-        )
-    else:
-        TP = Group(ranks=tp_ranks, rank=my_rank)
-    PP = Group(ranks=pp_ranks, rank=my_rank)
+    world = get_world_group()
+    if world.size != tp_size * pp_size or world.rank != my_rank:
+        raise ValueError("TP/PP layout does not match the initialized WORLD")
+    TP = _create_parallel_group(
+        [
+            [stage * tp_size + lane for lane in range(tp_size)]
+            for stage in range(pp_size)
+        ],
+        my_rank,
+    )
+    PP = _create_parallel_group(
+        [
+            [stage * tp_size + lane for stage in range(pp_size)]
+            for lane in range(tp_size)
+        ],
+        my_rank,
+    )
 
 
 def destroy_model_parallel() -> None:

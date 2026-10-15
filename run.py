@@ -21,6 +21,8 @@ ROOT = HERE
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src import Engine, EngineConfig, SamplingParams  # noqa: E402
+from src.model_hub import resolve_model_path  # noqa: E402
 from src.utils.run_utils import (  # noqa: E402
     cuda_sync,
     drain_engine,
@@ -30,9 +32,6 @@ from src.utils.run_utils import (  # noqa: E402
     print_bench_report,
     warmup_engine,
 )
-
-from src import Engine, EngineConfig, SamplingParams  # noqa: E402
-from src.model_hub import resolve_model_path  # noqa: E402
 
 DEFAULTS = {
     "model": "Qwen3-0.6B",
@@ -103,7 +102,7 @@ def _warmup(engine: Engine, prompt_lens: list[int]) -> float:
     return warmup_engine(
         prompt_lens,
         add_request=engine.add_request,
-        drain=lambda: drain_engine(engine.has_unfinished, engine.step),
+        drain=lambda: drain_engine(lambda: not engine.has_unfinished(), engine.step),
         sync=cuda_sync,
         sampling_params=warm_sp,
     )
@@ -112,83 +111,89 @@ def _warmup(engine: Engine, prompt_lens: list[int]) -> float:
 def run_single(cfg: dict) -> None:
     """单条推理：等长 dummy 先编译再录图，第三条起才计时。"""
     engine = _make_engine(cfg)
-    prompt = cfg["prompt"]
-    token_ids = (
-        list(prompt) if isinstance(prompt, list) else engine.tokenizer.encode(prompt)
-    )
-    warmup_s = _warmup(engine, [len(token_ids)])
+    try:
+        prompt = cfg["prompt"]
+        token_ids = (
+            list(prompt) if isinstance(prompt, list) else engine.tokenizer.encode(prompt)
+        )
+        warmup_s = _warmup(engine, [len(token_ids)])
 
-    sp = SamplingParams(
-        temperature=cfg["temperature"],
-        top_p=cfg["top_p"],
-        top_k=cfg["top_k"],
-        max_tokens=cfg["max_new_tokens"],
-    )
-    seq = engine.add_request(token_ids, sp)
+        sp = SamplingParams(
+            temperature=cfg["temperature"],
+            top_p=cfg["top_p"],
+            top_k=cfg["top_k"],
+            max_tokens=cfg["max_new_tokens"],
+        )
+        seq = engine.add_request(token_ids, sp)
 
-    cuda_sync()
-    t0 = time.perf_counter()
-    t_first = None
-    while not seq.is_finished:
-        engine.step()
-        if t_first is None and seq.num_completion_tokens > 0:
-            cuda_sync()
-            t_first = time.perf_counter()
-    cuda_sync()
-    t_end = time.perf_counter()
+        cuda_sync()
+        t0 = time.perf_counter()
+        t_first = None
+        while not seq.is_finished:
+            engine.step()
+            if t_first is None and seq.num_completion_tokens > 0:
+                cuda_sync()
+                t_first = time.perf_counter()
+        cuda_sync()
+        t_end = time.perf_counter()
 
-    completion = seq.token_ids[seq.num_prompt_tokens :]
-    text = engine.tokenizer.decode(completion)
-    print(f"Prompt: {prompt}")
-    print(f"{prompt}{text}")
-    print_bench_report(
-        (t_first - t0) if t_first is not None else None,
-        len(completion),
-        t_end - t0,
-        decode_s=(t_end - t_first) if t_first is not None else None,
-        warmup_s=warmup_s,
-    )
+        completion = seq.token_ids[seq.num_prompt_tokens :]
+        text = engine.tokenizer.decode(completion)
+        print(f"Prompt: {prompt}")
+        print(f"{prompt}{text}")
+        print_bench_report(
+            (t_first - t0) if t_first is not None else None,
+            len(completion),
+            t_end - t0,
+            decode_s=(t_end - t_first) if t_first is not None else None,
+            warmup_s=warmup_s,
+        )
+    finally:
+        engine.destroy()
 
 
 def run_batch(cfg: dict) -> None:
     """批量推理：按各 prompt 等长 dummy 预热后计时。"""
     engine = _make_engine(cfg)
-    prompts = [
-        "Hello, my name is",
-        "Once upon a time",
-        "The capital of France is",
-        "In machine learning,",
-    ]
-    encoded = [engine.tokenizer.encode(p) for p in prompts]
-    warmup_s = _warmup(engine, [len(ids) for ids in encoded])
+    try:
+        prompts = [
+            "Hello, my name is",
+            "Once upon a time",
+            "The capital of France is",
+            "In machine learning,",
+        ]
+        encoded = [engine.tokenizer.encode(p) for p in prompts]
+        warmup_s = _warmup(engine, [len(ids) for ids in encoded])
 
-    sp = SamplingParams(temperature=0.0, max_tokens=cfg["max_new_tokens"])
-    seqs = [engine.add_request(ids, sp) for ids in encoded]
+        sp = SamplingParams(temperature=0.0, max_tokens=cfg["max_new_tokens"])
+        seqs = [engine.add_request(ids, sp) for ids in encoded]
 
-    cuda_sync()
-    t0 = time.perf_counter()
-    t_first = None
-    while engine.has_unfinished():
-        engine.step()
-        if t_first is None and any(s.num_completion_tokens > 0 for s in seqs):
-            cuda_sync()
-            t_first = time.perf_counter()
-    cuda_sync()
-    t_end = time.perf_counter()
+        cuda_sync()
+        t0 = time.perf_counter()
+        t_first = None
+        while engine.has_unfinished():
+            engine.step()
+            if t_first is None and any(s.num_completion_tokens > 0 for s in seqs):
+                cuda_sync()
+                t_first = time.perf_counter()
+        cuda_sync()
+        t_end = time.perf_counter()
 
-    n = 0
-    for p, seq in zip(prompts, seqs):
-        ids = seq.token_ids[seq.num_prompt_tokens :]
-        n += len(ids)
-        print(f"\n>>> {p}\n{engine.tokenizer.decode(ids)}")
-    print_bench_report(
-        (t_first - t0) if t_first is not None else None,
-        n,
-        t_end - t0,
-        decode_s=(t_end - t_first) if t_first is not None else None,
-        warmup_s=warmup_s,
-    )
-    print(f"Batch:  {len(prompts)} reqs, {n} completion tokens")
+        n = 0
+        for p, seq in zip(prompts, seqs):
+            ids = seq.token_ids[seq.num_prompt_tokens :]
+            n += len(ids)
+            print(f"\n>>> {p}\n{engine.tokenizer.decode(ids)}")
+        print_bench_report(
+            (t_first - t0) if t_first is not None else None,
+            n,
+            t_end - t0,
+            decode_s=(t_end - t_first) if t_first is not None else None,
+            warmup_s=warmup_s,
+        )
+        print(f"Batch:  {len(prompts)} reqs, {n} completion tokens")
+    finally:
+        engine.destroy()
 
 
 def main() -> None:
