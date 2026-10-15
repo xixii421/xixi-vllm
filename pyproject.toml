@@ -27,9 +27,6 @@ dependencies = [
 dev = [
     "ruff>=0.12.0",
 ]
-docs = [
-    "matplotlib>=3.9.0",
-]
 modelscope = [
     "modelscope>=1.20.0",
 ]

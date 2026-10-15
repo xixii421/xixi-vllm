@@ -12,7 +12,6 @@
 !/config.yaml
 !/test/
 !/bench/
-!/docs/
 
 # --- never commit envs / caches / artifacts (any depth) ---
 # cover both real directories and symlinks

@@ -82,7 +82,7 @@ def suite_smoke() -> list[dict]:
 
 
 def suite_full() -> list[dict]:
-    """对齐 docs/03-性能对比.md 的主矩阵（本机 2 卡可跑的部分）。"""
+    """单卡及双卡 TP / PP / DP 的完整基准矩阵。"""
     base = [
         {
             "engine": "v4",

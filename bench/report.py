@@ -1,4 +1,4 @@
-"""从 bench.jsonl 生成 Markdown 表，便于贴进 docs/03-性能对比.md。
+"""从 bench.jsonl 生成 Markdown 基准结果表。
 
 用法:
   python bench/report.py
